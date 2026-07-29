@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import re
 import time
+from pathlib import Path
 
 from playwright.sync_api import Page, expect
 
@@ -142,7 +143,7 @@ def test_new_shell_accepts_typed_command(page: Page, terminal_session: tuple[str
 
 
 def test_shell_wheel_scroll_reaches_mouse_tracking_program(
-    page: Page, terminal_session: tuple[str, str], tmp_path
+    page: Page, terminal_session: tuple[str, str], tmp_path: Path
 ) -> None:
     """Trackpad-sized wheel deltas reach a mouse-tracking TUI as SGR reports.
 
