@@ -815,18 +815,27 @@ export function ForkSessionForm({
                     />
                     {/* Base ref only matters when a NEW worktree will be
                         created — reusing the source's existing worktree
-                        ignores it, so hide it to avoid implying otherwise. */}
+                        ignores it, so hide it to avoid implying otherwise.
+                        Visibly labeled: prefilled with the source branch, an
+                        unlabeled input reads as a second worktree box. */}
                     {branchName.trim() !== "" && !usingSourceWorktree && (
-                      <input
-                        id="fork-session-base-branch"
-                        type="text"
-                        value={baseBranch}
-                        onChange={(e) => setBaseBranch(e.target.value)}
-                        placeholder="Base branch (defaults to the current branch)"
-                        aria-label="Base branch"
-                        data-testid="fork-session-base-branch-input"
-                        className="rounded-md border border-input bg-background px-3 py-2 font-mono text-xs outline-none transition-colors focus-visible:border-ring"
-                      />
+                      <>
+                        <label
+                          htmlFor="fork-session-base-branch"
+                          className="mt-1 text-xs font-medium text-muted-foreground"
+                        >
+                          Base branch
+                        </label>
+                        <input
+                          id="fork-session-base-branch"
+                          type="text"
+                          value={baseBranch}
+                          onChange={(e) => setBaseBranch(e.target.value)}
+                          placeholder="Base branch (defaults to the current branch)"
+                          data-testid="fork-session-base-branch-input"
+                          className="rounded-md border border-input bg-background px-3 py-2 font-mono text-xs outline-none transition-colors focus-visible:border-ring"
+                        />
+                      </>
                     )}
                     <p className="text-xs text-muted-foreground">
                       {usingSourceWorktree
