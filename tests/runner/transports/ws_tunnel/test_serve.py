@@ -398,6 +398,14 @@ async def test_serve_tunnel_fails_loud_on_auth_redirect(
     )
     attempts: list[int] = []
     sleeps: list[float] = []
+    reconnects: list[int] = []
+
+    async def _on_reconnect() -> None:
+        """Record a catch-up scan that must never fire pre-upgrade.
+
+        :returns: None.
+        """
+        reconnects.append(1)
 
     async def _serve_once(
         app: Any,
@@ -443,10 +451,14 @@ async def test_serve_tunnel_fails_loud_on_auth_redirect(
             server_url="https://example.databricksapps.com",
             runner_id="runner_redirected",
             runner_version="0.1.0",
+            on_reconnect=_on_reconnect,
         )
     # A couple of retries rule out a transient server restart, then fatal.
     assert len(attempts) == 3
     assert sleeps == [0.5, 1.0]
+    # No upgrade was ever accepted, so the catch-up scan never runs
+    # during the initial login-redirect loop.
+    assert reconnects == []
     message = str(exc_info.value)
     # The standard rejection prefix is preserved so
     # ``_entry.main`` recognizes the failure as the fatal class

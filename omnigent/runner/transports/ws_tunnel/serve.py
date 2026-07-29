@@ -326,11 +326,11 @@ async def serve_tunnel(
     """
     delay_s = _INITIAL_RECONNECT_DELAY_S
     tunnel_url = _tunnel_url(server_url, runner_id)
-    _connected_before = False
     # Set on the first accepted WS upgrade. Distinguishes a runner that
     # never authenticated (login redirects turn fatal after a short
-    # streak) from a live runner whose bearer expired mid-session
-    # (login redirects retry with refreshed credentials forever).
+    # streak; no catch-up scan) from a live runner whose bearer expired
+    # mid-session (login redirects retry with refreshed credentials
+    # forever).
     ever_connected = False
     # Consecutive login-page redirects; reset by a successful upgrade.
     login_redirect_streak = 0
@@ -346,7 +346,7 @@ async def serve_tunnel(
             # connection to drain): nothing to flush, just stop looping.
             return
         auth_token = await _refresh_auth_token(auth_token, auth_token_factory)
-        if _connected_before and on_reconnect is not None:
+        if ever_connected and on_reconnect is not None:
             try:
                 await on_reconnect()
             except Exception:
@@ -354,7 +354,6 @@ async def serve_tunnel(
         retry_reason = "connection closed cleanly"
         recycle = False
         try:
-            _connected_before = True
             activity_kwargs = {"on_activity": on_activity} if on_activity is not None else {}
             await _serve_tunnel_once(
                 app,
