@@ -45,7 +45,7 @@ import sys
 import tarfile
 import textwrap
 import time
-from collections.abc import Generator, Iterator
+from collections.abc import Callable, Generator, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -778,6 +778,8 @@ def _spawn_runner_against_external_server(
     # that depend on ``server_pid`` (only valid when this fixture spawns
     # the server too) will KeyError, which is the right failure shape.
     _server_state["runner_id"] = runner_id
+    # The owned runner's PID, for kill tests (see owned_runner_pids).
+    _server_state["runner_pid"] = proc.pid
     # Exposed so a test whose predecessor killed the shared runner (e.g.
     # test_stale_stream) can respawn one via :func:`_ensure_runner_online`.
     _server_state["binding_token"] = binding_token
@@ -1004,6 +1006,8 @@ def live_server(
 
     _server_state["pid"] = proc.pid
     _server_state["runner_id"] = runner_id
+    # The owned runner's PID, for kill tests (see owned_runner_pids).
+    _server_state["runner_pid"] = runner_proc.pid
     # Exposed so a test whose predecessor killed the shared runner (e.g.
     # test_stale_stream) can respawn one via :func:`_ensure_runner_online`.
     _server_state["binding_token"] = binding_token
@@ -1201,6 +1205,9 @@ def _ensure_runner_online(
         stderr=subprocess.STDOUT,
     )
     log_handle.close()  # child holds its own dup of the fd
+    # Keep the tracked PID current so kill tests target the respawn,
+    # not the corpse it replaced (see owned_runner_pids).
+    _server_state["runner_pid"] = proc.pid
 
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
@@ -1215,6 +1222,26 @@ def _ensure_runner_online(
 
     proc.terminate()
     raise RuntimeError(f"respawned runner did not register within {timeout_s:.0f}s")
+
+
+@pytest.fixture
+def owned_runner_pids() -> Callable[[], list[int]]:
+    """Provide the conftest-spawned runner's PID for runner-kill tests.
+
+    Kill tests must target only the fixture-owned runner process.
+    Discovering victims by command-line pattern (``pgrep -f
+    omnigent.runner._entry``) matches every runner on the machine, so on
+    a dev box it SIGKILLs the runners of unrelated live sessions.
+
+    :returns: Zero-arg callable reading the currently tracked runner
+        PID (read at kill time, so it follows fixture-driven respawns).
+    """
+
+    def _pids() -> list[int]:
+        pid = _server_state.get("runner_pid")
+        return [int(pid)] if pid is not None else []
+
+    return _pids
 
 
 @pytest.fixture

@@ -17,37 +17,17 @@ from __future__ import annotations
 import os
 import re
 import signal
-import subprocess
 import time
+from collections.abc import Callable
 
 import httpx
 from playwright.sync_api import Page, expect
 
 
-def _find_runner_pids() -> list[int]:
-    """
-    Find all PIDs running the runner entry point
-    (``omnigent.runner._entry``).
-
-    The runner is a sibling subprocess of the server (both spawned
-    by the test fixture), so we search by command-line pattern
-    rather than by parent PID.
-
-    :returns: List of runner PIDs (may be empty).
-    """
-    result = subprocess.run(
-        ["pgrep", "-f", "omnigent.runner._entry"],
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        return []
-    return [int(line.strip()) for line in result.stdout.strip().splitlines() if line.strip()]
-
-
 def test_stale_banner_on_runner_crash(
     page: Page,
     seeded_session: tuple[str, str],
+    owned_runner_pids: Callable[[], list[int]],
 ) -> None:
     """
     Open a pre-created session, send a message, kill the runner while
@@ -60,6 +40,8 @@ def test_stale_banner_on_runner_crash(
     :param page: Playwright page fixture.
     :param seeded_session: ``(base_url, session_id)`` of a pre-created
         session bound to the running runner.
+    :param owned_runner_pids: Callable returning the fixture-owned
+        runner PID — the only process this test may kill.
     """
     live_server, session_id = seeded_session
     page.goto(f"{live_server}/c/{session_id}")
@@ -86,16 +68,10 @@ def test_stale_banner_on_runner_crash(
         f"Health endpoint should report runner_online=true before kill, got: {health_before}"
     )
 
-    # Kill the runner (sibling of the server, not a child).
-    runner_pids = _find_runner_pids()
-    assert runner_pids, (
-        "No runner processes found. Process tree:\n"
-        + subprocess.run(
-            ["ps", "-ef"],
-            capture_output=True,
-            text=True,
-        ).stdout[:2000]
-    )
+    # Kill the fixture-owned runner. Only the tracked PID — pattern
+    # discovery would also match unrelated runners on a dev machine.
+    runner_pids = owned_runner_pids()
+    assert runner_pids, "conftest did not record a runner_pid for this server"
     for pid in runner_pids:
         os.kill(pid, signal.SIGKILL)
 

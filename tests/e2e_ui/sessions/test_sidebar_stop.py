@@ -24,33 +24,16 @@ from __future__ import annotations
 import os
 import re
 import signal
-import subprocess
+from collections.abc import Callable
 
 import httpx
 from playwright.sync_api import Page, expect
 
 
-def _find_runner_pids() -> list[int]:
-    """Find PIDs of the runner entry point (``omnigent.runner._entry``).
-
-    The runner is a sibling subprocess of the server (both spawned by the
-    fixture), so we match on the command line rather than the parent PID.
-
-    :returns: List of runner PIDs (may be empty).
-    """
-    result = subprocess.run(
-        ["pgrep", "-f", "omnigent.runner._entry"],
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        return []
-    return [int(line.strip()) for line in result.stdout.strip().splitlines() if line.strip()]
-
-
 def test_stopped_session_shows_reconnect_affordance(
     page: Page,
     seeded_session: tuple[str, str],
+    owned_runner_pids: Callable[[], list[int]],
 ) -> None:
     """A dropped runner flips the open chat to the reconnect banner + dialog.
 
@@ -70,6 +53,8 @@ def test_stopped_session_shows_reconnect_affordance(
     :param page: Playwright page fixture (fresh context per test).
     :param seeded_session: ``(base_url, session_id)`` for a pre-created
         runner-bound session.
+    :param owned_runner_pids: Callable returning the fixture-owned
+        runner PID — the only process this test may kill.
     """
     base_url, session_id = seeded_session
 
@@ -93,8 +78,10 @@ def test_stopped_session_shows_reconnect_affordance(
         f"runner should be online before the kill, got: {health}"
     )
 
-    runner_pids = _find_runner_pids()
-    assert runner_pids, "no runner processes found to stop"
+    # Only the fixture-owned runner — pattern discovery would also
+    # match unrelated runners on a dev machine.
+    runner_pids = owned_runner_pids()
+    assert runner_pids, "conftest did not record a runner_pid for this server"
     for pid in runner_pids:
         os.kill(pid, signal.SIGKILL)
 
