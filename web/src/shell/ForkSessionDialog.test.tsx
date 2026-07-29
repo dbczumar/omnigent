@@ -11,7 +11,7 @@ import { useSessionAgent } from "@/hooks/useAgents";
 import { useHosts, type Host } from "@/hooks/useHosts";
 import { useDirectorySessions } from "@/hooks/useDirectorySessions";
 import { useRunnerHealthRegistration } from "@/hooks/RunnerHealthProvider";
-import { useHostFilesystem } from "@/hooks/useHostFilesystem";
+import { checkHostDirectory, useHostFilesystem } from "@/hooks/useHostFilesystem";
 
 const navigateMock = vi.fn();
 vi.mock("react-router-dom", async (importOriginal) => {
@@ -24,7 +24,10 @@ vi.mock("@/hooks/useAgents", () => ({ useSessionAgent: vi.fn() }));
 vi.mock("@/hooks/useHosts", () => ({ useHosts: vi.fn() }));
 vi.mock("@/hooks/useDirectorySessions", () => ({ useDirectorySessions: vi.fn() }));
 vi.mock("@/hooks/RunnerHealthProvider", () => ({ useRunnerHealthRegistration: vi.fn() }));
-vi.mock("@/hooks/useHostFilesystem", () => ({ useHostFilesystem: vi.fn() }));
+vi.mock("@/hooks/useHostFilesystem", () => ({
+  useHostFilesystem: vi.fn(),
+  checkHostDirectory: vi.fn(),
+}));
 // The tree browser only mounts when browsing; coding-fork tests rely on the
 // directory being prefilled from the source, so the real picker never opens —
 // stub it anyway to keep its filesystem fetch out of the test.
@@ -45,6 +48,7 @@ const useHostsMock = vi.mocked(useHosts);
 const useDirectorySessionsMock = vi.mocked(useDirectorySessions);
 const useRunnerHealthMock = vi.mocked(useRunnerHealthRegistration);
 const useHostFilesystemMock = vi.mocked(useHostFilesystem);
+const checkHostDirectoryMock = vi.mocked(checkHostDirectory);
 
 function host(overrides: Partial<Host> = {}): Host {
   return {
@@ -151,6 +155,10 @@ beforeEach(() => {
   forkSessionMock.mockReset();
   launchRunnerMock.mockReset();
   navigateMock.mockReset();
+  // The submit pre-flight passes by default; the nonexistent-directory
+  // test overrides it with a failure message.
+  checkHostDirectoryMock.mockReset();
+  checkHostDirectoryMock.mockResolvedValue(null);
   setAgents(AVAILABLE_AGENTS, "claude-sdk");
   // Defaults for the coding-fork wiring; the non-coding tests don't render
   // these fields but the hooks still run (with isCodingSource false).
@@ -582,6 +590,118 @@ describe("ForkSessionDialog", () => {
         branchName: "feature/x",
         baseBranch: "main",
       });
+    });
+
+    // Source session that ran in a server-created worktree: its workspace is
+    // the worktree dir and gitBranch the branch checked out there.
+    const WORKTREE_CODING = {
+      sourceTitle: "My session",
+      sourceWorkspace: "/Users/a/repo-worktrees/fix-1",
+      sourceHostId: "host_1",
+      sourceGitBranch: "fix-1",
+    };
+
+    it("prefills a worktree-backed source as original repo + source branch", () => {
+      renderDialog(WORKTREE_CODING);
+      openAdvanced();
+      // The working directory shows the repo the worktree came from, and the
+      // worktree field carries the source branch — not the worktree path as
+      // the directory with a blank branch.
+      expect(screen.getByTestId("workspace-path-input")).toHaveValue("/Users/a/repo");
+      expect(screen.getByTestId("fork-session-branch-input")).toHaveValue("fix-1");
+    });
+
+    it("binds the clone to the source's existing worktree when left untouched", async () => {
+      forkSessionMock.mockResolvedValue({
+        id: "conv_fork",
+      } as unknown as Awaited<ReturnType<typeof forkSession>>);
+      launchRunnerMock.mockResolvedValue({ runnerId: "r1" });
+      renderDialog(WORKTREE_CODING);
+
+      fireEvent.click(screen.getByTestId("fork-session-submit"));
+
+      await waitFor(() => expect(launchRunnerMock).toHaveBeenCalledTimes(1));
+      // The prefilled branch already exists, so no git options are sent —
+      // the clone binds straight to the source's worktree directory. The
+      // pre-flight probed that same directory.
+      expect(launchRunnerMock).toHaveBeenCalledWith(
+        "host_1",
+        "conv_fork",
+        "/Users/a/repo-worktrees/fix-1",
+        undefined,
+      );
+      expect(checkHostDirectoryMock).toHaveBeenCalledWith(
+        "host_1",
+        "/Users/a/repo-worktrees/fix-1",
+      );
+    });
+
+    it("creates a fresh worktree off the source branch when the branch is renamed", async () => {
+      forkSessionMock.mockResolvedValue({
+        id: "conv_fork",
+      } as unknown as Awaited<ReturnType<typeof forkSession>>);
+      launchRunnerMock.mockResolvedValue({ runnerId: "r1" });
+      renderDialog(WORKTREE_CODING);
+
+      openAdvanced();
+      fireEvent.change(screen.getByTestId("fork-session-branch-input"), {
+        target: { value: "feature/x" },
+      });
+      fireEvent.click(screen.getByTestId("fork-session-submit"));
+
+      await waitFor(() => expect(launchRunnerMock).toHaveBeenCalledTimes(1));
+      // A NEW branch name → worktree created off the original repo, based on
+      // the source's branch so the clone starts from where it left off.
+      expect(launchRunnerMock).toHaveBeenCalledWith("host_1", "conv_fork", "/Users/a/repo", {
+        branchName: "feature/x",
+        baseBranch: "fix-1",
+      });
+    });
+
+    it("recognizes a worktree source without gitBranch (fork-of-fork) via the path", async () => {
+      // A fork bound into an existing worktree carries NO git_branch (the
+      // bind sends no git options), so forking the fork must recover both
+      // the repo and the branch from the worktree path convention — the
+      // branch falls back to the worktree's directory name.
+      forkSessionMock.mockResolvedValue({
+        id: "conv_fork",
+      } as unknown as Awaited<ReturnType<typeof forkSession>>);
+      launchRunnerMock.mockResolvedValue({ runnerId: "r1" });
+      renderDialog({ ...WORKTREE_CODING, sourceGitBranch: null });
+
+      openAdvanced();
+      expect(screen.getByTestId("workspace-path-input")).toHaveValue("/Users/a/repo");
+      expect(screen.getByTestId("fork-session-branch-input")).toHaveValue("fix-1");
+
+      fireEvent.click(screen.getByTestId("fork-session-submit"));
+
+      await waitFor(() => expect(launchRunnerMock).toHaveBeenCalledTimes(1));
+      // Untouched → same aliasing as a gitBranch-carrying source: bind the
+      // exact source worktree directory with no git options.
+      expect(launchRunnerMock).toHaveBeenCalledWith(
+        "host_1",
+        "conv_fork",
+        "/Users/a/repo-worktrees/fix-1",
+        undefined,
+      );
+    });
+
+    it("refuses to create the fork when the directory doesn't exist", async () => {
+      checkHostDirectoryMock.mockResolvedValue(
+        "The working directory /repo doesn't exist on this host.",
+      );
+      renderDialog(CODING);
+
+      fireEvent.click(screen.getByTestId("fork-session-submit"));
+
+      await waitFor(() =>
+        expect(screen.getByTestId("fork-session-error")).toHaveTextContent("doesn't exist"),
+      );
+      // Nothing was created: no fork, no launch, no navigation — the inputs
+      // stay editable so the user can fix the path and resubmit.
+      expect(forkSessionMock).not.toHaveBeenCalled();
+      expect(launchRunnerMock).not.toHaveBeenCalled();
+      expect(navigateMock).not.toHaveBeenCalled();
     });
 
     it("disables the fork button and shows connect-host instructions when no host is online", () => {

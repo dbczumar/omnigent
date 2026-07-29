@@ -37,6 +37,7 @@ import { useDirectorySessions } from "@/hooks/useDirectorySessions";
 import { useRunnerHealthRegistration } from "@/hooks/RunnerHealthProvider";
 import { useRecentWorkspaces } from "@/hooks/useRecentWorkspaces";
 import { agentRootName, forkTargetCarriesHistory } from "@/lib/forkHarness";
+import { checkHostDirectory } from "@/hooks/useHostFilesystem";
 import { getCliServerUrl } from "@/lib/host";
 import { WorkspacePicker, isNavigablePath } from "./WorkspacePicker";
 import { WorkspacePathField } from "./WorkspacePathField";
@@ -81,6 +82,25 @@ function HostLabel({ host }: { host: Host }) {
 }
 
 /**
+ * Split a server-created worktree path into the repo it came from and
+ * the worktree's directory name, or null when the path doesn't look
+ * like one. The host creates worktrees as
+ * ``<parent>/<repo>-worktrees/<branch-dir>`` siblings of the repo
+ * (``branch-dir`` is the sanitized branch name), so
+ * ``/Users/a/proj-worktrees/fix`` → repo ``/Users/a/proj``,
+ * branchDir ``fix``.
+ */
+function splitWorktreePath(workspace: string): { repo: string; branchDir: string } | null {
+  const slash = workspace.lastIndexOf("/");
+  if (slash <= 0 || slash === workspace.length - 1) return null;
+  const parent = workspace.slice(0, slash);
+  if (!parent.endsWith("-worktrees")) return null;
+  const repo = parent.slice(0, -"-worktrees".length);
+  if (!repo.includes("/") || repo.endsWith("/")) return null;
+  return { repo, branchDir: workspace.slice(slash + 1) };
+}
+
+/**
  * Prefill for the fork's title input. Mirrors the server's
  * `"Fork of <title>"` derivation when the source has a title; when it
  * doesn't, returns "" so submitting omits the title and the server
@@ -107,7 +127,11 @@ function defaultForkTitle(sourceTitle: string | null | undefined): string {
  * (``POST /v1/hosts/{id}/runners``). For a non-coding source there is no
  * directory to pick, so it forks with just name + agent.
  *
- * The fork call is the only thing the form awaits: on success it closes and
+ * Before creating anything, a coding fork pre-flights the picked directory
+ * against the host (it must exist and be listable) — the launch below is
+ * detached, so a bad path would otherwise produce a clone that silently
+ * never starts. After that, the fork call is the only thing the form
+ * awaits: on success it closes and
  * navigates into the clone IMMEDIATELY, and (for a coding source) fires the
  * runner launch in the background. Holding the dialog through the launch
  * blocks for as long as a worktree create takes (up to minutes) and hangs
@@ -117,9 +141,13 @@ function defaultForkTitle(sourceTitle: string | null | undefined): string {
  * failure (nothing created) surfaces inline and the inputs stay editable for
  * a straight resubmit.
  *
- * Host/dir prefill from the *source*: its host is the default (when online),
- * its workspace the default directory, and — when the source used a worktree
- * — its branch the default base ref. The Fork button greys out until a valid
+ * Host/dir prefill from the *source*: its host is the default (when online)
+ * and its workspace the default directory. When the source ran in a
+ * server-created worktree, the prefill is instead the ORIGINAL repo as the
+ * directory plus the source branch in the worktree field; submitted
+ * untouched, the clone binds to the source's existing worktree directory
+ * (renaming the branch creates a fresh worktree off the source branch,
+ * which prefills the base ref). The Fork button greys out until a valid
  * online host + directory are chosen (no CLI fallback).
  *
  * All form state lives here, inside the dialog content, so closing the
@@ -213,6 +241,21 @@ export function ForkSessionForm({
   const onDifferentHost =
     isCodingSource && selectedHostId !== null && selectedHostId !== sourceHostId;
 
+  const sourceWorkspaceNorm = sourceWorkspace ? normalizeWorkspacePath(sourceWorkspace) : null;
+  // Source ran in a server-created git worktree (its workspace IS the
+  // worktree dir). Recover the repo the worktree was created from so the
+  // form can present the pair as "original repo + worktree" rather than
+  // the worktree path as the working directory. Recognized from the path
+  // convention alone: a fork bound into an existing worktree carries no
+  // gitBranch, so requiring one would miss fork-of-fork sources.
+  const sourceWorktree =
+    sourceWorkspaceNorm !== null ? splitWorktreePath(sourceWorkspaceNorm) : null;
+  const sourceRepo = sourceWorktree?.repo ?? null;
+  // Branch shown in the worktree field (and used as the new-branch base):
+  // the session's recorded branch when present, else the worktree's
+  // directory name — the sanitized branch it was created from.
+  const sourceBranch = sourceGitBranch ?? sourceWorktree?.branchDir ?? null;
+
   // The source's bound agent, reduced to its ROOT name by peeling every
   // " (fork <id>)" / " (switch <id>)" clone suffix the fork/switch routes
   // append. A fork-of-a-fork or a switched session is named e.g.
@@ -280,24 +323,44 @@ export function ForkSessionForm({
 
   // Prefill the directory with the source's workspace — but only when staying
   // on the source host. On a different host that path is a different machine,
-  // so leave it blank for the user to pick.
+  // so leave it blank for the user to pick. A worktree-backed source prefills
+  // as its ORIGINAL repo + the source branch in the worktree field (the pair
+  // its workspace was created from), not the raw worktree path.
   useEffect(() => {
-    if (onSourceHost && workspace === "" && sourceWorkspace) {
+    if (!onSourceHost || workspace !== "" || !sourceWorkspace) return;
+    if (sourceRepo !== null && sourceBranch !== null) {
+      setWorkspace(sourceRepo);
+      setBranchName(sourceBranch);
+    } else {
       setWorkspace(sourceWorkspace);
     }
-  }, [onSourceHost, workspace, sourceWorkspace]);
+  }, [onSourceHost, workspace, sourceWorkspace, sourceRepo, sourceBranch]);
 
-  // When the source used a worktree, default the base ref to that branch so
+  // When the source used a worktree, default the base ref to its branch so
   // the clone branches off where the original left work — again only on the
   // source host, where that branch exists.
   useEffect(() => {
-    if (onSourceHost && baseBranch === "" && sourceGitBranch) {
-      setBaseBranch(sourceGitBranch);
+    if (onSourceHost && baseBranch === "" && sourceBranch) {
+      setBaseBranch(sourceBranch);
     }
-  }, [onSourceHost, baseBranch, sourceGitBranch]);
+  }, [onSourceHost, baseBranch, sourceBranch]);
 
   const workspaceTrimmed = normalizeWorkspacePath(workspace) ?? "";
   const workspaceValid = isValidWorkspace(workspace);
+  // The prefilled repo + source-branch pair left untouched: that branch
+  // already exists (with a live worktree), so instead of asking the server
+  // to create it — which would fail — the clone binds straight to the
+  // source's existing worktree directory, exactly like reusing a plain
+  // source directory.
+  const usingSourceWorktree =
+    onSourceHost &&
+    sourceRepo !== null &&
+    sourceBranch !== null &&
+    workspaceTrimmed === sourceRepo &&
+    branchName.trim() === sourceBranch;
+  // Directory the clone will actually start in — feeds the conflict check,
+  // the reuse-dir tooltip, the pre-flight, and the launch itself.
+  const effectiveWorkspace = usingSourceWorktree ? (sourceWorkspaceNorm ?? "") : workspaceTrimmed;
   // The picked host must still be ONLINE, not merely selected: hosts refetch
   // periodically, so a previously-picked host can go offline while selected.
   // Gating on online-ness keeps the button greyed (and avoids a launchRunner
@@ -327,12 +390,15 @@ export function ForkSessionForm({
       sessionsSharingDirectory(
         conflictCandidates,
         selectedHostId,
-        workspaceTrimmed,
+        effectiveWorkspace,
         (id) => runnerHealth.get(id) === true,
       ),
-    [conflictCandidates, selectedHostId, workspaceTrimmed, runnerHealth],
+    [conflictCandidates, selectedHostId, effectiveWorkspace, runnerHealth],
   );
-  const showConflictHint = branchName.trim() === "" && conflictingSessions.length > 0;
+  // A NEW branch means an isolated worktree, so no conflict; reusing the
+  // source's existing worktree shares its directory like a blank branch does.
+  const showConflictHint =
+    (branchName.trim() === "" || usingSourceWorktree) && conflictingSessions.length > 0;
 
   // Reveal Advanced (once) only when running on a DIFFERENT host than the
   // source — a fresh directory must be picked there, so the field can't stay
@@ -351,7 +417,6 @@ export function ForkSessionForm({
   // grounded in the source's directory ON the source's host. A different
   // directory — or a different host, where even an identical path is a
   // different machine — won't resolve them, so the agent must re-orient.
-  const sourceWorkspaceNorm = sourceWorkspace ? normalizeWorkspacePath(sourceWorkspace) : null;
   const hostMismatch =
     sourceHostId != null && selectedHostId !== null && selectedHostId !== sourceHostId;
   const showMismatchWarning =
@@ -359,7 +424,10 @@ export function ForkSessionForm({
     ((hostMismatch && workspaceTrimmed !== "") ||
       (sourceWorkspaceNorm !== null &&
         workspaceTrimmed !== "" &&
-        workspaceTrimmed !== sourceWorkspaceNorm));
+        workspaceTrimmed !== sourceWorkspaceNorm &&
+        // The source's original repo (which worktree sources prefill) is
+        // the same lineage as its worktree — not a mismatch.
+        (sourceRepo === null || workspaceTrimmed !== sourceRepo)));
 
   // Default state: a coding clone on the source host still pointed at the
   // source's directory. Drives the "reuses the original's working directory"
@@ -378,6 +446,17 @@ export function ForkSessionForm({
     setSubmitting(true);
     setError(null);
     try {
+      // Pre-flight the directory BEFORE creating anything: the runner
+      // launch below is detached and its failure is swallowed, so a
+      // nonexistent path would otherwise leave a clone that silently
+      // never starts.
+      if (isCodingSource && selectedHostId) {
+        const problem = await checkHostDirectory(selectedHostId, effectiveWorkspace);
+        if (problem !== null) {
+          setError(problem);
+          return;
+        }
+      }
       const trimmed = title.trim();
       // Empty title → omit so the server derives "Fork of <source title>".
       const fork = await forkSession(
@@ -396,11 +475,13 @@ export function ForkSessionForm({
       if (isCodingSource && selectedHostId) {
         const trimmedBranch = branchName.trim();
         addRecent(workspaceTrimmed);
+        // Reusing the source's worktree binds its directory directly (no
+        // git options — the branch already exists, creating it would fail).
         void launchRunner(
           selectedHostId,
           fork.id,
-          workspaceTrimmed,
-          trimmedBranch
+          effectiveWorkspace,
+          trimmedBranch !== "" && !usingSourceWorktree
             ? { branchName: trimmedBranch, baseBranch: baseBranch.trim() || undefined }
             : undefined,
         ).catch((e) => {
@@ -589,7 +670,7 @@ export function ForkSessionForm({
                   working directory
                 </button>
               </TooltipTrigger>
-              <TooltipContent className="font-mono break-all">{workspaceTrimmed}</TooltipContent>
+              <TooltipContent className="font-mono break-all">{effectiveWorkspace}</TooltipContent>
             </Tooltip>
             . Open Advanced settings to change it.
           </p>
@@ -608,8 +689,9 @@ export function ForkSessionForm({
               {conflictingSessions.length === 1
                 ? "1 other agent is"
                 : `${conflictingSessions.length} other agents are`}{" "}
-              working in this directory, so writes may conflict. Name a git branch under Advanced
-              settings to work in an isolated copy.
+              working in this directory, so writes may conflict. Name a{" "}
+              {usingSourceWorktree ? "different git branch" : "git branch"} under Advanced settings
+              to work in an isolated copy.
             </span>
           </p>
         )}
@@ -731,7 +813,10 @@ export function ForkSessionForm({
                       data-testid="fork-session-branch-input"
                       className="rounded-md border border-input bg-background px-3 py-2 font-mono text-xs outline-none transition-colors focus-visible:border-ring"
                     />
-                    {branchName.trim() !== "" && (
+                    {/* Base ref only matters when a NEW worktree will be
+                        created — reusing the source's existing worktree
+                        ignores it, so hide it to avoid implying otherwise. */}
+                    {branchName.trim() !== "" && !usingSourceWorktree && (
                       <input
                         id="fork-session-base-branch"
                         type="text"
@@ -744,9 +829,12 @@ export function ForkSessionForm({
                       />
                     )}
                     <p className="text-xs text-muted-foreground">
-                      Creates a git worktree for a new branch in an isolated directory — keeps the
-                      clone from fighting the original over the same files. Leave blank to start in
-                      the picked directory.
+                      {usingSourceWorktree
+                        ? "The clone starts in the original session's existing worktree for this " +
+                          "branch. Name a different branch to work in an isolated copy."
+                        : "Creates a git worktree for a new branch in an isolated directory — " +
+                          "keeps the clone from fighting the original over the same files. Leave " +
+                          "blank to start in the picked directory."}
                     </p>
                   </div>
                 </>
