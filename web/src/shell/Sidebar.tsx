@@ -191,6 +191,12 @@ const DROP_TARGET_HIGHLIGHT = SIDEBAR_ACTIVE_HIGHLIGHT;
 // a query observer per row (which would also re-run on every project mutation).
 const ProjectNamesContext = createContext<Map<string, string>>(new Map());
 const HostsByIdContext = createContext<ReadonlyMap<string, Host>>(new Map());
+// Rows report an in-progress inline-rename edit here so ConversationList can
+// hold the sort order for the edit's whole duration — the pointer often
+// leaves the list while typing, and a reorder then would shuffle rows around
+// the open input (and can even blur it mid-edit, committing a half-typed
+// title). See the order-freeze block in ConversationList.
+const RowEditHoldContext = createContext<(id: string, editing: boolean) => void>(() => {});
 
 function SidebarRowDataProvider({
   projectNamesById,
@@ -1208,16 +1214,32 @@ function ConversationList({
     setActiveOverride((prev) => computeNextActiveOverride(activeId, allConversations, prev));
   }, [activeId, allConversations]);
 
-  // While the pointer is inside the list, pin every row's sort key so
-  // background updated_at bumps can't reorder rows under the cursor — a row
-  // sliding into place mid-interaction receives the click / right-click and
-  // the rename it triggers, hitting a session the user never aimed at. The
+  // While the pointer is inside the list OR a rename edit is open, pin every
+  // row's sort key so background updated_at bumps can't reorder rows under
+  // the cursor / around the edit input — a row sliding into place
+  // mid-interaction receives the click / right-click and the rename it
+  // triggers, hitting a session the user never aimed at; a reorder during an
+  // edit can move (and blur) the input, committing a half-typed title. The
   // map accumulates keys lazily inside sortByUpdatedAtDesc (a render-time ref
-  // write, like projectRenderedIdsRef) and is cleared on pointer-leave, when
-  // the order snaps back to reality.
+  // write, like projectRenderedIdsRef) and is cleared once neither hold is
+  // active, when the order snaps back to reality.
   const frozenKeysRef = useRef<Map<string, number>>(new Map());
-  const [orderFrozen, setOrderFrozen] = useState(false);
+  const [pointerInside, setPointerInside] = useState(false);
+  const [editingIds, setEditingIds] = useState<ReadonlySet<string>>(() => new Set());
+  const reportRowEditing = useCallback((id: string, editing: boolean) => {
+    setEditingIds((prev) => {
+      if (prev.has(id) === editing) return prev;
+      const next = new Set(prev);
+      if (editing) next.add(id);
+      else next.delete(id);
+      return next;
+    });
+  }, []);
+  const orderFrozen = pointerInside || editingIds.size > 0;
   const frozenKeys = orderFrozen ? frozenKeysRef.current : null;
+  useEffect(() => {
+    if (!orderFrozen) frozenKeysRef.current.clear();
+  }, [orderFrozen]);
 
   // Build sections: Pinned and Archived are peeled off; the rest splits into
   // the viewer's own sessions (Chats) and ones shared with them. Archived
@@ -1625,232 +1647,234 @@ function ConversationList({
         onDragEnd={handleDragEnd}
         onDragCancel={() => setActiveDrag(null)}
       >
-        <div
-          className="flex flex-col gap-4 pr-1"
-          data-testid="sidebar-conversation-list"
-          // Freeze the sort order while the pointer is over the list (and
-          // snap it back on leave) so rows never move under the cursor.
-          onMouseEnter={() => setOrderFrozen(true)}
-          onMouseLeave={() => {
-            frozenKeysRef.current.clear();
-            setOrderFrozen(false);
-          }}
-        >
-          {/* Removing a filed session from its project means dropping it back
+        <RowEditHoldContext.Provider value={reportRowEditing}>
+          <div
+            className="flex flex-col gap-4 pr-1"
+            data-testid="sidebar-conversation-list"
+            // Freeze the sort order while the pointer is over the list so rows
+            // never move under the cursor. The frozen-keys map is cleared by the
+            // effect above once no hold (pointer or open rename edit) remains.
+            onMouseEnter={() => setPointerInside(true)}
+            onMouseLeave={() => setPointerInside(false)}
+          >
+            {/* Removing a filed session from its project means dropping it back
             onto the flat "Chats" list — so the Chats section itself is the
             ungroup target (wrapped below). This top strip is only a FALLBACK
             for when there are no ungrouped chats yet, so the Chats section
             isn't rendered and there'd otherwise be nowhere to drop. */}
-          {!showShared && activeDrag?.project != null && sections.sessions.length === 0 && (
-            <UngroupDropZone />
-          )}
-          {totalVisible === 0 ? (
-            <>
-              <p className="px-2 py-1 text-muted-foreground text-xs">{emptyMessage}</p>
-              {/* The list is one paginated stream ordered by updated_at across
+            {!showShared && activeDrag?.project != null && sections.sessions.length === 0 && (
+              <UngroupDropZone />
+            )}
+            {totalVisible === 0 ? (
+              <>
+                <p className="px-2 py-1 text-muted-foreground text-xs">{emptyMessage}</p>
+                {/* The list is one paginated stream ordered by updated_at across
               owned + shared sessions, so the current tab can be empty on the
               loaded window while its sessions live on a later page. Keep the
               sentinel mounted so pagination continues instead of stranding the
               user on a false "empty" state. */}
-              {hasMorePages && (
-                <InfiniteScrollSentinel
-                  hasMore={hasMorePages}
-                  isFetching={isFetchingNextPage}
-                  fetchMore={fetchNextPage}
-                  scrollRoot={scrollContainerRef}
-                />
-              )}
-            </>
-          ) : (
-            <>
-              {sections.pinned.length > 0 && (
-                // Drop a session here to pin it — pin-precedence then floats it
-                // out of any project into this section. Active only while dragging
-                // an unpinned session; outline-only highlight.
-                <PinDropZone active={activeDrag != null && !activeDrag.isPinned}>
-                  <ConversationSection
-                    title="Pinned"
-                    conversations={sections.pinned}
-                    pinnedConversationIds={pinnedConversationIds}
-                    collapsed={effectiveCollapsedSections.includes("Pinned")}
-                    onToggleCollapsed={() => effectiveToggleSectionCollapsed("Pinned")}
-                    onRowClick={onRowClick}
-                    onTogglePinned={onTogglePinned}
-                    selectionMode={selectionMode}
-                    selectedIds={selectedIds}
-                    onToggleSelected={onToggleSelected}
-                    onProjectAssigned={expandProject}
+                {hasMorePages && (
+                  <InfiniteScrollSentinel
+                    hasMore={hasMorePages}
+                    isFetching={isFetchingNextPage}
+                    fetchMore={fetchNextPage}
+                    scrollRoot={scrollContainerRef}
                   />
-                </PinDropZone>
-              )}
-              {/* Projects: a "Projects" group header, with each project rendered as
-              a collapsible folder row nested beneath it. Folders default
-              collapsed; an empty folder shows "No sessions". The folder icon marks
-              a project row; the group/section headers carry no icon or count.
-              Shown on the "mine" tab even with zero projects, so "New project"
-              (create-empty) is discoverable — projects are a My-sessions tool. */}
-              {activeTab !== "shared" && (
-                <SectionGroup
-                  title="Projects"
-                  collapsed={effectiveCollapsedSections.includes("Projects")}
-                  onToggleCollapsed={() => effectiveToggleSectionCollapsed("Projects")}
-                  headerAction={(() => {
-                    const allNames = sections.projectGroups.map((g) => g.name);
-                    // "New project" is always available (even when collapsed) so
-                    // the create-empty flow is reachable; the expand/revert control
-                    // is only meaningful when there are folders and the group is open.
-                    const showExpandControls =
-                      !effectiveCollapsedSections.includes("Projects") && allNames.length > 0;
-                    // Once every folder is open the only useful move is to undo it,
-                    // so the control flips to "revert" — which restores the set open
-                    // before "Expand all", or collapses everything when there's no
-                    // real last state (folders opened by hand). Otherwise it expands.
-                    const allExpanded =
-                      allNames.length > 0 && allNames.every((n) => expandedProjects.includes(n));
-                    return (
-                      // gap-0.5 between the two controls mirrors the row/folder
-                      // icon spacing, so every right-gutter pair lines up.
-                      <div className="flex items-center gap-0.5">
-                        {showExpandControls &&
-                          (allExpanded ? (
-                            <Tooltip>
-                              <TooltipTrigger asChild>
-                                <Button
-                                  type="button"
-                                  variant="ghost"
-                                  size="icon-xs"
-                                  aria-label="Collapse to previous"
-                                  data-testid="revert-projects"
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    revertProjects();
-                                  }}
-                                >
-                                  <Minimize2Icon className="size-3.5" />
-                                </Button>
-                              </TooltipTrigger>
-                              <TooltipContent side="bottom">Collapse to previous</TooltipContent>
-                            </Tooltip>
-                          ) : (
-                            <Tooltip>
-                              <TooltipTrigger asChild>
-                                <Button
-                                  type="button"
-                                  variant="ghost"
-                                  size="icon-xs"
-                                  aria-label="Expand all"
-                                  data-testid="expand-all-projects"
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    expandAllProjects(allNames);
-                                  }}
-                                >
-                                  <Maximize2Icon className="size-3.5" />
-                                </Button>
-                              </TooltipTrigger>
-                              <TooltipContent side="bottom">Expand all</TooltipContent>
-                            </Tooltip>
-                          ))}
-                        <NewProjectButton onCreated={expandProject} />
-                      </div>
-                    );
-                  })()}
-                >
-                  {sections.projectGroups.map((group) => (
-                    <ProjectFolder
-                      key={group.name}
-                      name={group.name}
-                      projectId={group.id}
-                      expanded={expandedProjects.includes(group.name)}
-                      // Best-effort marker from the globally-loaded window: a
-                      // collapsed folder hasn't fetched its own sessions yet.
-                      marker={projectMarkerState(group.conversations)}
-                      onToggleCollapsed={() => toggleProjectExpanded(group.name)}
+                )}
+              </>
+            ) : (
+              <>
+                {sections.pinned.length > 0 && (
+                  // Drop a session here to pin it — pin-precedence then floats it
+                  // out of any project into this section. Active only while dragging
+                  // an unpinned session; outline-only highlight.
+                  <PinDropZone active={activeDrag != null && !activeDrag.isPinned}>
+                    <ConversationSection
+                      title="Pinned"
+                      conversations={sections.pinned}
                       pinnedConversationIds={pinnedConversationIds}
-                      activeOverride={activeOverride}
-                      frozenSortKeys={frozenKeys}
-                      scrollRoot={scrollContainerRef}
+                      collapsed={effectiveCollapsedSections.includes("Pinned")}
+                      onToggleCollapsed={() => effectiveToggleSectionCollapsed("Pinned")}
                       onRowClick={onRowClick}
                       onTogglePinned={onTogglePinned}
                       selectionMode={selectionMode}
                       selectedIds={selectedIds}
                       onToggleSelected={onToggleSelected}
                       onProjectAssigned={expandProject}
-                      projectRenderedIdsRef={projectRenderedIdsRef}
                     />
-                  ))}
-                  {sections.projectGroups.length === 0 &&
-                    !effectiveCollapsedSections.includes("Projects") && (
-                      <p className="px-3 py-1.5 text-xs text-muted-foreground">
-                        No projects yet. Create one to group your sessions.
-                      </p>
-                    )}
-                </SectionGroup>
-              )}
-              {sections.sessions.length > 0 && (
-                // Drop a session here to send it to the flat "Chats" list — where
-                // unfiled, unpinned sessions live. Active while dragging a filed
-                // session (removes it from its project) or a pinned one (unpins
-                // it), since both have somewhere to land here.
-                <ChatsDropZone
-                  active={activeDrag != null && (activeDrag.project != null || activeDrag.isPinned)}
-                >
-                  <ConversationSection
-                    title="Sessions"
-                    conversations={sections.sessions}
-                    pinnedConversationIds={pinnedConversationIds}
-                    collapsed={effectiveCollapsedSections.includes("Chats")}
-                    onToggleCollapsed={() => effectiveToggleSectionCollapsed("Chats")}
-                    onRowClick={onRowClick}
-                    onTogglePinned={onTogglePinned}
-                    selectionMode={selectionMode}
-                    selectedIds={selectedIds}
-                    onToggleSelected={onToggleSelected}
-                    onProjectAssigned={expandProject}
-                    headerAction={
-                      !selectionMode ? (
-                        <Tooltip>
-                          <TooltipTrigger asChild>
-                            <Button
-                              type="button"
-                              variant="ghost"
-                              size="icon-xs"
-                              aria-label="Select sessions"
-                              data-testid="toggle-selection-mode"
-                              onClick={(event) => {
-                                event.stopPropagation();
-                                onEnterSelectionMode();
-                              }}
-                            >
-                              <ListChecksIcon className="size-3.5" />
-                            </Button>
-                          </TooltipTrigger>
-                          <TooltipContent side="bottom">Select sessions</TooltipContent>
-                        </Tooltip>
-                      ) : undefined
+                  </PinDropZone>
+                )}
+                {/* Projects: a "Projects" group header, with each project rendered as
+              a collapsible folder row nested beneath it. Folders default
+              collapsed; an empty folder shows "No sessions". The folder icon marks
+              a project row; the group/section headers carry no icon or count.
+              Shown on the "mine" tab even with zero projects, so "New project"
+              (create-empty) is discoverable — projects are a My-sessions tool. */}
+                {activeTab !== "shared" && (
+                  <SectionGroup
+                    title="Projects"
+                    collapsed={effectiveCollapsedSections.includes("Projects")}
+                    onToggleCollapsed={() => effectiveToggleSectionCollapsed("Projects")}
+                    headerAction={(() => {
+                      const allNames = sections.projectGroups.map((g) => g.name);
+                      // "New project" is always available (even when collapsed) so
+                      // the create-empty flow is reachable; the expand/revert control
+                      // is only meaningful when there are folders and the group is open.
+                      const showExpandControls =
+                        !effectiveCollapsedSections.includes("Projects") && allNames.length > 0;
+                      // Once every folder is open the only useful move is to undo it,
+                      // so the control flips to "revert" — which restores the set open
+                      // before "Expand all", or collapses everything when there's no
+                      // real last state (folders opened by hand). Otherwise it expands.
+                      const allExpanded =
+                        allNames.length > 0 && allNames.every((n) => expandedProjects.includes(n));
+                      return (
+                        // gap-0.5 between the two controls mirrors the row/folder
+                        // icon spacing, so every right-gutter pair lines up.
+                        <div className="flex items-center gap-0.5">
+                          {showExpandControls &&
+                            (allExpanded ? (
+                              <Tooltip>
+                                <TooltipTrigger asChild>
+                                  <Button
+                                    type="button"
+                                    variant="ghost"
+                                    size="icon-xs"
+                                    aria-label="Collapse to previous"
+                                    data-testid="revert-projects"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      revertProjects();
+                                    }}
+                                  >
+                                    <Minimize2Icon className="size-3.5" />
+                                  </Button>
+                                </TooltipTrigger>
+                                <TooltipContent side="bottom">Collapse to previous</TooltipContent>
+                              </Tooltip>
+                            ) : (
+                              <Tooltip>
+                                <TooltipTrigger asChild>
+                                  <Button
+                                    type="button"
+                                    variant="ghost"
+                                    size="icon-xs"
+                                    aria-label="Expand all"
+                                    data-testid="expand-all-projects"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      expandAllProjects(allNames);
+                                    }}
+                                  >
+                                    <Maximize2Icon className="size-3.5" />
+                                  </Button>
+                                </TooltipTrigger>
+                                <TooltipContent side="bottom">Expand all</TooltipContent>
+                              </Tooltip>
+                            ))}
+                          <NewProjectButton onCreated={expandProject} />
+                        </div>
+                      );
+                    })()}
+                  >
+                    {sections.projectGroups.map((group) => (
+                      <ProjectFolder
+                        key={group.name}
+                        name={group.name}
+                        projectId={group.id}
+                        expanded={expandedProjects.includes(group.name)}
+                        // Best-effort marker from the globally-loaded window: a
+                        // collapsed folder hasn't fetched its own sessions yet.
+                        marker={projectMarkerState(group.conversations)}
+                        onToggleCollapsed={() => toggleProjectExpanded(group.name)}
+                        pinnedConversationIds={pinnedConversationIds}
+                        activeOverride={activeOverride}
+                        frozenSortKeys={frozenKeys}
+                        scrollRoot={scrollContainerRef}
+                        onRowClick={onRowClick}
+                        onTogglePinned={onTogglePinned}
+                        selectionMode={selectionMode}
+                        selectedIds={selectedIds}
+                        onToggleSelected={onToggleSelected}
+                        onProjectAssigned={expandProject}
+                        projectRenderedIdsRef={projectRenderedIdsRef}
+                      />
+                    ))}
+                    {sections.projectGroups.length === 0 &&
+                      !effectiveCollapsedSections.includes("Projects") && (
+                        <p className="px-3 py-1.5 text-xs text-muted-foreground">
+                          No projects yet. Create one to group your sessions.
+                        </p>
+                      )}
+                  </SectionGroup>
+                )}
+                {sections.sessions.length > 0 && (
+                  // Drop a session here to send it to the flat "Chats" list — where
+                  // unfiled, unpinned sessions live. Active while dragging a filed
+                  // session (removes it from its project) or a pinned one (unpins
+                  // it), since both have somewhere to land here.
+                  <ChatsDropZone
+                    active={
+                      activeDrag != null && (activeDrag.project != null || activeDrag.isPinned)
                     }
-                  />
-                </ChatsDropZone>
-              )}
-              {/* Both tabs render this same Pinned / Projects / Sessions tree;
+                  >
+                    <ConversationSection
+                      title="Sessions"
+                      conversations={sections.sessions}
+                      pinnedConversationIds={pinnedConversationIds}
+                      collapsed={effectiveCollapsedSections.includes("Chats")}
+                      onToggleCollapsed={() => effectiveToggleSectionCollapsed("Chats")}
+                      onRowClick={onRowClick}
+                      onTogglePinned={onTogglePinned}
+                      selectionMode={selectionMode}
+                      selectedIds={selectedIds}
+                      onToggleSelected={onToggleSelected}
+                      onProjectAssigned={expandProject}
+                      headerAction={
+                        !selectionMode ? (
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <Button
+                                type="button"
+                                variant="ghost"
+                                size="icon-xs"
+                                aria-label="Select sessions"
+                                data-testid="toggle-selection-mode"
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  onEnterSelectionMode();
+                                }}
+                              >
+                                <ListChecksIcon className="size-3.5" />
+                              </Button>
+                            </TooltipTrigger>
+                            <TooltipContent side="bottom">Select sessions</TooltipContent>
+                          </Tooltip>
+                        ) : undefined
+                      }
+                    />
+                  </ChatsDropZone>
+                )}
+                {/* Both tabs render this same Pinned / Projects / Sessions tree;
               `sections` is scoped to the active tab's conversations (owned vs.
               shared), and Projects is empty on the Shared tab. */}
-              {/* Archived sessions are no longer listed here — they live on the
+                {/* Archived sessions are no longer listed here — they live on the
               Settings page ("Archived chats"), reachable from the footer. */}
-              {/* Infinite-scroll sentinel for the global list. Pagination extends
+                {/* Infinite-scroll sentinel for the global list. Pagination extends
               the Chats list, so it hides with a collapsed Chats group — a loader
               under a collapsed group reads orphaned. */}
-              {!effectiveCollapsedSections.includes("Chats") && (
-                <InfiniteScrollSentinel
-                  hasMore={hasMorePages}
-                  isFetching={isFetchingNextPage}
-                  fetchMore={fetchNextPage}
-                  scrollRoot={scrollContainerRef}
-                />
-              )}
-            </>
-          )}
-        </div>
+                {!effectiveCollapsedSections.includes("Chats") && (
+                  <InfiniteScrollSentinel
+                    hasMore={hasMorePages}
+                    isFetching={isFetchingNextPage}
+                    fetchMore={fetchNextPage}
+                    scrollRoot={scrollContainerRef}
+                  />
+                )}
+              </>
+            )}
+          </div>
+        </RowEditHoldContext.Provider>
         {/* The dragged row's preview follows the pointer (rendered in a portal),
           a compact card showing the session's title. */}
         <DragOverlay dropAnimation={null}>
@@ -2700,6 +2724,16 @@ function ConversationRow({
   const stopSession = useStopSession();
   const isArchived = conversation.archived === true;
   const [isEditing, setIsEditing] = useState(false);
+  // Hold the list's sort order while this row's rename input is open — the
+  // pointer usually drifts out of the sidebar during typing, and a reorder
+  // then would shuffle rows around (or move + blur) the input. Cleanup covers
+  // commit, cancel, and unmount alike.
+  const reportRowEditing = useContext(RowEditHoldContext);
+  useEffect(() => {
+    if (!isEditing) return;
+    reportRowEditing(conversation.id, true);
+    return () => reportRowEditing(conversation.id, false);
+  }, [isEditing, conversation.id, reportRowEditing]);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [stopOpen, setStopOpen] = useState(false);
   // The kebab menu is controlled so the project submenu can close the whole

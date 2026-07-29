@@ -798,6 +798,57 @@ describe("right-click context menu", () => {
     expect(mocks.rename.mutate).toHaveBeenCalledWith({ id: "conv_a", title: "Renamed A" });
   });
 
+  it("keeps the order held while a rename edit is open even after the pointer leaves", () => {
+    // The pointer naturally drifts out of the sidebar while typing a new
+    // title. If that released the freeze, background updated_at churn would
+    // shuffle rows around the open input — and moving the input's DOM node
+    // blurs it, committing a half-typed title. An open rename edit must hold
+    // the order on its own; the snap-back happens once the edit ends.
+    const convA: Conversation = {
+      ...CONV,
+      id: "conv_a",
+      title: "Session A",
+      updated_at: 1_700_000_200,
+    };
+    const convB: Conversation = {
+      ...CONV,
+      id: "conv_b",
+      title: "Session B",
+      updated_at: 1_700_000_100,
+    };
+    mockConversations([convA, convB]);
+    const view = renderSidebar();
+
+    // Open the rename input on session A via right-click → Rename.
+    fireEvent.mouseOver(screen.getByTestId("sidebar-conversation-list"));
+    fireEvent.contextMenu(screen.getByRole("link", { name: /Session A/ }));
+    fireEvent.click(screen.getByTestId("rename-conversation"));
+    const input = screen.getByTestId("rename-conversation-input") as HTMLInputElement;
+
+    // The pointer leaves the list mid-edit; then session B's updated_at bumps.
+    fireEvent.mouseOut(screen.getByTestId("sidebar-conversation-list"), {
+      relatedTarget: document.body,
+    });
+    mockConversations([{ ...convB, updated_at: 1_700_000_300 }, convA]);
+    view.rerenderSidebar();
+
+    // The edit row still holds the top slot (the edit input replaces A's link,
+    // so B — below it — must still be the only link, not the first row).
+    expect(screen.getByTestId("rename-conversation-input")).toBe(input);
+    const listEl = screen.getByTestId("sidebar-conversation-list");
+    const rowB = screen.getByRole("link", { name: /Session B/ });
+    expect(input.compareDocumentPosition(rowB) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(listEl).toContainElement(rowB);
+
+    // Committing the rename targets session A and releases the hold: the
+    // order snaps to reality (B first).
+    fireEvent.change(input, { target: { value: "Renamed A" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(mocks.rename.mutate).toHaveBeenCalledWith({ id: "conv_a", title: "Renamed A" });
+    const after = screen.getAllByRole("link", { name: /^Session/ });
+    expect(after[0]).toHaveAccessibleName(/Session B/);
+  });
+
   it("snaps the order back to reality when the pointer leaves the list", () => {
     const convA: Conversation = {
       ...CONV,
