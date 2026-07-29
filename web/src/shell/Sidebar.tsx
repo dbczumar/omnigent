@@ -963,6 +963,7 @@ function ProjectFolder({
   onToggleCollapsed,
   pinnedConversationIds,
   activeOverride,
+  frozenSortKeys,
   scrollRoot,
   onRowClick,
   onTogglePinned,
@@ -980,6 +981,9 @@ function ProjectFolder({
   onToggleCollapsed: () => void;
   pinnedConversationIds: string[];
   activeOverride: ActiveChatOverride | null;
+  /** Pointer-inside sort-key freeze shared with the flat list (see
+      ConversationList); null while the pointer is outside the list. */
+  frozenSortKeys: Map<string, number> | null;
   scrollRoot: RefObject<HTMLElement | null>;
   onRowClick: (e: MouseEvent<HTMLAnchorElement>) => void;
   onTogglePinned: (conversationId: string) => void;
@@ -997,8 +1001,9 @@ function ProjectFolder({
     return sortByUpdatedAtDesc(
       loaded.filter((c) => !pinnedSet.has(c.id)),
       activeOverride,
+      frozenSortKeys,
     );
-  }, [query.data, pinnedSet, activeOverride]);
+  }, [query.data, pinnedSet, activeOverride, frozenSortKeys]);
 
   // Register this folder's rendered IDs synchronously during render so the
   // shift-select range uses the real per-project data, not the global list.
@@ -1203,6 +1208,17 @@ function ConversationList({
     setActiveOverride((prev) => computeNextActiveOverride(activeId, allConversations, prev));
   }, [activeId, allConversations]);
 
+  // While the pointer is inside the list, pin every row's sort key so
+  // background updated_at bumps can't reorder rows under the cursor — a row
+  // sliding into place mid-interaction receives the click / right-click and
+  // the rename it triggers, hitting a session the user never aimed at. The
+  // map accumulates keys lazily inside sortByUpdatedAtDesc (a render-time ref
+  // write, like projectRenderedIdsRef) and is cleared on pointer-leave, when
+  // the order snaps back to reality.
+  const frozenKeysRef = useRef<Map<string, number>>(new Map());
+  const [orderFrozen, setOrderFrozen] = useState(false);
+  const frozenKeys = orderFrozen ? frozenKeysRef.current : null;
+
   // Build sections: Pinned and Archived are peeled off; the rest splits into
   // the viewer's own sessions (Chats) and ones shared with them. Archived
   // sessions render in their own group at the bottom (below "Shared with
@@ -1251,7 +1267,11 @@ function ConversationList({
                 !pinnedIdSet.has(c.id),
             );
             inProject.forEach((c) => filedIds.add(c.id));
-            return { id, name, conversations: sortByUpdatedAtDesc(inProject, activeOverride) };
+            return {
+              id,
+              name,
+              conversations: sortByUpdatedAtDesc(inProject, activeOverride, frozenKeys),
+            };
           });
     // NOTE: empty projects are intentionally NOT filtered out. A project comes
     // from the server project list (useProjects), so it can have zero *loaded*
@@ -1263,10 +1283,12 @@ function ConversationList({
     const sessions = sortByUpdatedAtDesc(
       tabScoped.filter((c) => !pinnedIdSet.has(c.id) && !filedIds.has(c.id)),
       activeOverride,
+      frozenKeys,
     );
     const archived = sortByUpdatedAtDesc(
       allWithPinned.filter((c) => c.archived === true),
       activeOverride,
+      frozenKeys,
     );
     return { pinned, sessions, archived, projectGroups };
   }, [
@@ -1274,6 +1296,7 @@ function ConversationList({
     pinnedConversations,
     pinnedSet,
     activeOverride,
+    frozenKeys,
     projects,
     activeTab,
     viewerId,
@@ -1602,7 +1625,17 @@ function ConversationList({
         onDragEnd={handleDragEnd}
         onDragCancel={() => setActiveDrag(null)}
       >
-        <div className="flex flex-col gap-4 pr-1">
+        <div
+          className="flex flex-col gap-4 pr-1"
+          data-testid="sidebar-conversation-list"
+          // Freeze the sort order while the pointer is over the list (and
+          // snap it back on leave) so rows never move under the cursor.
+          onMouseEnter={() => setOrderFrozen(true)}
+          onMouseLeave={() => {
+            frozenKeysRef.current.clear();
+            setOrderFrozen(false);
+          }}
+        >
           {/* Removing a filed session from its project means dropping it back
             onto the flat "Chats" list — so the Chats section itself is the
             ungroup target (wrapped below). This top strip is only a FALLBACK
@@ -1735,6 +1768,7 @@ function ConversationList({
                       onToggleCollapsed={() => toggleProjectExpanded(group.name)}
                       pinnedConversationIds={pinnedConversationIds}
                       activeOverride={activeOverride}
+                      frozenSortKeys={frozenKeys}
                       scrollRoot={scrollContainerRef}
                       onRowClick={onRowClick}
                       onTogglePinned={onTogglePinned}

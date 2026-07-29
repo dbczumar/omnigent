@@ -200,29 +200,34 @@ function serverInfo(overrides: Partial<ServerInfo> = {}): ServerInfo {
 // server sharing policy via CapabilitiesProvider (default "loading" → on).
 function renderSidebar(activeId?: string, info?: ServerInfo) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  const sidebar = <Sidebar open={true} onClose={vi.fn()} />;
-  const tree = (
-    <QueryClientProvider client={qc}>
-      <TooltipProvider>
-        <MemoryRouter initialEntries={[activeId ? `/c/${activeId}` : "/"]}>
-          {activeId ? (
-            <Routes>
-              <Route path="/c/:conversationId" element={sidebar} />
-            </Routes>
-          ) : (
-            sidebar
-          )}
-        </MemoryRouter>
-      </TooltipProvider>
-    </QueryClientProvider>
-  );
-  // No explicit info → CapabilitiesContext default ("loading"), matching every
-  // pre-existing test (sharing treated as on).
-  const ui = info ? <CapabilitiesProvider info={info}>{tree}</CapabilitiesProvider> : tree;
-  const view = render(ui);
-  // Re-render the same tree so a test can apply a new `mockConversations`
-  // list mid-flight (e.g. simulating a reorder pushed between user clicks).
-  return Object.assign(view, { rerenderSidebar: () => view.rerender(ui) });
+  // Build a FRESH element tree per render: re-rendering the identical element
+  // reference lets React bail out without re-invoking the sidebar, which
+  // would swallow a `mockConversations` swap applied mid-test.
+  const makeUi = () => {
+    const sidebar = <Sidebar open={true} onClose={vi.fn()} />;
+    const tree = (
+      <QueryClientProvider client={qc}>
+        <TooltipProvider>
+          <MemoryRouter initialEntries={[activeId ? `/c/${activeId}` : "/"]}>
+            {activeId ? (
+              <Routes>
+                <Route path="/c/:conversationId" element={sidebar} />
+              </Routes>
+            ) : (
+              sidebar
+            )}
+          </MemoryRouter>
+        </TooltipProvider>
+      </QueryClientProvider>
+    );
+    // No explicit info → CapabilitiesContext default ("loading"), matching
+    // every pre-existing test (sharing treated as on).
+    return info ? <CapabilitiesProvider info={info}>{tree}</CapabilitiesProvider> : tree;
+  };
+  const view = render(makeUi());
+  // Re-render so a test can apply a new `mockConversations` list mid-flight
+  // (e.g. simulating a reorder pushed between user clicks).
+  return Object.assign(view, { rerenderSidebar: () => view.rerender(makeUi()) });
 }
 
 beforeEach(() => {
@@ -749,6 +754,75 @@ describe("right-click context menu", () => {
     // inline rename input appears.
     fireEvent.click(screen.getByTestId("rename-conversation"));
     expect(screen.getByTestId("rename-conversation-input")).toBeInTheDocument();
+  });
+
+  it("holds the list order under the pointer so a right-click rename hits the aimed row", () => {
+    // A right-click is a single event, so nothing can cross-check it like the
+    // double-click guard does — if the list reorders in the instant before
+    // the click lands, the row that slid under the cursor opens its (visually
+    // identical) menu and gets renamed. The fix is upstream: while the
+    // pointer is inside the list, every row's sort key is frozen so rows
+    // can't move under the cursor at all.
+    const convA: Conversation = {
+      ...CONV,
+      id: "conv_a",
+      title: "Session A",
+      updated_at: 1_700_000_200,
+    };
+    const convB: Conversation = {
+      ...CONV,
+      id: "conv_b",
+      title: "Session B",
+      updated_at: 1_700_000_100,
+    };
+    mockConversations([convA, convB]);
+    const view = renderSidebar();
+
+    // The pointer moves over the list, aiming at session A (the top row).
+    fireEvent.mouseOver(screen.getByTestId("sidebar-conversation-list"));
+
+    // Session B's updated_at bumps past A before the right-click lands.
+    mockConversations([{ ...convB, updated_at: 1_700_000_300 }, convA]);
+    view.rerenderSidebar();
+
+    // The order holds: A is still the top row, exactly where the user aims.
+    const links = screen.getAllByRole("link", { name: /^Session/ });
+    expect(links[0]).toHaveAccessibleName(/Session A/);
+
+    // Right-click the top row and rename it — the PATCH targets session A.
+    fireEvent.contextMenu(links[0]);
+    fireEvent.click(screen.getByTestId("rename-conversation"));
+    const input = screen.getByTestId("rename-conversation-input") as HTMLInputElement;
+    fireEvent.change(input, { target: { value: "Renamed A" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(mocks.rename.mutate).toHaveBeenCalledWith({ id: "conv_a", title: "Renamed A" });
+  });
+
+  it("snaps the order back to reality when the pointer leaves the list", () => {
+    const convA: Conversation = {
+      ...CONV,
+      id: "conv_a",
+      title: "Session A",
+      updated_at: 1_700_000_200,
+    };
+    const convB: Conversation = {
+      ...CONV,
+      id: "conv_b",
+      title: "Session B",
+      updated_at: 1_700_000_100,
+    };
+    mockConversations([convA, convB]);
+    const view = renderSidebar();
+
+    fireEvent.mouseOver(screen.getByTestId("sidebar-conversation-list"));
+    mockConversations([{ ...convB, updated_at: 1_700_000_300 }, convA]);
+    view.rerenderSidebar();
+    expect(screen.getAllByRole("link", { name: /^Session/ })[0]).toHaveAccessibleName(/Session A/);
+
+    fireEvent.mouseOut(screen.getByTestId("sidebar-conversation-list"), {
+      relatedTarget: document.body,
+    });
+    expect(screen.getAllByRole("link", { name: /^Session/ })[0]).toHaveAccessibleName(/Session B/);
   });
 });
 
