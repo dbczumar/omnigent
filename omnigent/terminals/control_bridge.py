@@ -350,7 +350,14 @@ async def _capture_pane_metadata(
         return None
     try:
         fields = [f.strip() for f in stdout.decode().strip().split(",")]
-        x_str, y_str, flag_str, alt_str, std, btn, allm, sgr, utf8, ckm = fields
+        if len(fields) < 4:
+            return None
+        # A tmux without some mouse/DECCKM formats expands them to "" (the
+        # field count holds), but pad regardless: a flags anomaly must cost
+        # only the optional mode replay, never the mandatory cursor and
+        # alt-screen state the rest of the seed depends on.
+        fields += ["0"] * (10 - len(fields))
+        x_str, y_str, flag_str, alt_str, std, btn, allm, sgr, utf8, ckm = fields[:10]
         return _PaneMetadata(
             cursor_x=int(x_str),
             cursor_y=int(y_str),

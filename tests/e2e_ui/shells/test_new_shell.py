@@ -173,7 +173,7 @@ def test_shell_wheel_scroll_reaches_mouse_tracking_program(
     # (the mode set Claude Code and OpenCode use), stdin appended to a file.
     textarea = terminal_view.locator("textarea.xterm-helper-textarea")
     textarea.focus()
-    page.keyboard.type(f"stty raw -echo; printf '\\e[?1003h\\e[?1006h'; cat > {log}")
+    page.keyboard.type(f"stty raw -echo; printf '\\e[?1003h\\e[?1006h'; cat > '{log}'")
     page.keyboard.press("Enter")
     # Let the mode enables round-trip so the browser xterm starts forwarding.
     page.wait_for_timeout(1_500)
