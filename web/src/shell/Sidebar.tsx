@@ -2592,6 +2592,10 @@ function SessionTooltipContent({
   );
 }
 
+// Max gap between the first click and the dblclick of one double-click.
+// Browsers pair clicks within ~500ms; the margin absorbs event-loop delay.
+const DOUBLE_CLICK_PAIR_WINDOW_MS = 750;
+
 function ConversationRow({
   conversation,
   isPinned,
@@ -2788,6 +2792,11 @@ function ConversationRow({
     },
     [setDragNodeRef],
   );
+  // Timestamps of the last two clicks this row received, for the dblclick
+  // rename guard: the list can reorder between the two clicks of a
+  // double-click (an updated_at bump slides another row under the cursor),
+  // and only a row that saw both clicks may enter rename.
+  const recentClickTimesRef = useRef<number[]>([]);
 
   if (isEditing) {
     return (
@@ -2943,6 +2952,7 @@ function ConversationRow({
         selectionMode && isSelected && SIDEBAR_ACTIVE_HIGHLIGHT,
       )}
       onClick={(e) => {
+        recentClickTimesRef.current = [...recentClickTimesRef.current.slice(-1), performance.now()];
         // Swallow the click that trails a drag so it doesn't navigate.
         if (justDraggedRef.current) {
           e.preventDefault();
@@ -2960,6 +2970,16 @@ function ConversationRow({
         if (selectionMode) return;
         if (!isOwner) return;
         e.preventDefault();
+        // The dblclick's own second click was already recorded above, so
+        // exactly ONE recent click means the first click landed on a different
+        // row — the list reordered mid-double-click and renaming here would
+        // hit the wrong session. Zero recent clicks (synthetic dblclick with
+        // no click events, e.g. in tests) stays allowed.
+        const now = performance.now();
+        const recent = recentClickTimesRef.current.filter(
+          (t) => now - t <= DOUBLE_CLICK_PAIR_WINDOW_MS,
+        );
+        if (recent.length === 1) return;
         setIsEditing(true);
       }}
       title={isMobile ? (conversation.title ?? conversation.id) : undefined}

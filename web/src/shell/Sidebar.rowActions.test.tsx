@@ -218,7 +218,11 @@ function renderSidebar(activeId?: string, info?: ServerInfo) {
   );
   // No explicit info → CapabilitiesContext default ("loading"), matching every
   // pre-existing test (sharing treated as on).
-  return render(info ? <CapabilitiesProvider info={info}>{tree}</CapabilitiesProvider> : tree);
+  const ui = info ? <CapabilitiesProvider info={info}>{tree}</CapabilitiesProvider> : tree;
+  const view = render(ui);
+  // Re-render the same tree so a test can apply a new `mockConversations`
+  // list mid-flight (e.g. simulating a reorder pushed between user clicks).
+  return Object.assign(view, { rerenderSidebar: () => view.rerender(ui) });
 }
 
 beforeEach(() => {
@@ -453,6 +457,54 @@ describe("double-click to rename", () => {
     fireEvent.keyDown(input, { key: "Enter" });
     expect(mocks.rename.mutate).toHaveBeenCalledTimes(1);
     expect(mocks.rename.mutate).toHaveBeenCalledWith({ id: "conv_1", title: "Renamed" });
+  });
+
+  it("ignores a double-click whose first click landed on a different row", () => {
+    // A native double-click delivers click, click, dblclick to one element.
+    // If the list reorders between the two clicks (a session's updated_at
+    // bump pushes rows around under the cursor), the second click and the
+    // dblclick land on whichever row slid into place — which must NOT enter
+    // rename, or the user renames a session they never aimed at.
+    const convA: Conversation = {
+      ...CONV,
+      id: "conv_a",
+      title: "Session A",
+      updated_at: 1_700_000_200,
+    };
+    const convB: Conversation = {
+      ...CONV,
+      id: "conv_b",
+      title: "Session B",
+      updated_at: 1_700_000_100,
+    };
+    mockConversations([convA, convB]);
+    const view = renderSidebar();
+
+    // Click #1 of the user's double-click lands on session A (the top row).
+    fireEvent.click(screen.getByRole("link", { name: /Session A/ }));
+
+    // Before click #2, session B's updated_at bumps and the list reorders —
+    // B now occupies the screen position where A was.
+    mockConversations([{ ...convB, updated_at: 1_700_000_300 }, convA]);
+    view.rerenderSidebar();
+
+    // Click #2 and the dblclick land on B, the row now under the cursor.
+    const rowB = screen.getByRole("link", { name: /Session B/ });
+    fireEvent.click(rowB);
+    fireEvent.dblClick(rowB);
+
+    // B saw only the second click, so it must not enter rename.
+    expect(screen.queryByTestId("rename-conversation-input")).toBeNull();
+    expect(mocks.rename.mutate).not.toHaveBeenCalled();
+
+    // A clean double-click on B — both clicks on the row — still renames it.
+    fireEvent.click(rowB);
+    fireEvent.click(rowB);
+    fireEvent.dblClick(rowB);
+    const input = screen.getByTestId("rename-conversation-input") as HTMLInputElement;
+    fireEvent.change(input, { target: { value: "Renamed B" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(mocks.rename.mutate).toHaveBeenCalledWith({ id: "conv_b", title: "Renamed B" });
   });
 
   it("does not enter rename on double-click for a viewer-only row", () => {
