@@ -9,6 +9,7 @@ import {
   useCallback,
   useContext,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -2727,9 +2728,12 @@ function ConversationRow({
   // Hold the list's sort order while this row's rename input is open — the
   // pointer usually drifts out of the sidebar during typing, and a reorder
   // then would shuffle rows around (or move + blur) the input. Cleanup covers
-  // commit, cancel, and unmount alike.
+  // commit, cancel, and unmount alike. Layout effect (not passive): rename
+  // can start with the pointer already outside the list (context menu is a
+  // portal), and a passive effect would leave a post-paint frame where churn
+  // could reorder — and blur — the just-mounted input before the hold lands.
   const reportRowEditing = useContext(RowEditHoldContext);
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!isEditing) return;
     reportRowEditing(conversation.id, true);
     return () => reportRowEditing(conversation.id, false);
