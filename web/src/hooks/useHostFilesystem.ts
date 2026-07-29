@@ -192,15 +192,19 @@ export function useHostFilesystem(hostId: string | null, path: string | null) {
  *   offline host, network failure). Never throws.
  */
 export async function checkHostDirectory(hostId: string, path: string): Promise<string | null> {
+  const baseUrl = buildHostFilesystemUrl(hostId, path);
+  const sep = baseUrl.includes("?") ? "&" : "?";
   let res: Response;
   try {
-    res = await authenticatedFetch(`${buildHostFilesystemUrl(hostId, path)}?limit=1`);
+    res = await authenticatedFetch(`${baseUrl}${sep}limit=1`);
   } catch {
     return "Couldn't verify the working directory. Check your connection and try again.";
   }
   if (res.ok) return null;
   if (res.status === 404) {
-    return `The working directory ${path} doesn't exist on this host.`;
+    // The route 404s for missing paths AND for paths that exist but
+    // aren't listable directories (e.g. a file) — say so.
+    return `The working directory ${path} doesn't exist on this host (or isn't a directory).`;
   }
   // Host offline / timed out (502/504) or another server failure —
   // surface its detail so the user sees why the check failed.
