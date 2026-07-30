@@ -146,8 +146,8 @@ function defaultForkTitle(sourceTitle: string | null | undefined): string {
  * server-created worktree, the prefill is instead the ORIGINAL repo as the
  * directory plus the source branch in the worktree field; submitted
  * untouched, the clone binds to the source's existing worktree directory
- * (renaming the branch creates a fresh worktree off the source branch,
- * which prefills the base ref). The Fork button greys out until a valid
+ * (renaming the branch creates a fresh worktree, automatically based off
+ * the source branch). The Fork button greys out until a valid
  * online host + directory are chosen (no CLI fallback).
  *
  * All form state lives here, inside the dialog content, so closing the
@@ -158,7 +158,8 @@ function defaultForkTitle(sourceTitle: string | null | undefined): string {
  * @param sourceWorkspace - Source workspace; presence marks a coding source
  *   (shows the host/dir fields) and seeds the directory default.
  * @param sourceHostId - Source host; default host when it is online.
- * @param sourceGitBranch - Source git branch; seeds the worktree base ref.
+ * @param sourceGitBranch - Source git branch; drives the worktree prefill
+ *   and the base ref for a renamed worktree branch.
  * @param upToResponseId - Truncation point for a "fork from here": the
  *   fork copies history only up to and including this response. `null` /
  *   omitted forks the full history.
@@ -208,7 +209,6 @@ export function ForkSessionForm({
   const [selectedHostId, setSelectedHostId] = useState<string | null>(null);
   const [workspace, setWorkspace] = useState("");
   const [branchName, setBranchName] = useState("");
-  const [baseBranch, setBaseBranch] = useState("");
   const [browsing, setBrowsing] = useState(false);
   const [browseNonce, setBrowseNonce] = useState(0);
   // Whether the "connect another host" CLI hint is expanded (only shown when
@@ -335,15 +335,6 @@ export function ForkSessionForm({
       setWorkspace(sourceWorkspace);
     }
   }, [onSourceHost, workspace, sourceWorkspace, sourceRepo, sourceBranch]);
-
-  // When the source used a worktree, default the base ref to its branch so
-  // the clone branches off where the original left work — again only on the
-  // source host, where that branch exists.
-  useEffect(() => {
-    if (onSourceHost && baseBranch === "" && sourceBranch) {
-      setBaseBranch(sourceBranch);
-    }
-  }, [onSourceHost, baseBranch, sourceBranch]);
 
   const workspaceTrimmed = normalizeWorkspacePath(workspace) ?? "";
   const workspaceValid = isValidWorkspace(workspace);
@@ -477,12 +468,22 @@ export function ForkSessionForm({
         addRecent(workspaceTrimmed);
         // Reusing the source's worktree binds its directory directly (no
         // git options — the branch already exists, creating it would fail).
+        // A NEW worktree is based on the source's branch so the clone
+        // continues from the original's committed work — but only when the
+        // picked directory is the source's own repo (on the source host);
+        // elsewhere that ref can't be assumed to exist.
+        const baseOnSource =
+          onSourceHost &&
+          (workspaceTrimmed === sourceRepo || workspaceTrimmed === sourceWorkspaceNorm);
         void launchRunner(
           selectedHostId,
           fork.id,
           effectiveWorkspace,
           trimmedBranch !== "" && !usingSourceWorktree
-            ? { branchName: trimmedBranch, baseBranch: baseBranch.trim() || undefined }
+            ? {
+                branchName: trimmedBranch,
+                baseBranch: baseOnSource && sourceBranch ? sourceBranch : undefined,
+              }
             : undefined,
         ).catch((e) => {
           // Swallow: recovery is the unbound-fork picker on the session
@@ -539,15 +540,13 @@ export function ForkSessionForm({
                   value={selectedHostId ?? ""}
                   onValueChange={(v) => {
                     setSelectedHostId(v);
-                    // Workspace AND the worktree base ref are host-specific:
+                    // Workspace and the worktree branch are host-specific:
                     // the directory path and the prefilled source branch only
-                    // make sense on the source machine. Clear all three on a
-                    // host change so a stale base ref can't launch a worktree
-                    // on the new host. (The source-host prefill effects
-                    // re-seed them if the user switches back.)
+                    // make sense on the source machine. Clear both on a host
+                    // change. (The source-host prefill effect re-seeds them
+                    // if the user switches back.)
                     setWorkspace("");
                     setBranchName("");
-                    setBaseBranch("");
                     setBrowsing(false);
                   }}
                 >
@@ -813,30 +812,6 @@ export function ForkSessionForm({
                       data-testid="fork-session-branch-input"
                       className="rounded-md border border-input bg-background px-3 py-2 font-mono text-xs outline-none transition-colors focus-visible:border-ring"
                     />
-                    {/* Base ref only matters when a NEW worktree will be
-                        created — reusing the source's existing worktree
-                        ignores it, so hide it to avoid implying otherwise.
-                        Visibly labeled: prefilled with the source branch, an
-                        unlabeled input reads as a second worktree box. */}
-                    {branchName.trim() !== "" && !usingSourceWorktree && (
-                      <>
-                        <label
-                          htmlFor="fork-session-base-branch"
-                          className="mt-1 text-xs font-medium text-muted-foreground"
-                        >
-                          Base branch
-                        </label>
-                        <input
-                          id="fork-session-base-branch"
-                          type="text"
-                          value={baseBranch}
-                          onChange={(e) => setBaseBranch(e.target.value)}
-                          placeholder="Base branch (defaults to the current branch)"
-                          data-testid="fork-session-base-branch-input"
-                          className="rounded-md border border-input bg-background px-3 py-2 font-mono text-xs outline-none transition-colors focus-visible:border-ring"
-                        />
-                      </>
-                    )}
                     <p className="text-xs text-muted-foreground">
                       {usingSourceWorktree
                         ? "The clone starts in the original session's existing worktree for this " +
@@ -893,7 +868,8 @@ export function ForkSessionForm({
  * @param sourceWorkspace - Source workspace; presence marks a coding source
  *   (shows the host/dir fields) and seeds the directory default.
  * @param sourceHostId - Source host; default host when it is online.
- * @param sourceGitBranch - Source git branch; seeds the worktree base ref.
+ * @param sourceGitBranch - Source git branch; drives the worktree prefill
+ *   and the base ref for a renamed worktree branch.
  * @param upToResponseId - Truncation point for a "fork from here" opened
  *   from a message's actions: the fork copies history only up to and
  *   including this response. `null` / omitted clones the full history.

@@ -584,8 +584,8 @@ describe("ForkSessionDialog", () => {
       fireEvent.click(screen.getByTestId("fork-session-submit"));
 
       await waitFor(() => expect(launchRunnerMock).toHaveBeenCalledTimes(1));
-      // Base ref defaults to the source's branch ("main"); the named branch
-      // makes the host create an isolated worktree.
+      // The base ref is sent automatically from the source's branch ("main");
+      // the named branch makes the host create an isolated worktree.
       expect(launchRunnerMock).toHaveBeenCalledWith("host_1", "conv_fork", "/repo", {
         branchName: "feature/x",
         baseBranch: "main",
@@ -747,7 +747,7 @@ describe("ForkSessionDialog", () => {
       expect(screen.getByTestId("fork-session-submit")).toBeDisabled();
     });
 
-    it("clears the worktree fields when the host changes (no stale base ref)", () => {
+    it("clears the worktree branch when the host changes (no stale source branch)", () => {
       // Two online hosts; source ran on host_1 with branch "main" (prefills
       // the base ref). Switching to host_2 must reset the worktree fields so a
       // base ref from the source machine can't launch a worktree on another.
