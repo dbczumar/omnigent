@@ -382,9 +382,10 @@ def test_clone_worktree_source_prefills_repo_and_validates_directory(
     expect(page.get_by_test_id("fork-session-branch-input")).to_have_value(_WT_BRANCH)
 
     # A nonexistent directory must refuse to create ANYTHING: inline error,
-    # no fork call, no runner launch, no navigation.
+    # no fork call, no runner launch, no navigation. (No Escape to dismiss
+    # the path field's dropdown — it never opens here, and Escape would
+    # close the whole Radix dialog.)
     page.get_by_test_id("workspace-path-input").fill("/does/not/exist")
-    page.keyboard.press("Escape")
     submit.click()
     expect(page.get_by_test_id("fork-session-error")).to_contain_text("doesn't exist")
     assert fork_calls == [], "fork must not be created when the directory doesn't exist"
@@ -395,7 +396,6 @@ def test_clone_worktree_source_prefills_repo_and_validates_directory(
     # clone binds the source's EXISTING worktree directory with no git
     # options, then navigates into the fork.
     page.get_by_test_id("workspace-path-input").fill(_WT_REPO)
-    page.keyboard.press("Escape")
     submit.click()
     expect(page).to_have_url(
         re.compile(rf"/c/(?!{re.escape(session_id)})conv_[0-9a-f]+"),
