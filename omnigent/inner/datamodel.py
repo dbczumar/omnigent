@@ -451,15 +451,59 @@ class CredentialProxyEntry:
 
 
 @dataclass
+class DatabricksProfileBinding:
+    """One Databricks ``~/.databrickscfg`` profile to proxy.
+
+    The host and OAuth/PAT token behind a profile are resolved in the
+    parent at runtime (via the ``databricks`` SDK) — never at parse time
+    and never inside the sandbox. The sandbox only ever sees a synthetic
+    ``oa_cred_*`` placeholder written into a materialized ``.databrickscfg``.
+
+    :param profile: The profile (section) name in ``~/.databrickscfg``,
+        e.g. ``"dbc-adb7b1a3-9097"``. Selected in the sandbox with
+        ``databricks --profile <name>`` (or as the default profile).
+    """
+
+    profile: str
+
+
+@dataclass
+class DatabricksProxySpec:
+    """Secretless proxy policy for the Databricks CLI.
+
+    Unlike the four host-keyed credential types, Databricks profiles bind
+    to a workspace host that is only known once the parent resolves the
+    profile at runtime, so they are carried here rather than in
+    :attr:`CredentialProxySpec.entries`.
+
+    :param profiles: The profiles to proxy. Only these profiles are
+        materialized into the sandbox ``.databrickscfg`` and swapped by
+        the egress proxy; every other profile is invisible to the sandbox.
+    :param default: Optional profile used when the CLI is invoked without
+        ``--profile`` (exported as ``DATABRICKS_CONFIG_PROFILE``). Must be
+        one of :attr:`profiles`.
+    :param config_env: Environment variable pointed at the materialized
+        config file (the Databricks CLI honors ``DATABRICKS_CONFIG_FILE``).
+    """
+
+    profiles: list[DatabricksProfileBinding]
+    default: str | None = None
+    config_env: str = "DATABRICKS_CONFIG_FILE"
+
+
+@dataclass
 class CredentialProxySpec:
     """Secretless credential-proxy policy for a sandbox.
 
     :param entries: Normalized per-host credential bindings. The real
         secrets stay in the parent; the sandbox only ever sees synthetic
         placeholders that the egress proxy rewrites.
+    :param databricks: Optional Databricks-CLI proxy policy (a list of
+        profiles). Resolved to per-workspace-host bindings at runtime.
     """
 
     entries: list[CredentialProxyEntry]
+    databricks: DatabricksProxySpec | None = None
 
 
 @dataclass
@@ -728,6 +772,13 @@ class TerminalEnvSpec:
         into ``no server running``. Opt-in because it changes the
         ``has-session``-means-alive contract; enabled for the claude-native
         agent terminal (#540), whose liveness is decided by ``#{pane_dead}``.
+    :param terminal_transport: How the web UI attaches to this terminal:
+        ``"control"`` (``tmux -C`` control mode, giving the browser xterm
+        native scrollback + selection — the default) or ``"pty"`` (the legacy
+        forked-``tmux attach`` PTY stream). ``None`` defers to the global
+        default, which is control mode unless ``terminal.transport`` in
+        ``~/.omnigent/config.yaml`` opts out to ``pty``. A per-attach
+        ``?transport=`` query overrides both.
     """
 
     command: str | None = None
@@ -744,6 +795,7 @@ class TerminalEnvSpec:
     tmux_allow_passthrough: bool = False
     tmux_start_on_attach: bool = False
     keep_alive_after_exit: bool = False
+    terminal_transport: str | None = None
 
 
 # ---------------------------------------------------------------------------

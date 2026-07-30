@@ -94,13 +94,17 @@ describe("createSession", () => {
       pendingElicitations: [],
       pendingInputs: [],
       permissionLevel: null,
+      canApprove: null,
       parentSessionId: null,
       subAgentName: null,
+      kind: "default",
+      backgroundTaskCount: undefined,
       todos: [],
       skills: [],
       codexModelOptions: [],
       terminalPending: false,
       sandboxStatus: null,
+      mcpStartup: null,
       activeResponseId: null,
       workspace: null,
       gitBranch: null,
@@ -636,6 +640,20 @@ describe("getSession", () => {
     );
     const session = await getSession("conv_abc");
     expect(session.permissionLevel).toBe(4);
+  });
+
+  it("maps can_approve from the wire to canApprove", async () => {
+    fetchMock.mockResolvedValueOnce(
+      mockJsonResponse({
+        id: "conv_abc",
+        agent_id: "ag",
+        status: "idle",
+        created_at: 0,
+        can_approve: false,
+      }),
+    );
+    const session = await getSession("conv_abc");
+    expect(session.canApprove).toBe(false);
   });
 
   it("treats a missing permission_level as null", async () => {

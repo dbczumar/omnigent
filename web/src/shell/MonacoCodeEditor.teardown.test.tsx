@@ -34,9 +34,12 @@ interface FakeEditor {
   getModel: () => { setEOL: () => void };
   addCommand: () => void;
   onDidBlurEditorWidget: () => { dispose: () => void };
+  setScrollTop: (top: number) => void;
+  onDidScrollChange: () => { dispose: () => void };
   saveViewState: () => null;
   restoreViewState: () => void;
   getAction: () => { run: () => void };
+  getContribution: () => null;
   __set: (v: string) => void;
 }
 
@@ -51,9 +54,12 @@ function makeFakeEditor(initial: string): FakeEditor {
     getModel: () => ({ setEOL: () => {} }),
     addCommand: () => {},
     onDidBlurEditorWidget: () => ({ dispose: () => {} }),
+    setScrollTop: () => {},
+    onDidScrollChange: () => ({ dispose: () => {} }),
     saveViewState: () => null,
     restoreViewState: () => {},
     getAction: () => ({ run: () => {} }),
+    getContribution: () => null,
     __set: (v) => {
       value = v;
     },

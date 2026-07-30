@@ -180,6 +180,7 @@ const HARNESS_ALIASES: Record<string, string> = {
   "native-qwen": "qwen-native",
   "native-kimi": "kimi-native",
   "native-hermes": "hermes-native",
+  "native-opencode": "opencode-native",
 };
 
 export function nativeCodingAgentForAgentName(
@@ -216,6 +217,24 @@ export function isNativeCodingAgent(
 
 export function isNativeWrapper(wrapper: string | null | undefined): boolean {
   return nativeCodingAgentForWrapper(wrapper) !== undefined;
+}
+
+/**
+ * Whether a session runs a native terminal harness — by its `omnigent.wrapper`
+ * label OR its resolved harness. Mirrors the server's
+ * `_native_coding_agent_for_session`: a session is native-terminal if either
+ * signal matches (a built-in wrapper agent sets the label; a custom agent bound
+ * to a native harness has no label but still runs the native CLI). Native CLIs
+ * bake the model at launch and can't per-turn route, so callers use this to hide
+ * per-turn Smart Routing from these sessions.
+ */
+export function isNativeTerminalSession(
+  session: { harness?: string | null; labels?: Record<string, string> } | null | undefined,
+): boolean {
+  if (session == null) return false;
+  const wrapper = session.labels?.[WRAPPER_LABEL_KEY];
+  if (isNativeWrapper(wrapper)) return true;
+  return nativeCodingAgentForHarness(session.harness) !== undefined;
 }
 
 export function nativeWrapperLabelsForAgent(

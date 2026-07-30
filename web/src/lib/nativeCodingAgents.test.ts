@@ -3,6 +3,7 @@ import {
   UI_MODE_LABEL_KEY,
   UI_MODE_TERMINAL_VALUE,
   WRAPPER_LABEL_KEY,
+  isNativeTerminalSession,
   nativeCodingAgentForHarness,
   nativeWrapperLabelsForAgent,
 } from "./nativeCodingAgents";
@@ -14,6 +15,12 @@ describe("nativeCodingAgentForHarness", () => {
 
   it("resolves the canonical opencode-native harness", () => {
     expect(nativeCodingAgentForHarness("opencode-native")?.key).toBe("opencode");
+  });
+
+  it("folds the reversed native-opencode alias to the opencode-native spec", () => {
+    expect(nativeCodingAgentForHarness("native-opencode")).toBe(
+      nativeCodingAgentForHarness("opencode-native"),
+    );
   });
 
   it("resolves the canonical qwen-native harness", () => {
@@ -89,5 +96,32 @@ describe("nativeWrapperLabelsForAgent", () => {
       [UI_MODE_LABEL_KEY]: UI_MODE_TERMINAL_VALUE,
       [WRAPPER_LABEL_KEY]: "opencode-native-ui",
     });
+  });
+});
+
+describe("isNativeTerminalSession", () => {
+  it("detects a native session by its wrapper label", () => {
+    expect(
+      isNativeTerminalSession({
+        labels: { [WRAPPER_LABEL_KEY]: "claude-code-native-ui" },
+      }),
+    ).toBe(true);
+  });
+
+  it("detects a native session by its resolved harness (no label)", () => {
+    expect(isNativeTerminalSession({ harness: "codex-native" })).toBe(true);
+    expect(isNativeTerminalSession({ harness: "pi-native" })).toBe(true);
+  });
+
+  it("is false for a brain-harness session (Smart Routing stays eligible)", () => {
+    expect(isNativeTerminalSession({ harness: "claude-sdk" })).toBe(false);
+    expect(isNativeTerminalSession({ harness: "codex" })).toBe(false);
+    expect(isNativeTerminalSession({ harness: "pi" })).toBe(false);
+  });
+
+  it("is false for null / empty sessions", () => {
+    expect(isNativeTerminalSession(null)).toBe(false);
+    expect(isNativeTerminalSession(undefined)).toBe(false);
+    expect(isNativeTerminalSession({})).toBe(false);
   });
 });
