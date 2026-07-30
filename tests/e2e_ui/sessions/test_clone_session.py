@@ -337,7 +337,14 @@ def test_clone_worktree_source_prefills_repo_and_validates_directory(
         route.continue_()
 
     page.route("**/v1/hosts", handle_hosts)
-    page.route(f"**/v1/sessions/{session_id}", handle_session_detail)
+    # Regex, not glob: the chat store hydrates via the slim snapshot
+    # (``?include_items=false&…``), and a glob without the query part
+    # would silently miss it — the props feeding the dialog would then
+    # read the UNPATCHED session and take the non-coding path.
+    page.route(
+        re.compile(rf".*/v1/sessions/{re.escape(session_id)}(\?.*)?$"),
+        handle_session_detail,
+    )
     page.route(f"**/v1/hosts/{_WT_HOST_ID}/filesystem/**", handle_filesystem)
     page.route(f"**/v1/hosts/{_WT_HOST_ID}/runners", handle_runners)
     page.route("**/v1/sessions/*/fork", handle_fork)
