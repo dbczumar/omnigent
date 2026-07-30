@@ -397,8 +397,10 @@ def test_clone_worktree_source_prefills_repo_and_validates_directory(
     # options, then navigates into the fork.
     page.get_by_test_id("workspace-path-input").fill(_WT_REPO)
     submit.click()
+    # Accept both session-id shapes ("conv_<hex>" and bare hex) — this
+    # harness's seeded sessions and their forks navigate with bare ids.
     expect(page).to_have_url(
-        re.compile(rf"/c/(?!{re.escape(session_id)})conv_[0-9a-f]+"),
+        re.compile(rf"/c/(?!{re.escape(session_id)})(conv_)?[0-9a-f]+"),
         timeout=30_000,
     )
     fork_id = page.url.rsplit("/c/", 1)[1].split("?", 1)[0]
