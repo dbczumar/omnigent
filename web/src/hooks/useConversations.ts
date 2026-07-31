@@ -69,6 +69,23 @@ export interface UseConversationsOptions {
   reconcileWhileConnected?: boolean;
 }
 
+export class BulkConversationMutationError extends Error {
+  readonly failed: string[];
+  readonly succeeded: string[];
+  readonly total: number;
+
+  constructor(
+    action: string,
+    { failed, succeeded = [], total }: { failed: string[]; succeeded?: string[]; total: number },
+  ) {
+    super(`Failed to ${action} ${failed.length} of ${total} conversations`);
+    this.name = "BulkConversationMutationError";
+    this.failed = failed;
+    this.succeeded = succeeded;
+    this.total = total;
+  }
+}
+
 /** Mirrors the server's `SessionListItem` / `ConversationObject` shape. */
 export interface Conversation {
   id: string;
@@ -277,8 +294,8 @@ async function fetchConversationsPage({
  * the Archived settings view's project filter.
  */
 export function useConversations(
-  searchQuery: string = "",
-  includeArchived: boolean = false,
+  searchQuery = "",
+  includeArchived = false,
   options: UseConversationsOptions = {},
   project?: string,
 ) {
@@ -658,7 +675,9 @@ export function useBulkArchiveConversations() {
             (results[i] as PromiseFulfilledResult<Conversation>).value.updated_at,
           );
       }
-      if (failed.length > 0) throw { failed, total: ids.length };
+      if (failed.length > 0) {
+        throw new BulkConversationMutationError("archive", { failed, total: ids.length });
+      }
       return results
         .filter((r): r is PromiseFulfilledResult<Conversation> => r.status === "fulfilled")
         .map((r) => r.value);
@@ -699,7 +718,13 @@ export function useBulkDeleteConversations() {
         if (results[i].status === "fulfilled") succeeded.push(ids[i]);
         else failed.push(ids[i]);
       }
-      if (failed.length > 0) throw { failed, succeeded, total: ids.length };
+      if (failed.length > 0) {
+        throw new BulkConversationMutationError("delete", {
+          failed,
+          succeeded,
+          total: ids.length,
+        });
+      }
       return { succeeded, failed };
     },
     onSuccess: (_data, ids) => {
@@ -728,9 +753,9 @@ export function useBulkDeleteConversations() {
       void queryClient.invalidateQueries({ queryKey: ["projects"] });
       void queryClient.invalidateQueries({ queryKey: ARCHIVED_PROJECT_NAMES_KEY });
     },
-    onError: (err: any) => {
-      if (err?.succeeded) {
-        const idSet = new Set(err.succeeded as string[]);
+    onError: (error) => {
+      if (error instanceof BulkConversationMutationError && error.succeeded.length > 0) {
+        const idSet = new Set(error.succeeded);
         for (const queryKey of [["conversations"], ["project-sessions"]]) {
           for (const [key, data] of queryClient.getQueriesData<ConversationsInfiniteData>({
             queryKey,
@@ -739,7 +764,7 @@ export function useBulkDeleteConversations() {
             if (removed) queryClient.setQueryData(key, next);
           }
         }
-        for (const id of err.succeeded) {
+        for (const id of error.succeeded) {
           queryClient.removeQueries({ queryKey: ["conversation-backfill", id] });
           queryClient.removeQueries({ queryKey: ["session", id] });
         }
@@ -771,7 +796,13 @@ export function useBulkStopSessions() {
         if (results[i].status === "fulfilled") succeeded.push(ids[i]);
         else failed.push(ids[i]);
       }
-      if (failed.length > 0) throw { failed, succeeded, total: ids.length };
+      if (failed.length > 0) {
+        throw new BulkConversationMutationError("stop", {
+          failed,
+          succeeded,
+          total: ids.length,
+        });
+      }
       return { succeeded, failed };
     },
     onSettled: () => {
@@ -1454,8 +1485,8 @@ async function archiveAndUnfileConversation(id: string): Promise<Conversation> {
  * archived, so they leave the sidebar but keep their history. Accepts the
  * folder's `{ id, name }`: `name` drives the member sweep (dual-read
  * `?project=`), `id` deletes the container (skipped for a label-only folder,
- * which has none). Throws `{ failed, succeeded, total }` if any member failed
- * (e.g. a shared session the user can't modify), leaving those in place.
+ * which has none). Throws a `BulkConversationMutationError` if any member
+ * failed (e.g. a shared session the user can't modify), leaving those in place.
  */
 export function useDeleteProject() {
   const queryClient = useQueryClient();
@@ -1476,7 +1507,13 @@ export function useDeleteProject() {
           failed.push(ids[i]);
         }
       }
-      if (failed.length > 0) throw { failed, succeeded, total: ids.length };
+      if (failed.length > 0) {
+        throw new BulkConversationMutationError("archive and unfile", {
+          failed,
+          succeeded,
+          total: ids.length,
+        });
+      }
       // All members detached — remove the first-class container if present.
       // (A label-only folder has no row; clearing the labels above already
       // makes it vanish from the project list.)

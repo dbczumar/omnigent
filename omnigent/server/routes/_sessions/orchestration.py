@@ -31,6 +31,7 @@ from omnigent.entities import (
     ErrorData,
     MessageData,
     NewConversationItem,
+    ResourceEventData,
 )
 from omnigent.entities.conversation import (
     FunctionCallData,
@@ -49,7 +50,6 @@ from omnigent.native_coding_agents import (
 from omnigent.policies.types import (
     ElicitationRequest,
     EvaluationContext,
-    PolicyAction,
     PolicyResult,
 )
 from omnigent.runner.routing import RunnerRouter
@@ -153,6 +153,7 @@ from omnigent.session_lifecycle import (
 from omnigent.spec.types import (
     AgentSpec,
     Phase,
+    PolicyAction,
 )
 from omnigent.stores import AgentStore, ConversationStore
 from omnigent.stores.artifact_store import ArtifactStore
@@ -2839,6 +2840,8 @@ async def _ensure_runner_session_initialized(
     runner_client: httpx.AsyncClient,
     conversation_store: ConversationStore,
     initializer: RunnerSessionInitializer | None = None,
+    *,
+    suppress_recovery_turn: bool = False,
 ) -> bool:
     """
     Drive — and wait for — the runner's session-init handshake.
@@ -2878,6 +2881,15 @@ async def _ensure_runner_session_initialized(
         *session_id* (its tunnel is up).
     :param conversation_store: Store used to clear persisted disconnect
         error labels once the handshake proves the runner recovered.
+    :param suppress_recovery_turn: When ``True``, ask the runner not to
+        start a crash-recovery turn during ``create_session``.  Must be
+        set whenever the caller will forward a message immediately after
+        this call: the server persists the message to DB before calling
+        session-init, so the runner's history load would otherwise see
+        the pending message and start a recovery turn — the subsequent
+        forward then arrives to an active turn, is buffered, and is
+        processed a second time once the (redundant) recovery turn
+        finishes.
     :returns: ``True`` when a current runner explicitly confirmed its native
         terminal is ready; ``False`` for legacy or non-native responses.
     """
@@ -2887,6 +2899,7 @@ async def _ensure_runner_session_initialized(
                 conv,
                 runner_client,
                 timeout=_RUNNER_SESSION_INIT_TIMEOUT_S,
+                suppress_recovery_turn=suppress_recovery_turn,
             )
         else:
             from omnigent.version import VERSION
@@ -2896,6 +2909,7 @@ async def _ensure_runner_session_initialized(
                 json=build_runner_session_init_payload(
                     conv,
                     server_version=VERSION,
+                    suppress_recovery_turn=suppress_recovery_turn,
                 ),
                 timeout=_RUNNER_SESSION_INIT_TIMEOUT_S,
             )
@@ -4414,6 +4428,7 @@ async def _relay_runner_stream(
                     # clients.
                     resource_item = _resource_event_item_from_sse(session_id, event)
                     if resource_item is not None:
+                        resource_data = resource_item.data
                         await _relay_persist(
                             conversation_store,
                             session_id,
@@ -4426,8 +4441,9 @@ async def _relay_runner_stream(
                         # between launch and clear). Only fire on a real
                         # state change to avoid redundant stream traffic.
                         if (
-                            resource_item.data.event_type == "session.resource.created"
-                            and resource_item.data.resource_type == "terminal"
+                            isinstance(resource_data, ResourceEventData)
+                            and resource_data.event_type == "session.resource.created"
+                            and resource_data.resource_type == "terminal"
                             and _session_terminal_pending_cache.get(session_id, False)
                         ):
                             _publish_terminal_pending(session_id, False)
@@ -5342,6 +5358,19 @@ async def _create_session_from_existing_agent(
             conversation_store,
         )
 
+    # Reject an undeclared sub-agent before persisting the row. Downstream
+    # spec swaps are all guarded by ``if ... is not None`` with no
+    # ``else``, so a name the parent's spec never declares would leave the
+    # parent spec/workdir/harness/instructions in place and boot the child
+    # as a parent clone. Fail loud here instead.
+    if body.sub_agent_name:
+        await asyncio.to_thread(
+            _require_declared_subagent,
+            agent=agent,
+            sub_agent_name=body.sub_agent_name,
+            agent_cache=agent_cache,
+        )
+
     # The persisted override reaches a native CLI as a ``--model`` argv
     # element at terminal launch, so reject shell-/flag-shaped values
     # before any row or worktree exists.
@@ -6099,7 +6128,7 @@ async def _handle_mcp_tools_call(
         # If the policy returned transformed arguments (e.g.
         # PII-redacted args), use them instead of the originals.
         if call_result.data is not None:
-            arguments = call_result.data
+            arguments = cast("dict[str, object]", call_result.data)
 
     # ── Server-side sys_advise_models intercept ──────────────────────────
     # After policy evaluation (DENY/ASK handled above); arguments may have
@@ -6323,18 +6352,13 @@ async def _fetch_model_options(
 
     Three shapes:
 
-    * **cursor-native** — a curated *static* base catalog
-      (:func:`omnigent.cursor_native.cursor_base_model_options`), returned
-      directly on every snapshot. It deliberately bypasses the runner-backed
-      cache below: the catalog never changes per session, and routing it
-      through that cache would let a ``refresh_state`` snapshot (which pops the
-      cache) blank the picker on an effort/model change.
-    * **codex-native / kiro-native** — a *live* catalog only the bound runner
-      can read (its app-server ``model/list``). Like skills, this stays off the
-      snapshot hot path: the first snapshot kicks a background fetch and returns
-      ``[]``; subsequent snapshots serve the cache. The cache outlives the
-      runner: with no runner bound (asleep session) it keeps serving, and a
-      stale-marked entry serves while a live re-fetch replaces it.
+    * **codex-native / cursor-native / kiro-native** — a *live* catalog only
+      the bound runner can read from the installed CLI. Like skills, this stays
+      off the snapshot hot path: the first snapshot kicks a background fetch
+      and returns ``[]``; subsequent snapshots serve the cache. The cache
+      outlives the runner: with no runner bound (asleep session) it keeps
+      serving, and a stale-marked entry serves while a live re-fetch replaces
+      it.
     * **claude-native** — the provider-neutral aliases from the exact launch
       config, refreshed from Databricks before each new terminal starts.
       With no runner bound and a cold cache (server restart while the
@@ -6350,10 +6374,6 @@ async def _fetch_model_options(
         the runner-owned options are not yet available.
     """
     wrapper = conv.labels.get(_CLAUDE_NATIVE_WRAPPER_LABEL_KEY)
-    if wrapper == _CURSOR_NATIVE_WRAPPER_LABEL_VALUE:
-        from omnigent.cursor_native import cursor_base_model_options
-
-        return cursor_base_model_options()
     if wrapper == _PI_NATIVE_WRAPPER_LABEL_VALUE:
         # pi-native's catalog is PUSHED by its extension (its live
         # ``ctx.modelRegistry``), not fetched: that reflects the models pi
@@ -6501,14 +6521,16 @@ async def _get_session_snapshot(
         runner_client = get_runner_client()
 
     if refresh_state:
-        # Re-discover runner-backed overlays. Drop the model catalog only
-        # when a live runner can serve the re-fetch immediately; with no
-        # runner bound the cached catalog is all there is — keep serving it
-        # (stale) so a reload of an asleep session doesn't blank the picker.
+        wrapper = conv.labels.get(_CLAUDE_NATIVE_WRAPPER_LABEL_KEY)
+        # Cursor effort/model changes refresh snapshots; keep its previous
+        # options visible until the asynchronous CLI re-fetch replaces them.
+        # Other live catalogs retain their existing drop-on-refresh contract.
         _invalidate_runner_backed_snapshot_state(
             session_id,
             cancel_inflight=False,
-            drop_model_options=runner_client is not None,
+            drop_model_options=(
+                runner_client is not None and wrapper != _CURSOR_NATIVE_WRAPPER_LABEL_VALUE
+            ),
         )
 
     status = _session_status_from_cache(session_id)
