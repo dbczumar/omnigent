@@ -1680,6 +1680,110 @@ describe("useMoveToProject", () => {
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
   });
 
+  it("moves a folder-only row into the target folder's cache (no sidebar vanish)", async () => {
+    // A row loaded only through an expanded folder's own pagination is absent
+    // from every ["conversations"] page, so the folder union can't re-home it.
+    // The overlay must insert it into the target folder's cache in the same
+    // pass that removes it from the source folder's.
+    let resolveList: (value: Response) => void = () => {};
+    fetchMock.mockReset();
+    fetchMock
+      .mockReturnValueOnce(
+        new Promise<Response>((resolve) => {
+          resolveList = resolve;
+        }),
+      )
+      .mockResolvedValueOnce(
+        mockResponse({
+          id: "conv_deep",
+          object: "conversation",
+          title: "t",
+          created_at: 0,
+          updated_at: 1,
+          project_id: "p_sprint",
+          labels: {},
+        }),
+      );
+    const queryClient = new QueryClient({ defaultOptions: { mutations: { retry: false } } });
+    queryClient.setQueryData(["projects"], [{ id: "p_sprint", name: "Sprint 42" }]);
+    queryClient.setQueryData(["conversations", "", false], infinitePage([]));
+    queryClient.setQueryData(
+      ["project-sessions", "Old folder"],
+      infinitePage([conversation({ id: "conv_deep", project_id: "p_old" })]),
+    );
+    queryClient.setQueryData(
+      ["project-sessions", "Sprint 42"],
+      infinitePage([conversation({ id: "conv_resident" })]),
+    );
+    const wrapper = ({ children }: { children: ReactNode }) =>
+      createElement(QueryClientProvider, { client: queryClient }, children);
+    const { result } = renderHook(() => useMoveToProject(), { wrapper });
+
+    result.current.mutate({ id: "conv_deep", project: "Sprint 42" });
+
+    await waitFor(() => {
+      const target = queryClient.getQueryData<ConversationsInfiniteData>([
+        "project-sessions",
+        "Sprint 42",
+      ]);
+      const moved = target!.pages[0].data.find((c) => c.id === "conv_deep")!;
+      expect(moved.project_id).toBe("p_sprint");
+    });
+    const oldFolder = queryClient.getQueryData<ConversationsInfiniteData>([
+      "project-sessions",
+      "Old folder",
+    ]);
+    expect(oldFolder!.pages[0].data.find((c) => c.id === "conv_deep")).toBeUndefined();
+
+    resolveList(mockResponse({ object: "list", data: [{ id: "p_sprint", name: "Sprint 42" }] }));
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+  });
+
+  it("keeps a folder-only row in its source folder when nothing else can show it", async () => {
+    // Same deep row, but the target folder has never been expanded (no cache
+    // to insert into) — dropping the source copy would blank the row from the
+    // sidebar until the refetches land, so the removal must be skipped.
+    let resolveList: (value: Response) => void = () => {};
+    fetchMock.mockReset();
+    fetchMock
+      .mockReturnValueOnce(
+        new Promise<Response>((resolve) => {
+          resolveList = resolve;
+        }),
+      )
+      .mockResolvedValueOnce(
+        mockResponse({
+          id: "conv_deep",
+          object: "conversation",
+          title: "t",
+          created_at: 0,
+          updated_at: 1,
+          project_id: "p_sprint",
+          labels: {},
+        }),
+      );
+    const queryClient = new QueryClient({ defaultOptions: { mutations: { retry: false } } });
+    queryClient.setQueryData(["projects"], [{ id: "p_sprint", name: "Sprint 42" }]);
+    queryClient.setQueryData(["conversations", "", false], infinitePage([]));
+    queryClient.setQueryData(
+      ["project-sessions", "Old folder"],
+      infinitePage([conversation({ id: "conv_deep", project_id: "p_old" })]),
+    );
+    const wrapper = ({ children }: { children: ReactNode }) =>
+      createElement(QueryClientProvider, { client: queryClient }, children);
+    const { result } = renderHook(() => useMoveToProject(), { wrapper });
+
+    result.current.mutate({ id: "conv_deep", project: "Sprint 42" });
+    resolveList(mockResponse({ object: "list", data: [{ id: "p_sprint", name: "Sprint 42" }] }));
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+
+    const oldFolder = queryClient.getQueryData<ConversationsInfiniteData>([
+      "project-sessions",
+      "Old folder",
+    ]);
+    expect(oldFolder!.pages[0].data.map((c) => c.id)).toEqual(["conv_deep"]);
+  });
+
   it("restores the previous membership when the PATCH fails", async () => {
     fetchMock.mockReset();
     fetchMock

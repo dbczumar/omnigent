@@ -1266,43 +1266,68 @@ export function useMoveToProject() {
 
   // Write a membership (project_id + labels) onto the row in every list cache
   // that may hold it, plus the pinned-row backfill cache. Fields are overlaid
-  // in place; folder-page membership is corrected only by REMOVAL (dropping
-  // the row from folders it just left, so a folder→folder move can't dual-
-  // show). The insert side needs no cache surgery: the sidebar unions each
-  // folder's pages with the globally-loaded window's members, so the overlaid
-  // flat-list row already renders inside the target folder.
+  // in place. Folder-page membership is a move: the target folder's cache
+  // gains the row when nothing else could render it there (a row outside the
+  // flat window has no other source — the sidebar unions folder pages with
+  // the window's members), and folders the row just left drop it, but only
+  // while it stays visible somewhere else — a briefly-stale old folder beats
+  // the row vanishing from the sidebar until the reconcile refetches land.
   const overlayMembership = (
-    id: string,
+    row: Conversation,
     projectId: string | null | undefined,
     labels: Record<string, string>,
     targetProjectName: string | null,
   ) => {
+    const id = row.id;
     const itemsById = new Map<string, SessionListWireItem>([
       [id, { id, project_id: projectId, labels }],
     ]);
+    let inWindow = false;
     for (const [key, data] of queryClient.getQueriesData<ConversationsInfiniteData>({
       queryKey: ["conversations"],
     })) {
-      const { data: next } = mergeItemsIntoPages(
+      const { data: next, found } = mergeItemsIntoPages(
         data,
         itemsById,
         filtersFromConversationQueryKey(key),
         undefined,
       );
+      if (found.has(id)) inWindow = true;
       if (next !== data) queryClient.setQueryData(key, next);
     }
-    for (const [key, data] of queryClient.getQueriesData<ConversationsInfiniteData>({
-      queryKey: ["project-sessions"],
-    })) {
-      if (key[1] === targetProjectName) {
-        const { data: next } = mergeItemsIntoPages(
-          data,
+    // Target folder cache: overlay the row's fields if already present, and
+    // insert a deep row (outside the flat window) into the first page.
+    let visibleOutsideOldFolders = inWindow;
+    if (targetProjectName !== null) {
+      const targetKey = ["project-sessions", targetProjectName];
+      const targetData = queryClient.getQueryData<ConversationsInfiniteData>(targetKey);
+      if (targetData) {
+        const { data: merged, found } = mergeItemsIntoPages(
+          targetData,
           itemsById,
           PROJECT_FOLDER_FILTERS,
           undefined,
         );
-        if (next !== data) queryClient.setQueryData(key, next);
-      } else {
+        let next = merged ?? targetData;
+        const [first, ...rest] = next.pages;
+        if (!found.has(id) && !inWindow && first) {
+          next = {
+            ...next,
+            pages: [
+              { ...first, data: [{ ...row, project_id: projectId, labels }, ...first.data] },
+              ...rest,
+            ],
+          };
+        }
+        if (next !== targetData) queryClient.setQueryData(targetKey, next);
+        if (found.has(id) || first !== undefined) visibleOutsideOldFolders = true;
+      }
+    }
+    if (visibleOutsideOldFolders) {
+      for (const [key, data] of queryClient.getQueriesData<ConversationsInfiniteData>({
+        queryKey: ["project-sessions"],
+      })) {
+        if (key[1] === targetProjectName) continue;
         const { data: next, removed } = removeIdsFromPages(data, new Set([id]));
         if (removed) queryClient.setQueryData(key, next);
       }
@@ -1348,7 +1373,7 @@ export function useMoveToProject() {
       const labels = Object.fromEntries(
         Object.entries(row.labels).filter(([labelKey]) => labelKey !== PROJECT_LABEL_KEY),
       );
-      overlayMembership(id, target, labels, project === "" ? null : project);
+      overlayMembership(row, target, labels, project === "" ? null : project);
       return previous;
     },
     onError: (_err, { id }, previous) => {
