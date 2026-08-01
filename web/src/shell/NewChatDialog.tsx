@@ -3051,7 +3051,10 @@ export function NewChatLandingScreen() {
           // useProjectSessions, separate from the global conversations list).
           void queryClient.invalidateQueries({ queryKey: ["project-sessions"] });
         } catch {
-          // Leave the session unfiled; the user can file it from the sidebar.
+          // Non-fatal: the create already stamped the `omni_project` label, so
+          // the session stays filed under its project by label even if this
+          // `project_id` promotion fails — the sidebar's dual-read grouping
+          // still shows it under the project.
         }
       }
       // Sandbox creates have no user-picked workspace to remember.
