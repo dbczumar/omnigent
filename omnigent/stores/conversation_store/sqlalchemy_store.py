@@ -3264,6 +3264,7 @@ class SqlAlchemyConversationStore(ConversationStore):
         resume_source_native_session: bool = True,
         presentation_labels: dict[str, str] | None = None,
         up_to_response_id: str | None = None,
+        project_id: str | None = None,
     ) -> Conversation:
         """
         Deep-copy a conversation and its items into a new conversation.
@@ -3345,6 +3346,11 @@ class SqlAlchemyConversationStore(ConversationStore):
             response is the source's last one the copy is equivalent to a
             full fork, so the directive is kept. ``None`` (default)
             copies the full history.
+        :param project_id: First-class project to file the fork into
+            (``metadata.project_id``), or ``None`` (default) to leave it
+            unfiled. The caller resolves whether the fork keeps the
+            source's project — projects are owner-private, so the route
+            passes the source's id only when the forker owns it.
         :returns: The newly created :class:`Conversation`.
         :raises LookupError: If no conversation with
             *source_conversation_id* exists.
@@ -3365,6 +3371,7 @@ class SqlAlchemyConversationStore(ConversationStore):
             resume_source_native_session=resume_source_native_session,
             presentation_labels=presentation_labels,
             up_to_response_id=up_to_response_id,
+            project_id=project_id,
         )
 
     def _fork_conversation_with_id(
@@ -3383,6 +3390,7 @@ class SqlAlchemyConversationStore(ConversationStore):
         resume_source_native_session: bool = True,
         presentation_labels: dict[str, str] | None = None,
         up_to_response_id: str | None = None,
+        project_id: str | None = None,
     ) -> Conversation:
         """Body of :meth:`fork_conversation` under a caller-supplied
         ``conversation_id``. The public method generates a fresh id; this seam
@@ -3604,6 +3612,9 @@ class SqlAlchemyConversationStore(ConversationStore):
                 kind=encode_conversation_kind("default"),
                 # Copy terminal args from source so the fork launches with same native args.
                 terminal_launch_args=source_terminal_args,
+                # First-class project membership, resolved by the caller
+                # (None = unfiled).
+                project_id=project_id,
             )
 
         # Write fork metadata (and cloned agent if any) to the Omnigent DB.
