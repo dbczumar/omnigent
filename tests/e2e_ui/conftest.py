@@ -135,6 +135,17 @@ executor:
   model: gpt-4o-mini
   harness: openai-agents
 
+# ``researcher`` sub-agent declared inline so the sub-agent create tests
+# (mobile workflow, subagent tab title) can spawn a child named
+# "researcher"; the create route rejects an undeclared sub_agent_name.
+tools:
+  researcher:
+    type: agent
+    prompt: You research questions and report findings.
+    executor:
+      model: gpt-4o-mini
+      harness: openai-agents
+
 # Required for PUT /filesystem/{path} seeding in UI tests (e.g. markdown
 # editor comments) — the runner returns 404 when os_env is absent.
 os_env:
@@ -743,12 +754,24 @@ def built_spa(request: pytest.FixtureRequest) -> None:
         # pnpm frozen-lockfile uses the root workspace lockfile, which
         # keeps the pinned tree matching CI and avoids re-resolving the
         # React peer conflicts that used to require --legacy-peer-deps.
+        # COREPACK_ENABLE_DOWNLOAD_PROMPT=0 keeps a corepack `pnpm` shim
+        # from blocking on its download confirmation under captured
+        # pytest output, which reads as a hung test run.
+        env = {**os.environ, "COREPACK_ENABLE_DOWNLOAD_PROMPT": "0"}
         subprocess.run(
             ["pnpm", "install", "--frozen-lockfile", "--filter", "web"],
             cwd=_REPO_ROOT,
             check=True,
+            stdin=subprocess.DEVNULL,
+            env=env,
         )
-        subprocess.run(["pnpm", "--filter", "web", "run", "build"], cwd=_REPO_ROOT, check=True)
+        subprocess.run(
+            ["pnpm", "--filter", "web", "run", "build"],
+            cwd=_REPO_ROOT,
+            check=True,
+            stdin=subprocess.DEVNULL,
+            env=env,
+        )
 
     _assert_pwa_build(_BUILD_OUTPUT)
 
@@ -2379,7 +2402,8 @@ def _create_native_codex_session(base_url: str, runner_id: str) -> str:
     auto-bootstrap: it launches Codex in the session terminal, derives the
     gateway auth from its own credentials, and pre-accepts the first-run
     trust/onboarding prompts — no CLI client required. ``model=None`` lets the
-    configured provider's default model win (matching ``_build_codex_native_bundle``).
+    configured provider's default model win (matching the seeded codex bundle
+    built via ``_build_native_bundle``).
 
     :param base_url: Spawned server base URL.
     :param runner_id: The token-bound runner id to bind.

@@ -55,6 +55,7 @@ import type {
 } from "@/lib/blocks";
 import { BlockStream } from "@/lib/blockStream";
 import { itemsToBlocks } from "@/lib/itemsToBlocks";
+import type { ConversationItem } from "@/lib/conversationItems";
 import { emitBrowserActionRequest } from "@/lib/browserActionBus";
 import {
   ApiError,
@@ -83,11 +84,7 @@ import { sessionItemsQueryKey } from "@/hooks/useSessionItems";
 import type { Conversation, ConversationsPage } from "@/hooks/useConversations";
 import type { ConversationsInfiniteData } from "@/lib/sessionListCache";
 import { useTerminalActivityStore } from "./terminalActivity";
-import {
-  terminalInfoFromResource,
-  terminalsQueryKey,
-  type TerminalInfo,
-} from "@/hooks/useTerminals";
+import { terminalInfoFromResource, terminalsQueryKey, type TerminalInfo } from "@/lib/terminals";
 import type {
   ContentBlock,
   ModelUsage,
@@ -475,11 +472,11 @@ export interface ChatState {
    * `session.todos` SSE events. Empty array for non-claude-native
    * sessions or before the first poll tick from the forwarder.
    */
-  todos: Array<{
+  todos: {
     content: string;
     status: "pending" | "in_progress" | "completed";
     activeForm: string;
-  }>;
+  }[];
   /**
    * Skills the bound agent can invoke (bundled + host-discovered).
    * Populated from the session snapshot on bind; empty array
@@ -669,6 +666,47 @@ export interface ChatState {
 
 let queryClient: QueryClient | null = null;
 
+/** Committed transcript and pagination cursor retained for an instant revisit. */
+interface CachedTranscript {
+  blocks: AnyBlock[];
+  oldestItemId: string | null;
+  hasMoreHistory: boolean;
+}
+
+// Module-scope LRU because only one conversation is active at a time.
+const TRANSCRIPT_CACHE_MAX = 10;
+const transcriptCache = new Map<string, CachedTranscript>();
+
+/** Read a conversation's cached transcript, or `null` when not cached. */
+function readTranscriptCache(id: string): CachedTranscript | null {
+  return transcriptCache.get(id) ?? null;
+}
+
+/** Cache committed blocks only; live and itemId-less state is rebound on revisit. */
+function writeTranscriptCache(id: string, state: ChatState): void {
+  const committed = state.blocks.filter((b) => Boolean(b.ctx.itemId) && !isLiveProvisionalBlock(b));
+  if (committed.length === 0) {
+    transcriptCache.delete(id);
+    return;
+  }
+  transcriptCache.delete(id);
+  transcriptCache.set(id, {
+    blocks: committed,
+    oldestItemId: state.oldestItemId,
+    hasMoreHistory: state.hasMoreHistory,
+  });
+  while (transcriptCache.size > TRANSCRIPT_CACHE_MAX) {
+    const oldest = transcriptCache.keys().next().value;
+    if (oldest === undefined) break;
+    transcriptCache.delete(oldest);
+  }
+}
+
+/** Evict a deleted conversation from the transcript cache. */
+export function evictTranscriptCache(id: string): void {
+  transcriptCache.delete(id);
+}
+
 // Catalogs that resolved while their bind snapshot was still hydrating.
 const racedNativeModelOptions = new Map<string, NativeModelOption[]>();
 let pendingSeq = 0;
@@ -789,6 +827,7 @@ export function initChatStore(client: QueryClient): void {
   workspaceInvalidationTimers.clear();
   backgroundFlushInFlight.clear();
   backgroundFlushCooldownUntil.clear();
+  transcriptCache.clear();
   // Reset the POST-ordering chain so a prior run's unresolved send can't block
   // the next one (production calls this once at boot; tests call it per case).
   sendChain = Promise.resolve();
@@ -1541,6 +1580,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // events to state.blocks.
     get().abortController?.abort();
 
+    // Write on switch-away; the return bind reconciles any later commits.
+    const outgoingId = get().conversationId;
+    if (outgoingId !== null) writeTranscriptCache(outgoingId, get());
+    const cached = conversationId !== null ? readTranscriptCache(conversationId) : null;
+
     set((s) => {
       // Stash the OUTGOING conversation's still-in-flight optimistic
       // bubbles and restore the INCOMING one's. Until a send's POST
@@ -1552,7 +1596,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       // that window and nothing more. Pruned to non-empty so the map
       // doesn't accrete stale keys; a restored bubble is reconciled
       // against the server snapshot in bindStream.
-      const pendingByConversation = { ...s.pendingByConversation };
+      let pendingByConversation = { ...s.pendingByConversation };
       if (s.conversationId !== null) {
         // Stash only THIS client's own UNSETTLED bubbles — client temp
         // ids (`pend_<n>`, set by send) whose POST hasn't returned.
@@ -1577,7 +1621,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
             committedTexts: committedUserTextsOf(s.blocks),
           };
         } else {
-          delete pendingByConversation[s.conversationId];
+          const { [s.conversationId]: _removedStash, ...remainingStashes } = pendingByConversation;
+          pendingByConversation = remainingStashes;
         }
       }
       return {
@@ -1587,9 +1632,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
         // sessions, so a leftover target (e.g. already consumed by the
         // navigate that brought us here) must not fire again.
         redirectToConversationId: null,
-        // Cleared here, so a different session's in-flight preview blocks
-        // (``live:*``) never bleed across.
-        blocks: [],
+        // A cold load clears the prior session; a cache hit paints immediately.
+        blocks: cached !== null ? cached.blocks : [],
         pendingUserMessages:
           conversationId !== null ? (pendingByConversation[conversationId]?.messages ?? []) : [],
         activeResponse: null,
@@ -1601,11 +1645,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
         nativeVendorOwnsModel: false,
         boundAgentId: null,
         boundAgentName: null,
-        loadingConversation: conversationId !== null,
+        // Cached history revalidates without the full-screen hydrate spinner.
+        loadingConversation: conversationId !== null && cached === null,
         conversationLoadError: null,
-        hasMoreHistory: false,
-        loadingMoreHistory: false,
-        oldestItemId: null,
+        hasMoreHistory: cached?.hasMoreHistory ?? false,
+        // Prevent cursor-relative scroll-up requests from racing the
+        // cache gap bridge. Revalidation clears this without showing UI.
+        loadingMoreHistory: cached !== null,
+        oldestItemId: cached?.oldestItemId ?? null,
         llmModel: null,
         sessionHarness: null,
         // ``selectedEffort`` / ``selectedModel`` are sticky user picks —
@@ -1643,7 +1690,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // native messages; when one was, bindStream dedupes it against the
     // committed snapshot. Reconnect/rebind paths pass false so they never
     // overwrite the live optimistic bubbles (which would flink).
-    await bindStream(conversationId, set, get, true);
+    // A cache hit gap-bridges newer commits onto the already-painted window.
+    await bindStream(conversationId, set, get, true, cached !== null);
   },
 
   submitApproval: async (elicitationId, action, content) => {
@@ -2204,10 +2252,22 @@ async function bindStream(
   set: Setter,
   get: Getter,
   hydratePending = false,
+  hydrateFromCache = false,
 ): Promise<void> {
   racedNativeModelOptions.delete(id);
   const controller = new AbortController();
   set({ abortController: controller });
+
+  const historyGeneration = get().historyGeneration;
+  const cachedItemIds = hydrateFromCache
+    ? new Set(
+        get()
+          .blocks.map((b) => b.ctx.itemId)
+          .filter((itemId): itemId is string => Boolean(itemId)),
+      )
+    : null;
+  const cacheHydrationStale = (): boolean =>
+    get().conversationId !== id || get().historyGeneration !== historyGeneration;
 
   void startStreamPump(id, controller, set, get);
 
@@ -2253,7 +2313,33 @@ async function bindStream(
       fetchSessionItemsPage(id),
     ]);
     if (get().conversationId !== id) return;
-    const items = page.items;
+
+    let historyPage = page;
+    let replaceCachedWindow = false;
+    if (cachedItemIds !== null) {
+      try {
+        const bridged = await backfillItemsUntilCovered(
+          id,
+          page,
+          cachedItemIds,
+          cacheHydrationStale,
+        );
+        if (bridged === "stale") {
+          if (!cacheHydrationStale()) set({ loadingMoreHistory: false });
+          return;
+        }
+        if (bridged === "uncovered") {
+          replaceCachedWindow = true;
+        } else {
+          historyPage = bridged;
+        }
+      } catch (err) {
+        console.warn(`Failed to backfill cached transcript for session ${id}:`, err);
+        historyPage = { items: [], hasMore: page.hasMore };
+      }
+      if (cacheHydrationStale()) return;
+    }
+    const items = historyPage.items;
 
     // Sticky-pref handoff for CLI-created sessions with no override.
     const nativeModelFamily = nativeModelFamilyForSession(session);
@@ -2351,6 +2437,28 @@ async function bindStream(
         state.blocks.map((b) => b.ctx.itemId).filter((iid): iid is string => Boolean(iid)),
       );
       const unique = snapshotBlocks.filter((b) => !b.ctx.itemId || !seenItemIds.has(b.ctx.itemId));
+      let transcriptBlocks: AnyBlock[];
+      if (cachedItemIds === null) {
+        transcriptBlocks = [...unique, ...state.blocks];
+      } else if (!replaceCachedWindow) {
+        transcriptBlocks =
+          unique.length > 0 ? spliceUnseenAheadOfInFlight(state, unique) : state.blocks;
+      } else {
+        const rid =
+          state.activeResponse?.state === "streaming" ? state.activeResponse.responseId : null;
+        const liveTail = state.blocks.filter((b) => {
+          if (b.ctx.itemId) return !cachedItemIds.has(b.ctx.itemId);
+          if (b.type === "elicitation" || b.type === "error") return true;
+          return rid !== null && b.ctx.responseId === rid;
+        });
+        const liveTailIds = new Set(
+          liveTail.map((b) => b.ctx.itemId).filter((itemId): itemId is string => Boolean(itemId)),
+        );
+        transcriptBlocks = [
+          ...snapshotBlocks.filter((b) => !b.ctx.itemId || !liveTailIds.has(b.ctx.itemId)),
+          ...liveTail,
+        ];
+      }
       // Dedupe against any elicitation blocks already produced by
       // the live pump (the snapshot may race ahead of or behind
       // the SSE event — match by elicitationId).
@@ -2373,7 +2481,7 @@ async function bindStream(
       // live blocks the pump already inserted) so the ApprovalCard
       // appears at the bottom of the chat — same position the live
       // stream would have given it.
-      const allBlocks = [...unique, ...state.blocks, ...uniquePendingElicitations];
+      const allBlocks = [...transcriptBlocks, ...uniquePendingElicitations];
       const hasErrorBlock = allBlocks.some((b) => b.type === "error");
       // Decide the optimistic user bubbles to render after this bind, and
       // (on cold load) keep the per-conversation stash consistent.
@@ -2461,10 +2569,14 @@ async function bindStream(
       const prunedStash = hydratePending
         ? (() => {
             const own = snapshotPending.filter((p) => p.tempId.startsWith("pend_"));
-            const next = { ...state.pendingByConversation };
-            if (own.length > 0) next[id] = { messages: own, committedTexts: committedUserTexts };
-            else delete next[id];
-            return next;
+            if (own.length > 0) {
+              return {
+                ...state.pendingByConversation,
+                [id]: { messages: own, committedTexts: committedUserTexts },
+              };
+            }
+            const { [id]: _removedStash, ...remainingStashes } = state.pendingByConversation;
+            return remainingStashes;
           })()
         : state.pendingByConversation;
       const syntheticError: ErrorBlock | null =
@@ -2477,17 +2589,19 @@ async function bindStream(
               code: session.lastTaskError.code,
             }
           : null;
+      const preserveCachedCursor = cachedItemIds !== null && !replaceCachedWindow;
       return {
         ...effectiveBindingPatch,
+        ...(cachedItemIds !== null ? reconnectStatusPatch(session, state) : {}),
         blocks: syntheticError !== null ? [...allBlocks, syntheticError] : allBlocks,
         pendingUserMessages: snapshotPending,
         pendingByConversation: prunedStash,
         loadingConversation: false,
-        hasMoreHistory: page.hasMore,
-        oldestItemId,
-        // The window cursor was reset: void any in-flight loadMoreHistory.
-        historyGeneration: state.historyGeneration + 1,
-        // The voided page's stale early-return skips its own flag clear.
+        hasMoreHistory: preserveCachedCursor ? state.hasMoreHistory : historyPage.hasMore,
+        oldestItemId: preserveCachedCursor ? state.oldestItemId : oldestItemId,
+        historyGeneration: preserveCachedCursor
+          ? state.historyGeneration
+          : state.historyGeneration + 1,
         loadingMoreHistory: false,
         sessionStatus: session.status,
         // Re-show "N background tasks still running" after a reload/navigate-back: the
@@ -2507,11 +2621,11 @@ async function bindStream(
         tokensUsed: session.lastTotalTokens ?? null,
         sessionCostUsd: session.totalCostUsd ?? null,
         sessionUsageByModel: session.usageByModel ?? null,
-        todos: (session.todos ?? []) as Array<{
+        todos: (session.todos ?? []) as {
           content: string;
           status: "pending" | "in_progress" | "completed";
           activeForm: string;
-        }>,
+        }[],
       };
     });
     racedNativeModelOptions.delete(id);
@@ -2519,6 +2633,7 @@ async function bindStream(
     if (get().conversationId !== id) return;
     set({
       loadingConversation: false,
+      loadingMoreHistory: false,
       conversationLoadError: err instanceof Error ? err : new Error(String(err)),
     });
   }
@@ -2852,6 +2967,52 @@ async function rehydrateWindowOnReconnect(
   });
 }
 
+/** Page backwards until a newest-first window overlaps the painted transcript. */
+async function backfillItemsUntilCovered(
+  id: string,
+  firstPage: SessionItemsPage,
+  preGapIds: Set<string>,
+  stale: () => boolean,
+): Promise<{ items: ConversationItem[]; hasMore: boolean } | "uncovered" | "stale"> {
+  let items = firstPage.items;
+  let hasMore = firstPage.hasMore;
+  let covered = preGapIds.size === 0 || items.some((it) => preGapIds.has(it.id));
+  /* oxlint-disable no-await-in-loop */
+  for (
+    let fetched = 1;
+    hasMore && !covered && fetched < RECONNECT_BACKFILL_MAX_PAGES;
+    fetched += 1
+  ) {
+    const cursor = items[0]?.id;
+    if (!cursor) break;
+    const older = await fetchSessionItemsPage(id, { olderThan: cursor });
+    if (stale()) return "stale";
+    items = [...older.items, ...items];
+    hasMore = older.hasMore;
+    covered = older.items.some((it) => preGapIds.has(it.id));
+    if (older.items.length === 0) break; // no progress; avoid refetching the same cursor
+  }
+  /* oxlint-enable no-await-in-loop */
+  if (!covered) return "uncovered";
+  return { items, hasMore };
+}
+
+/** Insert committed gap items before the active turn's itemId-less replay tail. */
+function spliceUnseenAheadOfInFlight(state: ChatState, unseen: AnyBlock[]): AnyBlock[] {
+  const rid = state.activeResponse?.state === "streaming" ? state.activeResponse.responseId : null;
+  let at = -1;
+  if (rid) {
+    at = state.blocks.findIndex((b) => b.ctx.responseId === rid && !b.ctx.itemId);
+    if (at === -1) {
+      const lastRid = state.blocks.findLastIndex((b) => b.ctx.responseId === rid);
+      if (lastRid !== -1) at = lastRid + 1;
+    }
+  }
+  return at >= 0
+    ? [...state.blocks.slice(0, at), ...unseen, ...state.blocks.slice(at)]
+    : [...state.blocks, ...unseen];
+}
+
 /**
  * Reconcile committed state after a reconnect.
  *
@@ -2915,35 +3076,18 @@ async function reconcileOnReconnect(id: string, set: Setter, get: Getter): Promi
   }
   if (stale()) return;
 
-  // Page backwards until the fetched window reaches the pre-gap transcript
-  // or the conversation start. A single newest page is not enough: a gap
-  // longer than one page would otherwise leave items no code path can ever
-  // fetch (loadMoreHistory only pages older than the pre-gap window top).
-  let items = page.items;
-  let hasMore = page.hasMore;
-  let covered = !hasMore || items.some((it) => preGapIds.has(it.id));
-  // Each page starts before the cursor returned by the prior page.
-  /* oxlint-disable no-await-in-loop */
-  for (let fetched = 1; !covered && fetched < RECONNECT_BACKFILL_MAX_PAGES; fetched += 1) {
-    const cursor = items[0]?.id;
-    if (!cursor) break;
-    let older: SessionItemsPage;
-    try {
-      older = await fetchSessionItemsPage(id, { olderThan: cursor });
-    } catch {
-      return;
-    }
-    if (stale()) return;
-    items = [...older.items, ...items];
-    hasMore = older.hasMore;
-    covered = !hasMore || older.items.some((it) => preGapIds.has(it.id));
-    if (older.items.length === 0) break; // no progress; avoid refetching the same cursor
+  let bridged: Awaited<ReturnType<typeof backfillItemsUntilCovered>>;
+  try {
+    bridged = await backfillItemsUntilCovered(id, page, preGapIds, stale);
+  } catch {
+    return;
   }
-  /* oxlint-enable no-await-in-loop */
-  if (!covered) {
+  if (bridged === "stale") return;
+  if (bridged === "uncovered") {
     await rehydrateWindowOnReconnect(id, session, preGapIds, preGapElicitations, set, get);
     return;
   }
+  const items = bridged.items;
 
   const snapshotBlocks = itemsToBlocks(items);
   const snapshotPending = pendingElicitationBlocksFromSnapshot(session);
@@ -2953,28 +3097,7 @@ async function reconcileOnReconnect(id: string, set: Setter, get: Getter): Promi
     );
     const unseen = snapshotBlocks.filter((b) => b.ctx.itemId && !seen.has(b.ctx.itemId));
     const patch: Partial<ChatState> = reconnectStatusPatch(session, s);
-    let nextBlocks = s.blocks;
-    if (unseen.length > 0) {
-      // Splice the gap's committed items ahead of the active turn's
-      // replayed in-flight region (its itemId-less blocks, rebuilt by the
-      // pump at the tail). With no replay region yet, anchor AFTER the
-      // rid's last block: the rid's gap items are newer than its pre-gap
-      // committed blocks, so before-its-first would invert the bubble.
-      // No rid blocks at all: append; the later replay lands after.
-      const rid = s.activeResponse?.state === "streaming" ? s.activeResponse.responseId : null;
-      let at = -1;
-      if (rid) {
-        at = s.blocks.findIndex((b) => b.ctx.responseId === rid && !b.ctx.itemId);
-        if (at === -1) {
-          const lastRid = s.blocks.findLastIndex((b) => b.ctx.responseId === rid);
-          if (lastRid !== -1) at = lastRid + 1;
-        }
-      }
-      nextBlocks =
-        at >= 0
-          ? [...s.blocks.slice(0, at), ...unseen, ...s.blocks.slice(at)]
-          : [...s.blocks, ...unseen];
-    }
+    let nextBlocks = unseen.length > 0 ? spliceUnseenAheadOfInFlight(s, unseen) : s.blocks;
     // Recover elicitation state the dead socket swallowed: gap-fired
     // prompts, gap-resolved cards, and re-parked prompts whose card
     // was auto-cleared. Items can't resupply these (elicitations are
@@ -3973,10 +4096,9 @@ function removeFromPendingStash(
   const entry = stash[conversationId];
   if (!entry || !entry.messages.some((p) => p.tempId === tempId)) return stash;
   const messages = entry.messages.filter((p) => p.tempId !== tempId);
-  const next = { ...stash };
-  if (messages.length > 0) next[conversationId] = { ...entry, messages };
-  else delete next[conversationId];
-  return next;
+  if (messages.length > 0) return { ...stash, [conversationId]: { ...entry, messages } };
+  const { [conversationId]: _removedStash, ...remainingStashes } = stash;
+  return remainingStashes;
 }
 
 /**
@@ -4498,8 +4620,8 @@ export function handleSessionEvent(event: StreamEvent): void {
         // user bubble would otherwise spin forever. Drop the superseded
         // conversation's pending bubbles (live view + the navigate-back
         // stash) since the turn is over; resuming starts a fresh one.
-        const pendingByConversation = { ...s.pendingByConversation };
-        delete pendingByConversation[event.conversationId];
+        const { [event.conversationId]: _removedStash, ...pendingByConversation } =
+          s.pendingByConversation;
         return {
           redirectToConversationId: event.targetConversationId,
           pendingUserMessages: [],

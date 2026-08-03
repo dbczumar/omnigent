@@ -15,6 +15,8 @@
 // Session metadata and item pages are shimmed through `seedSession`
 // helpers so tests can model capped snapshots and full transcripts.
 
+import type * as IdentityModule from "@/lib/identity";
+
 import { type InfiniteData, QueryClient } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Conversation, ConversationsPage } from "@/hooks/useConversations";
@@ -70,7 +72,7 @@ const realSend = useChatStore.getState().send;
 // per-test `mockReturnValue` works; reset in afterEach so a stubbed
 // identity never leaks across tests.
 vi.mock("@/lib/identity", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("@/lib/identity")>();
+  const actual = await importOriginal<typeof IdentityModule>();
   return { ...actual, getCurrentAuthorId: vi.fn<() => string | null>(() => null) };
 });
 
@@ -174,10 +176,10 @@ let client: QueryClient;
 const fetchMock = vi.fn();
 let sessionSnapshots: Map<string, ConversationItem[]>;
 let sessionItems: Map<string, ConversationItem[]>;
-let sessionPendingElicitations: Map<string, Array<Record<string, unknown>>>;
+let sessionPendingElicitations: Map<string, Record<string, unknown>[]>;
 let sessionPendingInputs: Map<
   string,
-  Array<{ pending_id: string; content: unknown[]; created_by?: string }>
+  { pending_id: string; content: unknown[]; created_by?: string }[]
 >;
 // Per-session cost-control switch the snapshot/PATCH handlers serve;
 // absent key = unset (the wire field comes back null).
@@ -408,13 +410,13 @@ function seedSessionItems(id: string, items: ConversationItem[] = []): void {
   sessionItems.set(id, items);
 }
 
-function seedPendingElicitations(id: string, events: Array<Record<string, unknown>>): void {
+function seedPendingElicitations(id: string, events: Record<string, unknown>[]): void {
   sessionPendingElicitations.set(id, events);
 }
 
 function seedPendingInputs(
   id: string,
-  inputs: Array<{ pending_id: string; content: unknown[]; created_by?: string }>,
+  inputs: { pending_id: string; content: unknown[]; created_by?: string }[],
 ): void {
   sessionPendingInputs.set(id, inputs);
 }
@@ -438,6 +440,197 @@ describe("chatStore — switchTo", () => {
     expect(user.content).toEqual([{ type: "input_text", text: "hello" }]);
     expect(state.loadingConversation).toBe(false);
     expect(state.conversationLoadError).toBeNull();
+  });
+
+  it("paints a cached transcript immediately and revalidates it silently", async () => {
+    const cachedItems = [
+      userMessage("cache_1", "cached prompt"),
+      assistantMessage("cache_1", "cached answer"),
+    ];
+    seedSession("conv_cached", cachedItems);
+    seedSession("conv_other", []);
+    await useChatStore.getState().switchTo("conv_cached");
+
+    const livePreview: AnyBlock = {
+      type: "text_done",
+      ctx: {
+        agent: null,
+        depth: 0,
+        turn: 0,
+        timestamp: 0,
+        responseId: "live:preview",
+        itemId: "live:preview",
+      },
+      fullText: "not cacheable",
+      hasCodeBlocks: false,
+    };
+    useChatStore.setState((state) => ({ blocks: [...state.blocks, livePreview] }));
+    await useChatStore.getState().switchTo("conv_other");
+
+    let releaseItems: (() => void) | null = null;
+    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url.startsWith("/v1/sessions/conv_cached/items?") && releaseItems === null) {
+        return new Promise<Response>((resolve) => {
+          releaseItems = () => resolve(defaultFetchHandler(input, init));
+        }) as unknown as Response;
+      }
+      return defaultFetchHandler(input, init);
+    });
+
+    const revisit = useChatStore.getState().switchTo("conv_cached");
+    const immediate = useChatStore.getState();
+    expect(immediate.loadingConversation).toBe(false);
+    expect(immediate.blocks.map((b) => b.ctx.itemId)).toEqual(cachedItems.map((item) => item.id));
+
+    await tick();
+    expect(releaseItems).not.toBeNull();
+    releaseItems!();
+    await revisit;
+
+    const settled = useChatStore.getState();
+    expect(settled.blocks.map((b) => b.ctx.itemId)).toEqual(cachedItems.map((item) => item.id));
+    expect(settled.loadingMoreHistory).toBe(false);
+  });
+
+  it("bridges a multi-page cache gap without resetting the older-history cursor", async () => {
+    const before = Array.from({ length: 30 }, (_, i) =>
+      userMessage(`cache_before_${i}`, `before ${i}`),
+    );
+    const gap = Array.from({ length: 45 }, (_, i) => userMessage(`cache_gap_${i}`, `gap ${i}`));
+    seedSession("conv_cached_gap", before);
+    seedSession("conv_other", []);
+
+    await useChatStore.getState().switchTo("conv_cached_gap");
+    const cachedOldest = useChatStore.getState().oldestItemId;
+    await useChatStore.getState().switchTo("conv_other");
+
+    seedSession("conv_cached_gap", [...before, ...gap]);
+    await useChatStore.getState().switchTo("conv_cached_gap");
+
+    const state = useChatStore.getState();
+    expect(state.blocks.map((b) => b.ctx.itemId)).toEqual(
+      [...before.slice(-SESSION_HISTORY_PAGE_SIZE), ...gap].map((item) => item.id),
+    );
+    expect(state.oldestItemId).toBe(cachedOldest);
+    expect(state.hasMoreHistory).toBe(true);
+  });
+
+  it("keeps cached history and applies session metadata when a later backfill page fails", async () => {
+    const before = Array.from({ length: 30 }, (_, i) =>
+      userMessage(`cache_error_before_${i}`, `before ${i}`),
+    );
+    const gap = Array.from({ length: 45 }, (_, i) =>
+      userMessage(`cache_error_gap_${i}`, `gap ${i}`),
+    );
+    seedSession("conv_cached_error", before);
+    seedSession("conv_other", []);
+
+    await useChatStore.getState().switchTo("conv_cached_error");
+    const cachedBlockIds = useChatStore.getState().blocks.map((block) => block.ctx.itemId);
+    await useChatStore.getState().switchTo("conv_other");
+
+    seedSession("conv_cached_error", [...before, ...gap]);
+    sessionCostControlOverrides.set("conv_cached_error", "on");
+    let itemFetches = 0;
+    fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url.startsWith("/v1/sessions/conv_cached_error/items?")) {
+        itemFetches += 1;
+        if (itemFetches === 3) {
+          return mockResponse({ error: "boom" }, { ok: false, status: 500 });
+        }
+      }
+      return defaultFetchHandler(input, init);
+    });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+    try {
+      await useChatStore.getState().switchTo("conv_cached_error");
+    } finally {
+      warn.mockRestore();
+    }
+
+    const state = useChatStore.getState();
+    expect(itemFetches).toBe(3);
+    expect(state.blocks.map((block) => block.ctx.itemId)).toEqual(cachedBlockIds);
+    expect(state.costControlModeOverride).toBe("on");
+    expect(state.loadingMoreHistory).toBe(false);
+    expect(state.conversationLoadError).toBeNull();
+  });
+
+  it("replaces the cached window when the gap exceeds the backfill cap", async () => {
+    const before = Array.from({ length: 30 }, (_, i) =>
+      userMessage(`cache_cap_before_${i}`, `before ${i}`),
+    );
+    const gap = Array.from({ length: 100 }, (_, i) =>
+      userMessage(`cache_cap_gap_${i}`, `gap ${i}`),
+    );
+    seedSession("conv_cached_cap", before);
+    seedSession("conv_other", []);
+
+    await useChatStore.getState().switchTo("conv_cached_cap");
+    await useChatStore.getState().switchTo("conv_other");
+    seedSession("conv_cached_cap", [...before, ...gap]);
+    await useChatStore.getState().switchTo("conv_cached_cap");
+
+    expect(useChatStore.getState().blocks.map((b) => b.ctx.itemId)).toEqual(
+      gap.slice(-SESSION_HISTORY_PAGE_SIZE).map((item) => item.id),
+    );
+    await useChatStore.getState().loadMoreHistory();
+    expect(useChatStore.getState().blocks.map((b) => b.ctx.itemId)).toEqual(
+      gap.slice(-2 * SESSION_HISTORY_PAGE_SIZE).map((item) => item.id),
+    );
+  });
+
+  it("replaces a cached transcript that no longer overlaps server history", async () => {
+    seedSession("conv_cached_replaced", [userMessage("cache_old", "old")]);
+    seedSession("conv_other", []);
+    await useChatStore.getState().switchTo("conv_cached_replaced");
+    await useChatStore.getState().switchTo("conv_other");
+
+    const replacement = userMessage("cache_new", "new");
+    seedSession("conv_cached_replaced", [replacement]);
+    await useChatStore.getState().switchTo("conv_cached_replaced");
+
+    expect(useChatStore.getState().blocks.map((b) => b.ctx.itemId)).toEqual([replacement.id]);
+  });
+
+  it("evicts the least-recently-written transcript after ten entries", async () => {
+    for (let i = 0; i <= 10; i += 1) {
+      const id = `conv_cache_lru_${i}`;
+      seedSession(id, [userMessage(`cache_lru_${i}`, `message ${i}`)]);
+      // Sequential switches are required because each one caches the prior session.
+      // oxlint-disable-next-line eslint/no-await-in-loop
+      await useChatStore.getState().switchTo(id);
+    }
+
+    const revisit = useChatStore.getState().switchTo("conv_cache_lru_0");
+    expect(useChatStore.getState().loadingConversation).toBe(true);
+    expect(useChatStore.getState().blocks).toEqual([]);
+    await revisit;
+  });
+
+  it("keeps a superseded conversation cacheable after redirect navigation", async () => {
+    const items = [userMessage("cache_superseded", "old")];
+    seedSession("conv_superseded_cache", items);
+    seedSession("conv_other", []);
+    await useChatStore.getState().switchTo("conv_superseded_cache");
+
+    handleSessionEvent({
+      type: "session_superseded",
+      conversationId: "conv_superseded_cache",
+      targetConversationId: "conv_replacement",
+      reason: "clear",
+    });
+    await useChatStore.getState().switchTo("conv_other");
+
+    const revisit = useChatStore.getState().switchTo("conv_superseded_cache");
+    expect(useChatStore.getState().loadingConversation).toBe(false);
+    expect(useChatStore.getState().blocks.map((block) => block.ctx.itemId)).toEqual(
+      items.map((item) => item.id),
+    );
+    await revisit;
   });
 
   it("hydrates pendingUserMessages from the snapshot's pending_inputs (native rebind)", async () => {
@@ -1559,7 +1752,7 @@ describe("chatStore — send (first-send ordering)", () => {
     // Control /events resolution: each POST returns a deferred promise so the
     // test can hold the first one open and observe whether the next fires.
     const eventBodies: string[] = [];
-    const resolvers: Array<() => void> = [];
+    const resolvers: (() => void)[] = [];
     fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
       const url = typeof input === "string" ? input : input.toString();
       if (url === "/v1/sessions/conv_x/events" && init?.method === "POST") {
@@ -3578,7 +3771,7 @@ describe("chatStore — handleSessionEvent (session.* events)", () => {
      */
     function seedSnapshotSkills(
       seedId: string,
-      skills: Array<{ name: string; description: string }>,
+      skills: { name: string; description: string }[],
     ): void {
       fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
         const url = typeof input === "string" ? input : input.toString();
@@ -5147,7 +5340,7 @@ describe("chatStore — bindStream sticky-pref handoff", () => {
     model_override?: string | null;
     cost_control_mode_override?: "on" | "off" | null;
     parent_session_id?: string | null;
-    model_options?: Array<Record<string, unknown>>;
+    model_options?: Record<string, unknown>[];
   }
 
   /** Override the snapshot GET so a test can inject labels + overrides. */
@@ -5174,7 +5367,7 @@ describe("chatStore — bindStream sticky-pref handoff", () => {
     });
   }
 
-  function patchCallsFor(id: string): Array<Record<string, unknown>> {
+  function patchCallsFor(id: string): Record<string, unknown>[] {
     return fetchMock.mock.calls
       .filter(([u, init]) => {
         const url = typeof u === "string" ? u : u.toString();
@@ -7075,7 +7268,7 @@ describe("chatStore — startStreamPump reconnect loop", () => {
   }
 
   /** The `live:<messageId>` provisional preview blocks currently rendered. */
-  function livePreviews(): Array<Extract<AnyBlock, { type: "text_done" }>> {
+  function livePreviews(): Extract<AnyBlock, { type: "text_done" }>[] {
     return useChatStore
       .getState()
       .blocks.filter(
@@ -8627,7 +8820,7 @@ describe("chatStore — client-side message queue", () => {
 
 describe("chatStore — background cross-session flush", () => {
   /** /events POSTs the flush fired, as (conversationId, text) pairs. */
-  const eventPosts = (): Array<{ id: string; text: string }> =>
+  const eventPosts = (): { id: string; text: string }[] =>
     fetchMock.mock.calls
       .filter(
         ([u, init]) =>
