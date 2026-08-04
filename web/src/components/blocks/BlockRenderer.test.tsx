@@ -29,7 +29,7 @@ const renderMarkdownText = (text: string) =>
     <FileViewerContext.Provider value={FILE_VIEWER_NOOP}>
       <BlockRenderer
         items={[{ kind: "text", itemId: "t1", text, final: true }]}
-        sessionStatus="idle"
+        lifecycle="completed"
       />
     </FileViewerContext.Provider>,
   );
@@ -46,7 +46,7 @@ describe("BlockRenderer dispatch", () => {
         output: null,
       },
     ];
-    render(<BlockRenderer items={items} sessionStatus="idle" />);
+    render(<BlockRenderer items={items} lifecycle="completed" />);
     expect(screen.getByText("Skill")).toBeDefined();
     expect(screen.getByText("dev-productivity:simplify")).toBeDefined();
   });
@@ -65,7 +65,7 @@ describe("BlockRenderer dispatch", () => {
         output: null,
       },
     ];
-    render(<BlockRenderer items={items} sessionStatus="idle" />);
+    render(<BlockRenderer items={items} lifecycle="completed" />);
     expect(screen.getByText("Command")).toBeDefined();
     expect(screen.getByText("effort")).toBeDefined();
   });
@@ -81,7 +81,7 @@ describe("BlockRenderer dispatch", () => {
         stderr: null,
       },
     ];
-    render(<BlockRenderer items={items} sessionStatus="idle" />);
+    render(<BlockRenderer items={items} lifecycle="completed" />);
     const card = screen.getByTestId("terminal-command-card");
     expect(card.getAttribute("data-terminal-kind")).toBe("input");
     expect(screen.getByText("pwd")).toBeDefined();
@@ -98,7 +98,7 @@ describe("BlockRenderer dispatch", () => {
         stderr: "",
       },
     ];
-    render(<BlockRenderer items={items} sessionStatus="idle" />);
+    render(<BlockRenderer items={items} lifecycle="completed" />);
     const card = screen.getByTestId("terminal-command-card");
     expect(card.getAttribute("data-terminal-kind")).toBe("output");
   });
@@ -124,7 +124,7 @@ describe("BlockRenderer dispatch", () => {
       },
     ];
 
-    const { container } = render(<BlockRenderer items={items} sessionStatus="idle" />);
+    const { container } = render(<BlockRenderer items={items} lifecycle="completed" />);
 
     const alert = screen.getByRole("alert");
     expect(alert).toHaveClass("min-w-0");
@@ -146,20 +146,82 @@ describe("BlockRenderer dispatch", () => {
     );
   });
 
-  it("treats a trailing reasoning item as streaming when sessionStatus is running", () => {
+  it("treats a trailing reasoning item as streaming when its bubble is streaming", () => {
     const items: RenderItem[] = [
       { kind: "reasoning", itemId: null, text: "thinking", duration: undefined },
     ];
-    render(<BlockRenderer items={items} sessionStatus="running" />);
+    render(<BlockRenderer items={items} lifecycle="streaming" />);
     expect(screen.getByText("Thinking...")).toBeDefined();
   });
 
-  it("does NOT treat a reasoning item as streaming when sessionStatus is idle", () => {
+  it("does NOT treat a reasoning item as streaming when its bubble is completed", () => {
     const items: RenderItem[] = [
       { kind: "reasoning", itemId: null, text: "thinking", duration: undefined },
     ];
-    render(<BlockRenderer items={items} sessionStatus="idle" />);
+    render(<BlockRenderer items={items} lifecycle="completed" />);
     expect(screen.queryByText("Thinking...")).toBeNull();
+  });
+
+  it("uses session liveness only for the latest completed reasoning bubble", () => {
+    const items: RenderItem[] = [
+      { kind: "reasoning", itemId: null, text: "thinking", duration: 7.5 },
+    ];
+    const { rerender } = render(
+      <BlockRenderer items={items} lifecycle="completed" sessionStatus="running" showsWorking />,
+    );
+    expect(screen.queryByText("Thinking...")).toBeNull();
+    expect(screen.queryByText("Thought for 7.5 seconds")).toBeNull();
+    expect(screen.getByText("Thought for a few seconds")).toBeDefined();
+
+    rerender(
+      <BlockRenderer
+        items={items}
+        lifecycle="completed"
+        sessionStatus="running"
+        isLatestBubble
+        showsWorking
+      />,
+    );
+    expect(screen.getByText("Thinking...")).toBeDefined();
+    expect(screen.queryByText("Thought for 7.5 seconds")).toBeNull();
+  });
+
+  it("does not show incrementing thought duration while a bubble is still active", () => {
+    const items: RenderItem[] = [
+      { kind: "reasoning", itemId: null, text: "thinking", duration: 16.8 },
+      { kind: "text", itemId: "t1", text: "still working", final: false },
+    ];
+    render(
+      <BlockRenderer
+        items={items}
+        lifecycle="completed"
+        sessionStatus="running"
+        isLatestBubble
+        showsWorking
+      />,
+    );
+    expect(screen.queryByText("Thinking...")).toBeNull();
+    expect(screen.queryByText("Thought for 16.8 seconds")).toBeNull();
+    expect(screen.getByText("Thought for a few seconds")).toBeDefined();
+  });
+
+  it("also suppresses incrementing thought duration for non-running working states", () => {
+    const items: RenderItem[] = [
+      { kind: "reasoning", itemId: null, text: "thinking", duration: 9.4 },
+      { kind: "text", itemId: "t1", text: "background still active", final: false },
+    ];
+    render(
+      <BlockRenderer
+        items={items}
+        lifecycle="completed"
+        sessionStatus="waiting"
+        isLatestBubble
+        showsWorking
+      />,
+    );
+    expect(screen.queryByText("Thinking...")).toBeNull();
+    expect(screen.queryByText("Thought for 9.4 seconds")).toBeNull();
+    expect(screen.getByText("Thought for a few seconds")).toBeDefined();
   });
 
   it("does NOT treat reasoning as streaming once a text item follows it", () => {
@@ -167,7 +229,7 @@ describe("BlockRenderer dispatch", () => {
       { kind: "reasoning", itemId: null, text: "thinking", duration: undefined },
       { kind: "text", itemId: "t1", text: "hello", final: false },
     ];
-    render(<BlockRenderer items={items} sessionStatus="running" />);
+    render(<BlockRenderer items={items} lifecycle="streaming" />);
     expect(screen.queryByText("Thinking...")).toBeNull();
   });
 
@@ -179,7 +241,7 @@ describe("BlockRenderer dispatch", () => {
 
     const { container } = render(
       <FileViewerContext.Provider value={FILE_VIEWER_NOOP}>
-        <BlockRenderer items={items} sessionStatus="idle" />
+        <BlockRenderer items={items} lifecycle="completed" />
       </FileViewerContext.Provider>,
     );
 
@@ -223,7 +285,7 @@ describe("BlockRenderer dispatch", () => {
 
     const { container } = render(
       <FileViewerContext.Provider value={FILE_VIEWER_NOOP}>
-        <BlockRenderer items={items} sessionStatus="idle" />
+        <BlockRenderer items={items} lifecycle="completed" />
       </FileViewerContext.Provider>,
     );
 
@@ -264,7 +326,7 @@ describe("BlockRenderer dispatch", () => {
       tool(4),
       tool(5),
     ];
-    render(<BlockRenderer items={items} sessionStatus="running" />);
+    render(<BlockRenderer items={items} lifecycle="streaming" />);
     expect(screen.getByText("Called 2 tools")).toBeDefined();
     expect(screen.queryByText("Called 5 tools")).toBeNull();
     // The recent tools must be visible as a tail OUTSIDE the collapsed
@@ -304,7 +366,7 @@ describe("BlockRenderer dispatch", () => {
       tool(5),
       { kind: "text", itemId: "m1", text: "Done.", final: true },
     ];
-    render(<BlockRenderer items={items} sessionStatus="idle" />);
+    render(<BlockRenderer items={items} lifecycle="completed" />);
     // The whole run folds; the label describes all five steps.
     expect(screen.getByText("Ran 2 shell commands, called 3 other tools")).toBeDefined();
     expect(screen.queryByText(/tool_5/)).toBeNull();
@@ -440,7 +502,7 @@ describe("BlockRenderer dispatch", () => {
       ];
       const renderStreamingMath = (text: string) => (
         <FileViewerContext.Provider value={FILE_VIEWER_NOOP}>
-          <BlockRenderer items={streamingItem(text)} sessionStatus="running" />
+          <BlockRenderer items={streamingItem(text)} lifecycle="streaming" />
         </FileViewerContext.Provider>
       );
 
@@ -476,7 +538,7 @@ describe("BlockRenderer dispatch", () => {
     ];
     const renderStreaming = (text: string) => (
       <FileViewerContext.Provider value={FILE_VIEWER_NOOP}>
-        <BlockRenderer items={streamingText(text)} sessionStatus="running" />
+        <BlockRenderer items={streamingText(text)} lifecycle="streaming" />
       </FileViewerContext.Provider>
     );
 
@@ -519,7 +581,7 @@ describe("BlockRenderer dispatch", () => {
         <FileViewerContext.Provider value={FILE_VIEWER_NOOP}>
           <BlockRenderer
             items={[{ kind: "text", itemId: "t1", text, final: true }]}
-            sessionStatus="idle"
+            lifecycle="completed"
           />
         </FileViewerContext.Provider>,
       );
@@ -587,7 +649,7 @@ describe("BlockRenderer dispatch", () => {
     ];
     render(
       <FileViewerContext.Provider value={FILE_VIEWER_NOOP}>
-        <BlockRenderer items={items} sessionStatus="idle" />
+        <BlockRenderer items={items} lifecycle="completed" />
       </FileViewerContext.Provider>,
     );
     // Wait for Streamdown to finish parsing the (streamed) markdown.
@@ -699,7 +761,7 @@ function renderMessage(
   });
   return render(
     <TestProviders queryClient={qc} fileViewerContext={fullCtx}>
-      <BlockRenderer items={items} sessionStatus="idle" />
+      <BlockRenderer items={items} lifecycle="completed" />
     </TestProviders>,
   );
 }

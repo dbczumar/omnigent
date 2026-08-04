@@ -25,6 +25,7 @@ import { useThrottledValue } from "@/hooks/useThrottledValue";
 import type { RenderItem } from "@/lib/renderItems";
 import type { SessionStatus } from "@/lib/types";
 import { cn } from "@/lib/utils";
+import type { ActiveResponse } from "@/store/types";
 import {
   useFileViewer,
   useFileViewerConversationId,
@@ -293,7 +294,10 @@ const STREAMING_TAIL = 3;
 
 interface BlockRendererProps {
   items: RenderItem[];
-  sessionStatus: SessionStatus;
+  lifecycle: ActiveResponse["state"];
+  sessionStatus?: SessionStatus;
+  isLatestBubble?: boolean;
+  showsWorking?: boolean;
   canApprove?: boolean;
 }
 
@@ -308,18 +312,27 @@ type ToolRunFragment =
       index: number;
     };
 
-export function BlockRenderer({ items, sessionStatus, canApprove = true }: BlockRendererProps) {
+export function BlockRenderer({
+  items,
+  lifecycle,
+  sessionStatus = "idle",
+  isLatestBubble = false,
+  showsWorking = false,
+  canApprove = true,
+}: BlockRendererProps) {
   const rendered: ReactNode[] = [];
   let previousRenderedItemWasText = false;
-  const isAgentActive = sessionStatus === "running" || sessionStatus === "waiting";
-  const streamingRunStart = isAgentActive ? findStreamingRunStart(items) : -1;
+  const isBubbleStreaming =
+    lifecycle === "streaming" || (isLatestBubble && showsWorking && sessionStatus === "running");
+  const suppressReasoningDuration = showsWorking || isBubbleStreaming;
+  const streamingRunStart = isBubbleStreaming ? findStreamingRunStart(items) : -1;
   // Reasoning is "currently streaming" iff the agent is live AND this
   // reasoning is the very last item in the bubble. Mirrors the
   // `streamingRunStart` rule for tool runs: the trailing live edge stays
   // expanded; once anything else lands after it, it collapses.
   const lastIdx = items.length - 1;
   const reasoningStreamingIdx =
-    isAgentActive && lastIdx >= 0 && items[lastIdx]!.kind === "reasoning" ? lastIdx : -1;
+    isBubbleStreaming && lastIdx >= 0 && items[lastIdx]!.kind === "reasoning" ? lastIdx : -1;
 
   for (let i = 0; i < items.length; i += 1) {
     const item = items[i]!;
@@ -361,7 +374,16 @@ export function BlockRenderer({ items, sessionStatus, canApprove = true }: Block
     }
 
     const followsText = item.kind === "text" && previousRenderedItemWasText;
-    rendered.push(renderItem(item, i, i === reasoningStreamingIdx, followsText, canApprove));
+    rendered.push(
+      renderItem(
+        item,
+        i,
+        i === reasoningStreamingIdx,
+        suppressReasoningDuration,
+        followsText,
+        canApprove,
+      ),
+    );
     previousRenderedItemWasText = item.kind === "text";
   }
 
@@ -411,7 +433,7 @@ function renderToolRunFragment(
       <ToolGroupSummary key={`tool-group:${runStart}:${fragmentIndex}`} tools={fragment.tools} />
     );
   }
-  return renderItem(fragment.tool, runStart + fragment.index, false);
+  return renderItem(fragment.tool, runStart + fragment.index, false, false);
 }
 
 const ADVISE_MODELS_NAMES = new Set(["sys_advise_models", "mcp__omnigent__sys_advise_models"]);
@@ -456,6 +478,7 @@ function renderItem(
   item: RenderItem,
   index: number,
   isReasoningStreaming: boolean,
+  suppressReasoningDuration: boolean,
   followsText = false,
   canApprove = true,
 ): ReactNode {
@@ -477,7 +500,7 @@ function renderItem(
           key={key}
           text={item.text}
           isStreaming={isReasoningStreaming}
-          duration={item.duration}
+          duration={suppressReasoningDuration ? undefined : item.duration}
         />
       );
     case "tool":

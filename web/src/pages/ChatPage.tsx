@@ -1753,8 +1753,14 @@ function MainAgentSurface({
               <>
                 {/* Older pages prepend here while their request is in flight. */}
                 {loadingMoreHistory && <HistoryLoadingIndicator />}
-                {streamBubbles.map((bubble) => (
-                  <BubbleView key={bubbleKey(bubble)} bubble={bubble} canApprove={canApprove} />
+                {streamBubbles.map((bubble, index) => (
+                  <BubbleView
+                    key={bubbleKey(bubble)}
+                    bubble={bubble}
+                    canApprove={canApprove}
+                    isLatestBubble={index === streamBubbles.length - 1}
+                    showsWorking={showsWorking}
+                  />
                 ))}
                 {/* Pending elicitation cards, floated to the bottom of the
                     chat so an outstanding question stays in view (stick-to-
@@ -3102,7 +3108,17 @@ function CompactionLoadingIndicator() {
 // markdown/syntax-highlighting subtree. See `bubblesEqual`. Exported for
 // the user-bubble markdown render tests.
 export const BubbleView = memo(
-  function BubbleView({ bubble, canApprove = true }: { bubble: Bubble; canApprove?: boolean }) {
+  function BubbleView({
+    bubble,
+    canApprove = true,
+    isLatestBubble = false,
+    showsWorking = false,
+  }: {
+    bubble: Bubble;
+    canApprove?: boolean;
+    isLatestBubble?: boolean;
+    showsWorking?: boolean;
+  }) {
     if (bubble.kind === "user") return <UserBubble bubble={bubble} />;
     if (bubble.kind === "compaction_loading") {
       return <CompactionLoadingIndicator />;
@@ -3118,9 +3134,20 @@ export const BubbleView = memo(
         />
       );
     }
-    return <AssistantBubble bubble={bubble} canApprove={canApprove} />;
+    return (
+      <AssistantBubble
+        bubble={bubble}
+        canApprove={canApprove}
+        isLatestBubble={isLatestBubble}
+        showsWorking={showsWorking}
+      />
+    );
   },
-  (prev, next) => prev.canApprove === next.canApprove && bubblesEqual(prev.bubble, next.bubble),
+  (prev, next) =>
+    prev.canApprove === next.canApprove &&
+    prev.isLatestBubble === next.isLatestBubble &&
+    prev.showsWorking === next.showsWorking &&
+    bubblesEqual(prev.bubble, next.bubble),
 );
 
 /**
@@ -3339,9 +3366,13 @@ function UserBubble({ bubble }: { bubble: Extract<Bubble, { kind: "user" }> }) {
 function AssistantBubble({
   bubble,
   canApprove,
+  isLatestBubble,
+  showsWorking,
 }: {
   bubble: Extract<Bubble, { kind: "assistant" }>;
   canApprove: boolean;
+  isLatestBubble: boolean;
+  showsWorking: boolean;
 }) {
   // The walker only emits an assistant bubble when at least one
   // assistant-side block exists, so `items` is non-empty here in the
@@ -3376,7 +3407,10 @@ function AssistantBubble({
         <MessageContent className={isWide ? "w-full" : undefined}>
           <BlockRenderer
             items={bubble.items}
+            lifecycle={bubble.lifecycle}
             sessionStatus={sessionStatus}
+            isLatestBubble={isLatestBubble}
+            showsWorking={showsWorking}
             canApprove={canApprove}
           />
         </MessageContent>
