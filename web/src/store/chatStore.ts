@@ -78,6 +78,7 @@ import type {
   StreamEvent,
 } from "@/lib/events";
 import { createPresenceIdleTracker } from "@/lib/presenceIdle";
+import { readSessionMeta, writeSessionMeta, type SessionMeta } from "@/lib/sessionMetaCache";
 import { parseEvent, parseSseStream, type SseStreamResult } from "@/lib/sse";
 import { childSessionsQueryKey, type ChildSessionInfo } from "@/hooks/useChildSessions";
 import { sessionItemsQueryKey } from "@/hooks/useSessionItems";
@@ -705,6 +706,18 @@ function writeTranscriptCache(id: string, state: ChatState): void {
 /** Evict a deleted conversation from the transcript cache. */
 export function evictTranscriptCache(id: string): void {
   transcriptCache.delete(id);
+}
+
+/** The composer-facing metadata worth retaining for an instant revisit. */
+function sessionMetaOf(state: ChatState): SessionMeta {
+  return {
+    gitBranch: state.gitBranch,
+    llmModel: state.llmModel,
+    sessionModelOverride: state.sessionModelOverride,
+    sessionHarness: state.sessionHarness,
+    nativeVendorOwnsModel: state.nativeVendorOwnsModel,
+    codexModelOptions: state.codexModelOptions,
+  };
 }
 
 // Catalogs that resolved while their bind snapshot was still hydrating.
@@ -1582,8 +1595,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
     // Write on switch-away; the return bind reconciles any later commits.
     const outgoingId = get().conversationId;
-    if (outgoingId !== null) writeTranscriptCache(outgoingId, get());
+    if (outgoingId !== null) {
+      writeTranscriptCache(outgoingId, get());
+      // Captures live edits the snapshot alone wouldn't have (a TUI `/model`
+      // switch, a branch change) so the revisit repaints what was last shown.
+      writeSessionMeta(outgoingId, sessionMetaOf(get()));
+    }
     const cached = conversationId !== null ? readTranscriptCache(conversationId) : null;
+    const cachedMeta = conversationId !== null ? readSessionMeta(conversationId) : null;
 
     set((s) => {
       // Stash the OUTGOING conversation's still-in-flight optimistic
@@ -1642,7 +1661,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         sessionStatus: "idle",
         backgroundTaskCount: 0,
         isNativeTerminalSession: false,
-        nativeVendorOwnsModel: false,
+        nativeVendorOwnsModel: cachedMeta?.nativeVendorOwnsModel ?? false,
         boundAgentId: null,
         boundAgentName: null,
         // Cached history revalidates without the full-screen hydrate spinner.
@@ -1653,23 +1672,28 @@ export const useChatStore = create<ChatState>((set, get) => ({
         // cache gap bridge. Revalidation clears this without showing UI.
         loadingMoreHistory: cached !== null,
         oldestItemId: cached?.oldestItemId ?? null,
-        llmModel: null,
-        sessionHarness: null,
+        // The composer's model label and branch paint from the snapshot, so
+        // nulling them blanks both until the bind answers. Seed from THIS
+        // session's own last-known values instead; the snapshot overwrites them
+        // a moment later. A cache miss stays null — never the outgoing
+        // session's values, which is the bug this must not reintroduce.
+        llmModel: cachedMeta?.llmModel ?? null,
+        sessionHarness: cachedMeta?.sessionHarness ?? null,
         // ``selectedEffort`` / ``selectedModel`` are sticky user picks —
         // not reset here so a CLI-created new chat inherits them.
         // ``sessionModelOverride`` and the cost switch ARE session-scoped,
         // so they reset with the session and re-hydrate from the snapshot.
-        sessionModelOverride: null,
+        sessionModelOverride: cachedMeta?.sessionModelOverride ?? null,
         costControlModeOverride: null,
         codexPlanMode: false,
         contextWindow: null,
         tokensUsed: null,
         sessionCostUsd: null,
         sessionUsageByModel: null,
-        gitBranch: null,
+        gitBranch: cachedMeta?.gitBranch ?? null,
         todos: [],
         skills: [],
-        codexModelOptions: [],
+        codexModelOptions: cachedMeta?.codexModelOptions ?? [],
         terminalPending: false,
         viewers: [],
         // Drop any queued "Attach to agent" chip that the outgoing session's
@@ -2629,6 +2653,9 @@ async function bindStream(
       };
     });
     racedNativeModelOptions.delete(id);
+    // Persist the freshly bound values so a revisit repaints them even when
+    // this session was never switched away from (e.g. a reload).
+    if (get().conversationId === id) writeSessionMeta(id, sessionMetaOf(get()));
   } catch (err) {
     if (get().conversationId !== id) return;
     set({

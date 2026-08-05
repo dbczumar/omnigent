@@ -439,23 +439,36 @@ _CODEX_MODEL_OPTIONS = [
     }
 ]
 _CLAUDE_LLM_MODEL = "system.ai.claude-sonnet-5"
+_CLAUDE_BRANCH = "feature/claude-worktree"
+_CODEX_BRANCH = "feature/codex-worktree"
 # Long enough that the stale-label window is unmissable, short enough to keep
 # the test quick. Only the switch back to the Claude session is delayed.
 _SNAPSHOT_DELAY_MS = 2_000
 
-# Records every distinct composer model label the page ever paints, tagged with
-# the session route it was painted under. A transient wrong label is invisible
-# to `expect()` (which retries until it passes), so the assertion runs against
-# this log rather than a point-in-time read.
-_LABEL_RECORDER = """
+# Records every distinct composer readout the page paints — model label and
+# worktree branch — tagged with the session route it was painted under. A
+# transient wrong (or blank) value is invisible to `expect()`, which retries
+# until it passes, so assertions run against this log rather than a
+# point-in-time read.
+_COMPOSER_RECORDER = """
 (() => {
-  window.__modelLabelLog = [];
+  window.__composerLog = [];
+  const text = (testId) => {
+    const el = document.querySelector(`[data-testid="${testId}"]`);
+    return el ? el.textContent.trim() : "";
+  };
   const record = () => {
-    const el = document.querySelector('[data-testid="composer-model-effort-label"]');
-    const entry = { path: location.pathname, text: el ? el.textContent.trim() : "" };
-    const log = window.__modelLabelLog;
+    const entry = {
+      path: location.pathname,
+      model: text("composer-model-effort-label"),
+      branch: text("composer-git-branch"),
+    };
+    const log = window.__composerLog;
     const last = log[log.length - 1];
-    if (!last || last.path !== entry.path || last.text !== entry.text) log.push(entry);
+    if (!last || last.path !== entry.path || last.model !== entry.model ||
+        last.branch !== entry.branch) {
+      log.push(entry);
+    }
   };
   new MutationObserver(record).observe(document, {
     subtree: true,
@@ -466,13 +479,15 @@ _LABEL_RECORDER = """
 """
 
 # Holds the incoming session's snapshot GET so the pre-bind window — where the
-# store has dropped the outgoing session's model fields but not yet hydrated the
+# store has dropped the outgoing session's fields but not yet hydrated the
 # incoming one's — lasts long enough to observe. Armed via `__delaySnapshot`
-# right before the switch so the first visit stays fast.
+# right before the switch so the first visit stays fast. `__snapshotHeld`
+# counts the holds actually applied, so a test can prove the window was real.
 _SNAPSHOT_DELAY = """
 (() => {
   const sessionId = __SESSION_ID__;
   const delayMs = __DELAY_MS__;
+  window.__snapshotHeld = 0;
   const originalFetch = window.fetch.bind(window);
   window.fetch = async (input, init) => {
     const url = typeof input === "string" ? input : input.url;
@@ -480,6 +495,7 @@ _SNAPSHOT_DELAY = """
       window.__delaySnapshot &&
       new URL(url, window.location.origin).pathname === `/v1/sessions/${sessionId}`
     ) {
+      window.__snapshotHeld += 1;
       await new Promise((resolve) => setTimeout(resolve, delayMs));
     }
     return originalFetch(input, init);
@@ -502,6 +518,9 @@ def _patch_native_session_pair(page: Page, codex_session_id: str, claude_session
         the cross-session sticky pick.
     :param claude_session_id: Session id to shape as claude-native, bound to
         Sonnet 5 with no override of its own.
+
+    Each session also gets its own worktree branch, so the composer tray's
+    branch readout is attributable to one session or the other.
     """
 
     def _handle(route: Route) -> None:
@@ -521,10 +540,12 @@ def _patch_native_session_pair(page: Page, codex_session_id: str, claude_session
             payload["llm_model"] = _CODEX_MODEL_ID
             payload["model_override"] = _CODEX_MODEL_ID
             payload["model_options"] = _CODEX_MODEL_OPTIONS
+            payload["git_branch"] = _CODEX_BRANCH
         else:
             wrapper, harness = "claude-code-native-ui", "claude"
             payload["llm_model"] = _CLAUDE_LLM_MODEL
             payload["model_options"] = _MODEL_OPTIONS
+            payload["git_branch"] = _CLAUDE_BRANCH
         payload["labels"] = {**payload.get("labels", {}), "omnigent.wrapper": wrapper}
         payload["harness"] = harness
         route.fulfill(
@@ -562,7 +583,7 @@ def test_composer_model_label_never_shows_the_previous_sessions_model(
     for session_id in (codex_session, claude_session):
         seed_committed_turn(session_id, prompt="ping", reply="pong")
     _patch_native_session_pair(page, codex_session, claude_session)
-    page.add_init_script(_LABEL_RECORDER)
+    page.add_init_script(_COMPOSER_RECORDER)
     page.add_init_script(
         _SNAPSHOT_DELAY.replace("__SESSION_ID__", json.dumps(claude_session)).replace(
             "__DELAY_MS__", str(_SNAPSHOT_DELAY_MS)
@@ -586,16 +607,16 @@ def test_composer_model_label_never_shows_the_previous_sessions_model(
     # Switch back to Claude with its snapshot held, and watch every label the
     # composer paints under the Claude route.
     page.evaluate("window.__delaySnapshot = true")
-    page.evaluate("window.__modelLabelLog = []")
+    page.evaluate("window.__composerLog = []")
     page.locator(f'a[href="/c/{claude_session}"]').click()
     page.wait_for_url(re.compile(rf"/c/{re.escape(claude_session)}"))
     expect(label).to_contain_text("Sonnet 5", timeout=15_000)
 
-    log = page.evaluate("window.__modelLabelLog")
-    claude_labels = [e["text"] for e in log if e["path"] == f"/c/{claude_session}"]
-    # Guard against a no-op run: the held snapshot must have produced at least
-    # one pre-bind paint before the settled Sonnet 5 label.
-    assert len(claude_labels) > 1, (
+    log = page.evaluate("window.__composerLog")
+    claude_labels = [e["model"] for e in log if e["path"] == f"/c/{claude_session}"]
+    # Guard against a no-op run: the snapshot must actually have been held, so
+    # the labels below were painted with the incoming bind still in flight.
+    assert page.evaluate("window.__snapshotHeld || 0") >= 1, (
         f"the delayed-bind window was never observed (labels: {claude_labels}); "
         "the snapshot delay did not take effect, so this run proves nothing"
     )
@@ -606,6 +627,78 @@ def test_composer_model_label_never_shows_the_previous_sessions_model(
         f"the Codex session's model leaked into the Claude session's composer: {leaked} "
         f"(full label sequence under the Claude route: {claude_labels}). The composer must "
         "never surface another session's sticky model while the snapshot is in flight."
+    )
+
+
+def test_composer_keeps_branch_and_model_painted_when_switching_back(
+    page: Page,
+    seeded_session_pair: tuple[str, str, str],
+) -> None:
+    """A revisited session paints its own branch and model before the bind lands.
+
+    ``switchTo`` nulls every snapshot-derived field, so the composer tray's
+    worktree branch and the model label both blank out for the whole bind round
+    trip — the composer visibly "jitters" on each switch. The session metadata
+    cache seeds those fields from this session's own last-known values, so the
+    readouts stay populated and are merely refreshed when the snapshot answers.
+
+    :param page: Playwright page fixture.
+    :param seeded_session_pair: ``(base_url, codex_session, claude_session)``
+        for two real server-backed sessions; both snapshots are patched into
+        native shapes, each with its own branch and model.
+    """
+    base_url, codex_session, claude_session = seeded_session_pair
+    # Both sessions need a committed transcript: an empty one falls back to the
+    # hydrate placeholder, which unmounts the composer instead of repainting it.
+    for session_id in (codex_session, claude_session):
+        seed_committed_turn(session_id, prompt="ping", reply="pong")
+    _patch_native_session_pair(page, codex_session, claude_session)
+    page.add_init_script(_COMPOSER_RECORDER)
+    page.add_init_script(
+        _SNAPSHOT_DELAY.replace("__SESSION_ID__", json.dumps(claude_session)).replace(
+            "__DELAY_MS__", str(_SNAPSHOT_DELAY_MS)
+        )
+    )
+
+    label = page.get_by_test_id("composer-model-effort-label")
+    branch = page.get_by_test_id("composer-git-branch")
+
+    # First visit populates the cache for the Claude session.
+    page.goto(f"{base_url}/c/{claude_session}")
+    expect(label).to_contain_text("Sonnet 5", timeout=15_000)
+    expect(branch).to_have_text(_CLAUDE_BRANCH, timeout=15_000)
+
+    page.locator(f'a[href="/c/{codex_session}"]').click()
+    page.wait_for_url(re.compile(rf"/c/{re.escape(codex_session)}"))
+    expect(label).to_contain_text(_CODEX_MODEL_LABEL, timeout=15_000)
+    expect(branch).to_have_text(_CODEX_BRANCH, timeout=15_000)
+
+    # Switch back with the Claude snapshot held, so every paint below happens
+    # while the incoming bind is still in flight.
+    page.evaluate("window.__delaySnapshot = true")
+    page.evaluate("window.__composerLog = []")
+    page.locator(f'a[href="/c/{claude_session}"]').click()
+    page.wait_for_url(re.compile(rf"/c/{re.escape(claude_session)}"))
+    expect(label).to_contain_text("Sonnet 5", timeout=15_000)
+
+    log = page.evaluate("window.__composerLog")
+    painted = [e for e in log if e["path"] == f"/c/{claude_session}"]
+    assert page.evaluate("window.__snapshotHeld || 0") >= 1, (
+        f"the delayed-bind window was never observed (paints: {painted}); "
+        "the snapshot delay did not take effect, so this run proves nothing"
+    )
+    assert painted, "the composer never repainted under the Claude route"
+    # Every paint in the window carries this session's own values: not blank
+    # (the jitter) and not the Codex session's (a cross-session leak).
+    blanked = [e for e in painted if not e["branch"] or not e["model"]]
+    assert not blanked, (
+        f"the composer blanked its branch/model while the snapshot was in flight: {blanked}. "
+        "A revisited session must repaint from its cached metadata."
+    )
+    wrong = [e for e in painted if e["branch"] != _CLAUDE_BRANCH or "Sonnet 5" not in e["model"]]
+    assert not wrong, (
+        f"the composer painted values that are not the Claude session's: {wrong} "
+        f"(full sequence: {painted})."
     )
 
 

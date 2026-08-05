@@ -46,6 +46,7 @@ import {
   updateProjectConfig as apiUpdateProjectConfig,
 } from "@/lib/projectsApi";
 import { evictTranscriptCache, useChatStore } from "@/store/chatStore";
+import { evictSessionMeta } from "@/lib/sessionMetaCache";
 import type { Session } from "@/lib/types";
 import { useSessionUpdatesConnected } from "./useSessionUpdatesConnected";
 import { markConversationSeen } from "./useUnseenConversations";
@@ -383,6 +384,7 @@ export async function deleteConversation(id: string, deleteBranch = false): Prom
   // a dead conversation, they could never flush.
   useChatStore.getState().clearQueuedMessages(id);
   evictTranscriptCache(id);
+  evictSessionMeta(id);
 }
 
 /**

@@ -493,6 +493,63 @@ describe("chatStore — switchTo", () => {
     expect(settled.loadingMoreHistory).toBe(false);
   });
 
+  it("repaints a revisited session's branch and model before its snapshot lands", async () => {
+    // The composer's tray and model label read these straight off the store, so
+    // nulling them on switch blanks both for the whole bind round trip — the
+    // "jittery composer" report. A revisit paints this session's own last-known
+    // values immediately instead.
+    localStorage.clear();
+    seedSession("conv_meta", [userMessage("meta_1", "hi")]);
+    seedSession("conv_meta_other", [userMessage("meta_other_1", "hi")]);
+    await useChatStore.getState().switchTo("conv_meta");
+    // Stand in for the bound snapshot: what the composer was last showing.
+    useChatStore.setState({
+      gitBranch: "feature/jitter",
+      llmModel: "system.ai.claude-sonnet-5",
+      sessionModelOverride: "opus",
+      sessionHarness: "claude",
+      codexModelOptions: [{ id: "opus", displayName: "Opus 4.10" }],
+    });
+    await useChatStore.getState().switchTo("conv_meta_other");
+
+    const revisit = useChatStore.getState().switchTo("conv_meta");
+    const immediate = useChatStore.getState();
+    expect(immediate.gitBranch).toBe("feature/jitter");
+    expect(immediate.llmModel).toBe("system.ai.claude-sonnet-5");
+    expect(immediate.sessionModelOverride).toBe("opus");
+    expect(immediate.sessionHarness).toBe("claude");
+    // The catalog rides along so the label can resolve "opus" to its
+    // display name rather than printing the raw alias.
+    expect(immediate.codexModelOptions).toEqual([{ id: "opus", displayName: "Opus 4.10" }]);
+    await revisit;
+  });
+
+  it("leaves an uncached session blank rather than inheriting the outgoing session's metadata", async () => {
+    // The cache is strictly per-session: a miss must paint nothing. Falling back
+    // to whatever the outgoing session left in the store is exactly the
+    // cross-session leak the composer model label was fixed for.
+    localStorage.clear();
+    seedSession("conv_meta_from", [userMessage("from_1", "hi")]);
+    seedSession("conv_meta_fresh", []);
+    await useChatStore.getState().switchTo("conv_meta_from");
+    useChatStore.setState({
+      gitBranch: "feature/outgoing",
+      llmModel: "gpt-5.5",
+      sessionModelOverride: "gpt-5.5",
+      sessionHarness: "codex",
+      codexModelOptions: [{ id: "gpt-5.5", displayName: "GPT-5.5" }],
+    });
+
+    const next = useChatStore.getState().switchTo("conv_meta_fresh");
+    const immediate = useChatStore.getState();
+    expect(immediate.gitBranch).toBeNull();
+    expect(immediate.llmModel).toBeNull();
+    expect(immediate.sessionModelOverride).toBeNull();
+    expect(immediate.sessionHarness).toBeNull();
+    expect(immediate.codexModelOptions).toEqual([]);
+    await next;
+  });
+
   it("bridges a multi-page cache gap without resetting the older-history cursor", async () => {
     const before = Array.from({ length: 30 }, (_, i) =>
       userMessage(`cache_before_${i}`, `before ${i}`),
