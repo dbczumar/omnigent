@@ -492,6 +492,65 @@ describe("chatStore — switchTo", () => {
     expect(state.loadingMoreHistory).toBe(false);
   });
 
+  it("marks the bind's window build so the history row stays hidden", async () => {
+    // Both flags ride together while the bind grows the window: the shared
+    // one serializes paging, the specific one tells the transcript this load
+    // is not reader-driven, so it renders no "Loading earlier messages…" row.
+    const items: ConversationItem[] = [
+      userMessage("old", "the previous prompt"),
+      ...Array.from({ length: 40 }, (_, i) => assistantMessage(`step_${i}`, `step ${i}`)),
+    ];
+    seedSession("conv_flags", items);
+
+    const seen: { more: boolean; initial: boolean }[] = [];
+    const unsubscribe = useChatStore.subscribe((state, prev) => {
+      if (state.loadingMoreHistory !== prev.loadingMoreHistory) {
+        seen.push({ more: state.loadingMoreHistory, initial: state.loadingInitialWindow });
+      }
+    });
+    try {
+      await useChatStore.getState().switchTo("conv_flags");
+      await vi.waitFor(() => {
+        expect(useChatStore.getState().blocks).toHaveLength(items.length);
+      });
+    } finally {
+      unsubscribe();
+    }
+
+    // Raised together — never a window build that looks reader-driven.
+    expect(seen).toContainEqual({ more: true, initial: true });
+    expect(seen).not.toContainEqual({ more: true, initial: false });
+    expect(useChatStore.getState().loadingInitialWindow).toBe(false);
+  });
+
+  it("leaves the window flag clear for a reader-driven page, so the row shows", async () => {
+    const items: ConversationItem[] = [
+      userMessage("p1", "first"),
+      userMessage("p2", "second"),
+      ...Array.from({ length: 30 }, (_, i) => assistantMessage(`t_${i}`, `tail ${i}`)),
+    ];
+    seedSession("conv_scrollup", items);
+    await useChatStore.getState().switchTo("conv_scrollup");
+    await vi.waitFor(() => {
+      expect(useChatStore.getState().hasMoreHistory).toBe(true);
+    });
+
+    const during: { more: boolean; initial: boolean }[] = [];
+    const unsubscribe = useChatStore.subscribe((state, prev) => {
+      if (state.loadingMoreHistory !== prev.loadingMoreHistory) {
+        during.push({ more: state.loadingMoreHistory, initial: state.loadingInitialWindow });
+      }
+    });
+    try {
+      await useChatStore.getState().loadMoreHistory();
+    } finally {
+      unsubscribe();
+    }
+
+    // The reader asked for this one, so the transcript may surface the row.
+    expect(during).toContainEqual({ more: true, initial: false });
+  });
+
   it("hydrates pendingUserMessages from the snapshot's pending_inputs (native rebind)", async () => {
     // The core fix: a native web message that hasn't round-tripped
     // through the transcript yet is replayed by the server in

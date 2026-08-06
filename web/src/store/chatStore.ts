@@ -406,6 +406,13 @@ export interface ChatState {
   /** True while a `loadMoreHistory` fetch is in flight. */
   loadingMoreHistory: boolean;
   /**
+   * True while the bind is still growing the initial window in the
+   * background. It holds `loadingMoreHistory` too, so paging stays serialized
+   * — but this work is not something the reader asked for, so the
+   * "Loading earlier messages…" row stays hidden until they scroll up.
+   */
+  loadingInitialWindow: boolean;
+  /**
    * The item id at the start of the current `blocks` history window —
    * used as the `before` cursor for the next `loadMoreHistory` page
    * fetch. `null` until the first snapshot is hydrated.
@@ -949,6 +956,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   codexPlanMode: false,
   hasMoreHistory: false,
   loadingMoreHistory: false,
+  loadingInitialWindow: false,
   oldestItemId: null,
   flashItemId: null,
   pendingComposerAttachments: [],
@@ -1635,6 +1643,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         conversationLoadError: null,
         hasMoreHistory: false,
         loadingMoreHistory: false,
+        loadingInitialWindow: false,
         oldestItemId: null,
         llmModel: null,
         sessionHarness: null,
@@ -2661,7 +2670,7 @@ async function completeInitialWindow(
   });
   if (stale()) return;
 
-  set({ loadingMoreHistory: true });
+  set({ loadingMoreHistory: true, loadingInitialWindow: true });
   try {
     const window = await fetchInitialHistoryWindow(id, seed);
     if (stale()) return;
@@ -2678,13 +2687,14 @@ async function completeInitialWindow(
         hasMoreHistory: window.hasMore,
         oldestItemId: window.items[0]?.id ?? state.oldestItemId,
         loadingMoreHistory: false,
+        loadingInitialWindow: false,
       };
     });
   } catch {
     if (stale()) return;
     // Leave scroll-up paging enabled: the window is short but valid, and
     // `loadMoreHistory` can still reach the rest.
-    set({ loadingMoreHistory: false });
+    set({ loadingMoreHistory: false, loadingInitialWindow: false });
   }
 }
 

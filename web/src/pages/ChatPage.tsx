@@ -783,6 +783,7 @@ export function ChatPage() {
   const { data: boundAgentBySession } = useSessionAgent(urlConvId ?? null);
   const hasMoreHistory = useChatStore((s) => s.hasMoreHistory);
   const loadingMoreHistory = useChatStore((s) => s.loadingMoreHistory);
+  const loadingInitialWindow = useChatStore((s) => s.loadingInitialWindow);
   // Gates the sub-agent spawn chips: only a session that explicitly turned
   // sub-agent routing on shows them (see stripGatedSubagentRoutingChips).
   const subagentRoutingOverride = useChatStore((s) => s.subagentRoutingOverride);
@@ -1218,6 +1219,7 @@ export function ChatPage() {
       selectedAgentId={agentId}
       hasMoreHistory={hasMoreHistory}
       loadingMoreHistory={loadingMoreHistory}
+      showHistoryLoading={loadingMoreHistory && !loadingInitialWindow}
       permissionLevel={permissionLevel}
       canApprove={canApprove}
       readOnlyReason={readOnlyReason}
@@ -1447,6 +1449,12 @@ interface MainAgentSurfaceProps {
   hasMoreHistory: boolean;
   /** Whether a load-more fetch is currently in flight. */
   loadingMoreHistory: boolean;
+  /**
+   * Whether to surface the "Loading earlier messages…" row. False for the
+   * bind's background window build — the reader didn't ask for that, and the
+   * row sits at the top of a transcript short enough to still be on screen.
+   */
+  showHistoryLoading: boolean;
   permissionLevel: number | null;
   /** Whether this viewer may accept privileged actions. */
   canApprove: boolean;
@@ -1532,6 +1540,7 @@ function MainAgentSurface({
   selectedAgentId,
   hasMoreHistory,
   loadingMoreHistory,
+  showHistoryLoading,
   permissionLevel,
   canApprove,
   readOnlyReason,
@@ -1875,7 +1884,7 @@ function MainAgentSurface({
             ) : (
               <>
                 {/* Older pages prepend here while their request is in flight. */}
-                {loadingMoreHistory && <HistoryLoadingIndicator />}
+                {showHistoryLoading && <HistoryLoadingIndicator />}
                 {streamBubbles.map((bubble, bubbleIndex) => (
                   <BubbleView
                     key={bubbleKey(bubble)}
