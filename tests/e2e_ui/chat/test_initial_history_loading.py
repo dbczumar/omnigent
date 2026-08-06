@@ -147,11 +147,11 @@ def test_multi_page_initial_window_reaches_the_prompt_boundary(
 ) -> None:
     """Grow a window that needs several pages, without stalling short of it.
 
-    The newest three pages are pure tool-style filler, so reaching the prompt
-    boundary takes four requests. The store now gathers those pages itself and
-    prepends them once, instead of the transcript paging one per render; this
-    pins the resulting flow — every page is still fetched, the window still
-    stops at the boundary, and both prompts end up on screen.
+    The newest pages are pure tool-style filler, so the window has to reach
+    back past them. The store gathers those pages itself and prepends them
+    once, widening the page after the first step back rather than walking a
+    tool-heavy turn 20 rows at a time; this pins the resulting flow — the
+    window still stops at the boundary and both prompts end up on screen.
 
     The one-commit property itself is asserted in chatStore.test.ts, which can
     count store commits directly; locally the pages return fast enough that
@@ -209,11 +209,14 @@ def test_multi_page_initial_window_reaches_the_prompt_boundary(
     page.wait_for_timeout(1_000)
 
     urls = page.evaluate("window.__itemsUrls")
-    # Four 20-item pages: three of filler, then the one holding both prompts.
-    # It must stop there rather than keep paging to the start of the session.
-    assert len(urls) == 4, urls
-    assert all("limit=20" in url for url in urls)
-    assert sum(1 for url in urls if "after=" in url) == 3, urls
+    # The newest page and one step back stay narrow; the turn is still short of
+    # its prompt after that, so the third request widens instead of walking the
+    # rest 20 rows at a time. It must then stop, not page to the session start.
+    assert len(urls) == 3, urls
+    assert "limit=20&" in urls[0], urls
+    assert "limit=20&" in urls[1], urls
+    assert "limit=200&" in urls[2], urls
+    assert sum(1 for url in urls if "after=" in url) == 2, urls
 
     expect(page.get_by_role("button", name=f"Jump to: {previous_prompt}")).to_be_visible()
     expect(page.get_by_role("button", name=f"Jump to: {latest_prompt}")).to_be_visible()

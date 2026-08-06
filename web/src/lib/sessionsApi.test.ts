@@ -16,6 +16,7 @@ import {
   fetchSessionItemsPage,
   forkSession,
   initialWindowNeedsMore,
+  MAX_INITIAL_ITEMS,
   type SessionItemsPage,
   getSession,
   getSessionSlim,
@@ -1009,18 +1010,63 @@ describe("fetchInitialHistoryWindow", () => {
     expect(page).toEqual(seed);
   });
 
-  it("stops at MAX_INITIAL_PAGES, leaving hasMore=true so scroll-up still reaches older items", async () => {
-    // Pathological: a turn so long that 8 pages never reach a second user
-    // prompt. The helper must bound its requests and hand the rest back to
-    // loadMoreHistory (hasMore stays true) rather than fetch unbounded.
-    for (let i = 0; i < 20; i++) {
-      fetchMock.mockResolvedValueOnce(pageBody([asstWire(`p${i}`)], true));
-    }
+  it("widens the page once a turn is still short of its prompt", async () => {
+    // A tool-heavy turn: hundreds of collapsed rows before the prompt that
+    // started it. Walking that back a page at a time cost a round trip per
+    // 20 rows and left the reader watching "Loading earlier messages…", so
+    // only the first step back stays narrow.
+    const wide = Array.from({ length: 200 }, (_, i) => asstWire(`w${i}`));
+    fetchMock.mockResolvedValueOnce(
+      pageBody(
+        Array.from({ length: 20 }, (_, i) => asstWire(`a${i}`)),
+        true,
+      ),
+    );
+    fetchMock.mockResolvedValueOnce(
+      pageBody(
+        Array.from({ length: 20 }, (_, i) => asstWire(`b${i}`)),
+        true,
+      ),
+    );
+    fetchMock.mockResolvedValueOnce(
+      pageBody([...wide, userWire("u_prev"), userWire("u_last")], true),
+    );
 
     const page = await fetchInitialHistoryWindow("conv_abc");
 
-    // MAX_INITIAL_PAGES is 8; never more, even with pages still available.
-    expect(fetchMock).toHaveBeenCalledTimes(8);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(String(fetchMock.mock.calls[0]![0])).toContain(`limit=${SESSION_HISTORY_PAGE_SIZE}`);
+    expect(String(fetchMock.mock.calls[1]![0])).toContain(`limit=${SESSION_HISTORY_PAGE_SIZE}`);
+    // Third request widens rather than taking ten more 20-item steps.
+    expect(String(fetchMock.mock.calls[2]![0])).toContain("limit=200");
+    expect(page.items.filter((i) => i.id.startsWith("u_"))).toHaveLength(2);
+  });
+
+  it("stops at MAX_INITIAL_ITEMS, leaving hasMore=true so scroll-up still reaches older items", async () => {
+    // Pathological: a turn so long that even the widened pages never reach a
+    // second prompt. The helper must bound the items it pulls and hand the
+    // rest back to loadMoreHistory (hasMore stays true) rather than fetch on.
+    const narrow = () =>
+      pageBody(
+        Array.from({ length: SESSION_HISTORY_PAGE_SIZE }, (_, j) =>
+          asstWire(`n${j}${Math.random()}`),
+        ),
+        true,
+      );
+    const wide = () =>
+      pageBody(
+        Array.from({ length: 200 }, (_, j) => asstWire(`w${j}${Math.random()}`)),
+        true,
+      );
+    fetchMock.mockResolvedValueOnce(narrow());
+    fetchMock.mockResolvedValueOnce(narrow());
+    for (let i = 0; i < 10; i++) fetchMock.mockResolvedValueOnce(wide());
+
+    const page = await fetchInitialHistoryWindow("conv_abc");
+
+    // 20 + 20 + 200 + 200 = 440 crosses the 400-item cap on the fourth call.
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+    expect(page.items.length).toBeGreaterThanOrEqual(MAX_INITIAL_ITEMS);
     expect(page.hasMore).toBe(true);
   });
 });

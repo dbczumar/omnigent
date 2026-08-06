@@ -829,8 +829,22 @@ export async function fetchSessionItemsPage(
   return { items: [...page.data].reverse(), hasMore: page.has_more };
 }
 
-/** Pages allowed while looking for the previous user-message boundary. */
-export const MAX_INITIAL_PAGES = 8;
+/**
+ * Items allowed while looking for the previous user-message boundary.
+ *
+ * Bounds the search by items rather than requests: a tool-heavy turn can run
+ * hundreds of collapsed rows before its prompt, and a page-count cap gave up
+ * far too early there — leaving a transcript with no prompt in it at all, and
+ * a scroll-up loader that then paged the rest one request at a time.
+ */
+export const MAX_INITIAL_ITEMS = 400;
+
+/**
+ * Page size once a turn has proven tool-heavy. The first request stays small
+ * so the newest turn paints fast; past that, walking back 20 at a time costs a
+ * round trip per collapsed row, so widen instead.
+ */
+const DEEP_TURN_PAGE_SIZE = 200;
 
 /** A real (non-meta) user prompt — the boundary the initial window snaps to. */
 function isUserPrompt(item: ConversationItem): boolean {
@@ -838,11 +852,11 @@ function isUserPrompt(item: ConversationItem): boolean {
 }
 
 /**
- * The prompt boundary is complete after two real prompts or the page cap.
+ * The prompt boundary is complete after two real prompts or the item cap.
  * The cap applies only to this semantic target, not viewport filling.
  */
-export function initialWindowComplete(userPromptCount: number, pagesFetched: number): boolean {
-  return userPromptCount >= 2 || pagesFetched >= MAX_INITIAL_PAGES;
+export function initialWindowComplete(userPromptCount: number, itemsLoaded: number): boolean {
+  return userPromptCount >= 2 || itemsLoaded >= MAX_INITIAL_ITEMS;
 }
 
 /**
@@ -850,7 +864,10 @@ export function initialWindowComplete(userPromptCount: number, pagesFetched: num
  * of the prompt boundary, so the window needs older pages to be usable.
  */
 export function initialWindowNeedsMore(page: SessionItemsPage): boolean {
-  return page.hasMore && !initialWindowComplete(page.items.filter(isUserPrompt).length, 1);
+  return (
+    page.hasMore &&
+    !initialWindowComplete(page.items.filter(isUserPrompt).length, page.items.length)
+  );
 }
 
 /**
@@ -867,9 +884,10 @@ export function initialWindowNeedsMore(page: SessionItemsPage): boolean {
  * its preceding prompt are always on screen.
  *
  * Cost: the common case (a page that already holds ≥2 user prompts) is a
- * single request, identical to `fetchSessionItemsPage`. Extra requests
- * fire only for long single turns — exactly the case this targets.
- * Bounded by `MAX_INITIAL_PAGES`.
+ * single request, identical to `fetchSessionItemsPage`. Extra requests fire
+ * only for long single turns — exactly the case this targets — and the second
+ * one widens to `DEEP_TURN_PAGE_SIZE`, so even a turn of several hundred tool
+ * calls is reached in a couple of round trips. Bounded by `MAX_INITIAL_ITEMS`.
  *
  * Returns the same `{ items, hasMore }` shape as `fetchSessionItemsPage`
  * so callers feed `oldestItemId` / `hasMoreHistory` from it unchanged.
@@ -884,21 +902,29 @@ export async function fetchInitialHistoryWindow(
 ): Promise<SessionItemsPage> {
   let items: ConversationItem[] = seed ? [...seed.items] : [];
   let hasMore = seed?.hasMore ?? true;
-  let pagesFetched = seed ? 1 : 0;
+  // Counts pages already held: the seed, or the newest page this loop fetches.
+  let pages = seed ? 1 : 0;
   // Each page starts before the cursor returned by the prior page.
   /* oxlint-disable no-await-in-loop */
-  while (hasMore && !initialWindowComplete(items.filter(isUserPrompt).length, pagesFetched)) {
+  while (hasMore && !initialWindowComplete(items.filter(isUserPrompt).length, items.length)) {
     const cursor = items[0]?.id;
-    if (pagesFetched > 0 && !cursor) break; // no cursor to page further; avoid a spin
-    const page = await fetchSessionItemsPage(sessionId, cursor ? { olderThan: cursor } : {});
+    if (items.length > 0 && !cursor) break; // no cursor to page further; avoid a spin
+    // The newest page and one step back stay narrow — that covers a prompt
+    // sitting just above the fold. A turn still short of its prompt after
+    // that is tool-heavy, so stop walking it 20 rows at a time.
+    const limit = pages <= 1 ? SESSION_HISTORY_PAGE_SIZE : DEEP_TURN_PAGE_SIZE;
+    const page = await fetchSessionItemsPage(
+      sessionId,
+      cursor ? { olderThan: cursor, limit } : { limit },
+    );
     items = [...page.items, ...items]; // prepend the older page
     hasMore = page.hasMore;
-    pagesFetched += 1;
+    pages += 1;
   }
   /* oxlint-enable no-await-in-loop */
   // If the cap stopped us before the previous user prompt (a pathological
-  // single turn spanning >MAX_INITIAL_PAGES pages), `hasMore` stays true so
-  // the rest remains reachable via scroll-up — same fallback as the default.
+  // single turn longer than MAX_INITIAL_ITEMS), `hasMore` stays true so the
+  // rest remains reachable via scroll-up — same fallback as the default.
   return { items, hasMore };
 }
 
