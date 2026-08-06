@@ -449,12 +449,18 @@ export function parseEvent(rawType: string, data: Record<string, unknown>): Stre
               message: (rawError as Record<string, unknown>).message as string,
             }
           : undefined;
+      // Absent = not parked. An empty string is treated the same, so a
+      // blank reason never renders as a dangling parenthetical.
+      const rawWaitingFor = data.waiting_for;
+      const waitingFor =
+        typeof rawWaitingFor === "string" && rawWaitingFor ? rawWaitingFor : undefined;
       return {
         type: "session_status",
         conversationId,
         status,
         responseId,
         backgroundTaskCount,
+        ...(waitingFor !== undefined ? { waitingFor } : {}),
         ...(error !== undefined ? { error } : {}),
       } satisfies SessionStatusEvent;
     }

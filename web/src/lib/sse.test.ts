@@ -85,6 +85,30 @@ describe("parseEvent — session.superseded", () => {
   });
 });
 
+describe("parseEvent — session.status (waiting_for)", () => {
+  function waitingFor(data: Record<string, unknown>): string | undefined {
+    const ev = parseEvent("session.status", {
+      conversation_id: "conv_a",
+      status: "running",
+      ...data,
+    });
+    return (ev as SessionStatusEvent | null)?.waitingFor;
+  }
+
+  it("threads the reason so the indicator can name what the agent is parked on", () => {
+    expect(waitingFor({ waiting_for: "permission prompt" })).toBe("permission prompt");
+  });
+
+  it("leaves it undefined when absent (the session is not parked)", () => {
+    expect(waitingFor({})).toBeUndefined();
+  });
+
+  it("ignores an empty or non-string reason rather than rendering a blank one", () => {
+    expect(waitingFor({ waiting_for: "" })).toBeUndefined();
+    expect(waitingFor({ waiting_for: 7 })).toBeUndefined();
+  });
+});
+
 describe("parseEvent — session.status (background_task_count)", () => {
   function bgCount(data: Record<string, unknown>): number | undefined {
     const ev = parseEvent("session.status", { conversation_id: "conv_a", status: "idle", ...data });

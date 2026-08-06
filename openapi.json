@@ -5543,7 +5543,7 @@
               }
             ],
             "default": null,
-            "description": "Machine-readable failure detail, present only when `status == \"failed\"`. Carries the message the runner attached when a turn died \u2014 most importantly a SETUP-phase failure (spec resolution, spawn-env build) that ends the turn before any `response.failed` event is emitted. `None` for every non-failed transition. Clients render `error.message` as the terminal error line; without it a setup failure shows as a silent end. Category: **transient** (SSE-only). Status is rederived on reconnect from the cached last-relayed turn lifecycle event or by re-querying the runner; not persisted by the runtime."
+            "description": "Machine-readable failure detail, present only when `status == \"failed\"`. Carries the message the runner attached when a turn died \u2014 most importantly a SETUP-phase failure (spec resolution, spawn-env build) that ends the turn before any `response.failed` event is emitted. `None` for every non-failed transition. Clients render `error.message` as the terminal error line; without it a setup failure shows as a silent end."
           },
           "response_id": {
             "anyOf": [
@@ -5587,6 +5587,19 @@
             "description": "Always `\"session.status\"`.",
             "title": "Type",
             "type": "string"
+          },
+          "waiting_for": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Short human phrase naming what a still-`running` session is parked on, e.g. `\"permission prompt\"` or `\"dialog open\"`. Set by terminal-backed integrations whose agent can block on a dialog the web UI does not mirror, so the client can say *why* nothing is moving instead of showing a bare spinner. `None` whenever the session is not parked. Category: **transient** (SSE-only). Status is rederived on reconnect from the cached last-relayed turn lifecycle event or by re-querying the runner; not persisted by the runtime.",
+            "title": "Waiting For"
           }
         },
         "required": [

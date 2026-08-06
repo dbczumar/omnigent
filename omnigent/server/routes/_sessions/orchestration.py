@@ -5263,7 +5263,17 @@ async def _relay_runner_stream(
                             # via external_session_status (the codex-shared path)
                             # — the PTY idle oscillates on mid-turn lulls and
                             # would deliver a premature, lock-out completion.
-                            _publish_status(session_id, status, status_error)
+                            raw_waiting_for = event.get("waiting_for")
+                            _publish_status(
+                                session_id,
+                                status,
+                                status_error,
+                                waiting_for=(
+                                    raw_waiting_for
+                                    if isinstance(raw_waiting_for, str) and raw_waiting_for
+                                    else None
+                                ),
+                            )
                         if status == "running":
                             text_acc.clear()
                         continue
