@@ -81,7 +81,7 @@ class SessionStatus:
         "needs input" surfacing.
     :param status_updated_at: The file's ``statusUpdatedAt`` epoch-ms
         value, or ``None`` when absent.
-    :param waiting_for: The file's ``waitingFor`` reason when the raw status
+    :param blocked_on: The file's ``waitingFor`` reason when the raw status
         is ``waiting`` — a short human phrase, e.g. ``"permission prompt"``,
         ``"input needed"``, ``"dialog open"``. ``None`` otherwise.
     """
@@ -89,7 +89,7 @@ class SessionStatus:
     runner_status: str
     raw_status: str
     status_updated_at: int | None
-    waiting_for: str | None = None
+    blocked_on: str | None = None
 
 
 def sessions_dir(config_dir: Path | None = None) -> Path:
@@ -243,7 +243,7 @@ def read_session_status(path: Path) -> SessionStatus | None:
         runner_status=runner_status,
         raw_status=raw_status,
         status_updated_at=status_updated_at,
-        waiting_for=reason if isinstance(reason, str) and reason else None,
+        blocked_on=reason if isinstance(reason, str) and reason else None,
     )
 
 
@@ -278,7 +278,7 @@ class SessionStatusPoller:
     :meth:`asserts_running` level the watcher consults before declaring a
     quiet pane idle.
 
-    :param on_status: Callback invoked as ``(runner_status, waiting_for)``
+    :param on_status: Callback invoked as ``(runner_status, blocked_on)``
         on each transition (and once on first read). Fires when either part
         changes, so ``busy`` → ``waiting`` still delivers its reason even
         though both map to :data:`RUNNING`. Must not block the watcher
@@ -381,7 +381,7 @@ class SessionStatusPoller:
         return clock - status.status_updated_at / 1000.0 <= ttl_s
 
     @property
-    def waiting_for(self) -> str | None:
+    def blocked_on(self) -> str | None:
         """Why Claude is parked, when it is parked on a dialog.
 
         ``None`` unless the last read was ``waiting`` and carried a reason.
@@ -389,7 +389,7 @@ class SessionStatusPoller:
         status = self._last_status
         if status is None or status.raw_status != "waiting":
             return None
-        return status.waiting_for
+        return status.blocked_on
 
     def _read_and_publish(self) -> None:
         """Read the resolved file and fire the callback on a status change."""
@@ -414,8 +414,8 @@ class SessionStatusPoller:
             self._last_edge = None
             return
         self._last_status = status
-        edge = (status.runner_status, status.waiting_for)
+        edge = (status.runner_status, status.blocked_on)
         if edge == self._last_edge:
             return
         self._last_edge = edge
-        self._on_status(status.runner_status, status.waiting_for)
+        self._on_status(status.runner_status, status.blocked_on)

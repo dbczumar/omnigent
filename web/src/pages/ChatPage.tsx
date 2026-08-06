@@ -2108,7 +2108,7 @@ function UserMessageNavConnected(props: React.ComponentProps<typeof UserMessageN
 function WorkingStatusPin({ show, suppress = false }: { show: boolean; suppress?: boolean }) {
   const { isAtBottom } = useStickToBottomContext();
   const bgCount = useChatStore((s) => s.backgroundTaskCount);
-  const waitingFor = useChatStore((s) => s.waitingFor);
+  const blockedOn = useChatStore((s) => s.blockedOn);
   const tick = useWorkingLabelTick();
   const visible = show && !isAtBottom && !suppress;
   return (
@@ -2149,7 +2149,7 @@ function WorkingStatusPin({ show, suppress = false }: { show: boolean; suppress?
           >
             <OttoIcon className="otto-working h-4 w-auto shrink-0" />
             <Shimmer className="text-sm font-mono" duration={1.5}>
-              {workingIndicatorLabel(bgCount, tick, waitingFor)}
+              {workingIndicatorLabel(bgCount, tick, blockedOn)}
             </Shimmer>
           </div>
         )}
@@ -2749,7 +2749,7 @@ export const WORKING_MESSAGES = [
 
 /**
  * The label shown next to the working spinner. When the agent is parked on a
- * dialog (`waitingFor`) it says so — that outranks everything else, because it
+ * dialog (`blockedOn`) it says so — that outranks everything else, because it
  * is the one case where the session needs the user rather than time, and the
  * dialog may live only in the terminal tab. Otherwise, when background shells
  * outlive the turn (`bgCount > 0`) it names how many are still running (the
@@ -2759,10 +2759,10 @@ export const WORKING_MESSAGES = [
 export function workingIndicatorLabel(
   bgCount: number,
   tick = 0,
-  waitingFor: string | null = null,
+  blockedOn: string | null = null,
 ): string {
-  if (waitingFor) {
-    return `Waiting: ${waitingFor}`;
+  if (blockedOn) {
+    return `Blocked on: ${blockedOn}`;
   }
   if (bgCount > 0) {
     return bgCount === 1
@@ -2774,9 +2774,9 @@ export function workingIndicatorLabel(
 
 function WorkingIndicator() {
   const bgCount = useChatStore((s) => s.backgroundTaskCount);
-  const waitingFor = useChatStore((s) => s.waitingFor);
+  const blockedOn = useChatStore((s) => s.blockedOn);
   const tick = useWorkingLabelTick();
-  const label = workingIndicatorLabel(bgCount, tick, waitingFor);
+  const label = workingIndicatorLabel(bgCount, tick, blockedOn);
   return (
     <Message from="assistant" data-testid="working-indicator" aria-hidden="true">
       <MessageContent>

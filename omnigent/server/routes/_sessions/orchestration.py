@@ -5263,14 +5263,14 @@ async def _relay_runner_stream(
                             # via external_session_status (the codex-shared path)
                             # — the PTY idle oscillates on mid-turn lulls and
                             # would deliver a premature, lock-out completion.
-                            raw_waiting_for = event.get("waiting_for")
+                            raw_blocked_on = event.get("blocked_on")
                             _publish_status(
                                 session_id,
                                 status,
                                 status_error,
-                                waiting_for=(
-                                    raw_waiting_for
-                                    if isinstance(raw_waiting_for, str) and raw_waiting_for
+                                blocked_on=(
+                                    raw_blocked_on
+                                    if isinstance(raw_blocked_on, str) and raw_blocked_on
                                     else None
                                 ),
                             )

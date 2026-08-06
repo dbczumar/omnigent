@@ -412,7 +412,7 @@ class _FakeStatusPoller:
         self._on_status = on_status
         self.active = False
         self.running_level = False
-        self.waiting_for: str | None = None
+        self.blocked_on: str | None = None
         self.ticks = 0
 
     def tick(self) -> None:
@@ -422,9 +422,9 @@ class _FakeStatusPoller:
         del ttl_s, now
         return self.running_level
 
-    def emit(self, status: str, waiting_for: str | None = None) -> None:
+    def emit(self, status: str, blocked_on: str | None = None) -> None:
         """Simulate the file reporting a new status."""
-        self._on_status(status, waiting_for)
+        self._on_status(status, blocked_on)
 
 
 async def _observe_native_with_fake_poller(
@@ -1284,7 +1284,7 @@ def test_resolve_environment_runner_workspace_overrides_absolute_spec_cwd(
 
 
 @pytest.mark.asyncio
-async def test_waiting_reason_rides_pane_edges(tmp_path: Path) -> None:
+async def test_blocked_reason_rides_pane_edges(tmp_path: Path) -> None:
     """The parked reason travels with every edge, not just the file's own.
 
     Claude reports ``waitingFor`` once, when the dialog opens. The pane keeps
@@ -1336,7 +1336,7 @@ async def test_waiting_reason_rides_pane_edges(tmp_path: Path) -> None:
     poller = pollers[0]
     poller.active = True
     poller.running_level = True
-    poller.waiting_for = "permission prompt"
+    poller.blocked_on = "permission prompt"
 
     poller.emit("running", "permission prompt")
     callbacks["on_activity"]()  # pane redraw under the dialog
@@ -1344,7 +1344,7 @@ async def test_waiting_reason_rides_pane_edges(tmp_path: Path) -> None:
     assert edges == [("running", "permission prompt")]
 
     # Dialog answered: the file drops the reason and the pane keeps moving.
-    poller.waiting_for = None
+    poller.blocked_on = None
     poller.emit("running", None)
     await asyncio.sleep(0)
     assert edges == [("running", "permission prompt"), ("running", None)]

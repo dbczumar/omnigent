@@ -3528,7 +3528,7 @@ def _publish_status(
     error: ErrorDetail | None = None,
     response_id: str | None = None,
     background_task_count: int | None = None,
-    waiting_for: str | None = None,
+    blocked_on: str | None = None,
 ) -> None:
     """
     Publish a typed :class:`SessionStatusEvent` to the live stream and
@@ -3628,15 +3628,15 @@ def _publish_status(
         response_id=response_id,
         error=error,
         background_task_count=background_task_count,
-        waiting_for=waiting_for,
+        blocked_on=blocked_on,
     )
     payload = event.model_dump()
     if response_id is None:
         payload.pop("response_id", None)
     if background_task_count is None:
         payload.pop("background_task_count", None)
-    if waiting_for is None:
-        payload.pop("waiting_for", None)
+    if blocked_on is None:
+        payload.pop("blocked_on", None)
     session_stream.publish(session_id, payload)
 
 

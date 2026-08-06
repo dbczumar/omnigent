@@ -893,9 +893,9 @@ def register_events_routes(
             # Why a still-running session is parked, e.g. a permission prompt
             # the web UI does not mirror. Absent or blank = not parked, so the
             # indicator falls back to its ordinary working label.
-            raw_waiting_for = body.data.get("waiting_for")
-            waiting_for = (
-                raw_waiting_for if isinstance(raw_waiting_for, str) and raw_waiting_for else None
+            raw_blocked_on = body.data.get("blocked_on")
+            blocked_on = (
+                raw_blocked_on if isinstance(raw_blocked_on, str) and raw_blocked_on else None
             )
             # A sub-agent's background-task ``waiting`` must deliver as ``idle``
             # so the parent's terminal-delivery branch below fires (otherwise
@@ -910,7 +910,7 @@ def register_events_routes(
                 status_error,
                 response_id=response_id,
                 background_task_count=bg_count,
-                waiting_for=waiting_for,
+                blocked_on=blocked_on,
             )
             forward_body = body.model_dump()
             forward_body["data"] = await _enrich_idle_status_with_subagent_output(

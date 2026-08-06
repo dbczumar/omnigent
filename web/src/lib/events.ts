@@ -467,7 +467,7 @@ export interface SessionStatusEvent {
    * web UI does not mirror; this says why nothing is moving. Absent when
    * the session is not parked.
    */
-  waitingFor?: string;
+  blockedOn?: string;
   /** Structured failure detail; only present when `status === "failed"`. */
   error?: { code: string; message: string };
 }

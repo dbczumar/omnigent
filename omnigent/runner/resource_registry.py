@@ -359,9 +359,9 @@ class SessionResourceRegistry:
         directly. Only the claude-native agent terminal's watcher calls
         it — see :meth:`_start_terminal_activity_watcher`.
 
-        :param publisher: Callable ``(session_id, status, waiting_for) ->
+        :param publisher: Callable ``(session_id, status, blocked_on) ->
             None`` where *status* is ``"running"`` or ``"idle"`` and
-            *waiting_for* is a short reason the agent is parked on a dialog
+            *blocked_on* is a short reason the agent is parked on a dialog
             (e.g. ``"permission prompt"``), or ``None``.
         """
         self._session_status_publisher = publisher
@@ -410,22 +410,22 @@ class SessionResourceRegistry:
             self._published_session_status.pop(session_id, None)
             return self._last_session_status.pop(session_id, None)
 
-    def _claim_status_edge(self, session_id: str, status: str, waiting_for: str | None) -> bool:
+    def _claim_status_edge(self, session_id: str, status: str, blocked_on: str | None) -> bool:
         """Record an edge as published, reporting whether it was a change.
 
-        Keyed on the ``(status, waiting_for)`` pair so a session that stays
+        Keyed on the ``(status, blocked_on)`` pair so a session that stays
         ``running`` while it parks on a dialog still delivers the reason.
 
         :param session_id: Session/conversation identifier, e.g. ``"conv_abc"``.
         :param status: Status about to be published, e.g. ``"running"``.
-        :param waiting_for: Reason the agent is parked, or ``None``.
+        :param blocked_on: Reason the agent is parked, or ``None``.
         :returns: ``True`` when this differs from the last published edge
             (so the caller should publish), ``False`` when it is a duplicate.
         """
         with self._lock:
-            if self._published_session_status.get(session_id) == (status, waiting_for):
+            if self._published_session_status.get(session_id) == (status, blocked_on):
                 return False
-            self._published_session_status[session_id] = (status, waiting_for)
+            self._published_session_status[session_id] = (status, blocked_on)
             return True
 
     def _sync_status_edge(self, session_id: str, status: str) -> None:
@@ -1088,7 +1088,7 @@ class SessionResourceRegistry:
         # means "never emitted", so the first changed tick always fires.
         last_activity_emit: dict[str, float | None] = {"value": None}
 
-        def _waiting_reason() -> str | None:
+        def _blocked_reason() -> str | None:
             # The reason rides every edge, not just the poller's own, so a
             # redrawing pane under a dialog doesn't publish a bare ``running``
             # that erases it.
@@ -1096,9 +1096,9 @@ class SessionResourceRegistry:
                 ttl_s=_CLAUDE_NATIVE_STATUS_FILE_LEVEL_TTL_SECONDS
             ):
                 return None
-            return status_poller.waiting_for
+            return status_poller.blocked_on
 
-        def _publish_status(status: str, waiting_for: str | None = None) -> None:
+        def _publish_status(status: str, blocked_on: str | None = None) -> None:
             # Publish one running/idle edge: dedup against the last value,
             # memo for exit classification, and hop to the loop (publishers
             # are loop-only). Shared by the PTY edges and the claude-native
@@ -1108,10 +1108,10 @@ class SessionResourceRegistry:
             # :meth:`note_external_session_status`).
             if status_publisher is None:
                 return
-            if not self._claim_status_edge(session_id, status, waiting_for):
+            if not self._claim_status_edge(session_id, status, blocked_on):
                 return
             self._set_session_status_memo(session_id, status)
-            loop.call_soon_threadsafe(status_publisher, session_id, status, waiting_for)
+            loop.call_soon_threadsafe(status_publisher, session_id, status, blocked_on)
 
         # claude-native additionally reads Claude's own ``sessions/<pid>.json``
         # status (present since Claude Code v2.1.139): it flips on the real
@@ -1156,7 +1156,7 @@ class SessionResourceRegistry:
             # produces no write at all — and the session would sit on its
             # stale ``idle`` for the whole turn with no working indicator.
             if emit_status:
-                _publish_status("running", _waiting_reason())
+                _publish_status("running", _blocked_reason())
 
         def _on_exit() -> None:
             def _schedule() -> None:
@@ -1267,9 +1267,9 @@ class SessionResourceRegistry:
             the bridge directory holding the captured Claude session uuid.
         :param instance: The launched terminal instance (exposes
             ``pane_pid_sync``).
-        :param on_status: Callback fired as ``(status, waiting_for)`` on each
+        :param on_status: Callback fired as ``(status, blocked_on)`` on each
             transition, where *status* is ``running`` / ``idle`` and
-            *waiting_for* names the dialog the agent is parked on, if any.
+            *blocked_on* names the dialog the agent is parked on, if any.
         :returns: A ``SessionStatusPoller`` the watcher drives per tick.
         """
         from omnigent.claude_native_bridge import (

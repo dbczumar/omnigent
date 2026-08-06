@@ -2632,12 +2632,14 @@ class SessionStatusEvent(_SSEEventBase):
         is emitted. ``None`` for every non-failed transition.
         Clients render ``error.message`` as the terminal error
         line; without it a setup failure shows as a silent end.
-    :param waiting_for: Short human phrase naming what a still-``running``
+    :param blocked_on: Short human phrase naming what a still-``running``
         session is parked on, e.g. ``"permission prompt"`` or
         ``"dialog open"``. Set by terminal-backed integrations whose agent
         can block on a dialog the web UI does not mirror, so the client can
         say *why* nothing is moving instead of showing a bare spinner.
-        ``None`` whenever the session is not parked.
+        ``None`` whenever the session is not parked. Unrelated to the
+        ``waiting`` status above, which means the turn has ended and only
+        background work remains.
 
     Category: **transient** (SSE-only). Status is rederived on
     reconnect from the cached last-relayed turn lifecycle event
@@ -2650,7 +2652,7 @@ class SessionStatusEvent(_SSEEventBase):
     response_id: str | None = None
     error: ErrorDetail | None = None
     background_task_count: int | None = None
-    waiting_for: str | None = None
+    blocked_on: str | None = None
 
 
 class SessionUsageEvent(_SSEEventBase):

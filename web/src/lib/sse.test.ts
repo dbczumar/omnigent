@@ -85,27 +85,27 @@ describe("parseEvent — session.superseded", () => {
   });
 });
 
-describe("parseEvent — session.status (waiting_for)", () => {
-  function waitingFor(data: Record<string, unknown>): string | undefined {
+describe("parseEvent — session.status (blocked_on)", () => {
+  function blockedOn(data: Record<string, unknown>): string | undefined {
     const ev = parseEvent("session.status", {
       conversation_id: "conv_a",
       status: "running",
       ...data,
     });
-    return (ev as SessionStatusEvent | null)?.waitingFor;
+    return (ev as SessionStatusEvent | null)?.blockedOn;
   }
 
   it("threads the reason so the indicator can name what the agent is parked on", () => {
-    expect(waitingFor({ waiting_for: "permission prompt" })).toBe("permission prompt");
+    expect(blockedOn({ blocked_on: "permission prompt" })).toBe("permission prompt");
   });
 
   it("leaves it undefined when absent (the session is not parked)", () => {
-    expect(waitingFor({})).toBeUndefined();
+    expect(blockedOn({})).toBeUndefined();
   });
 
   it("ignores an empty or non-string reason rather than rendering a blank one", () => {
-    expect(waitingFor({ waiting_for: "" })).toBeUndefined();
-    expect(waitingFor({ waiting_for: 7 })).toBeUndefined();
+    expect(blockedOn({ blocked_on: "" })).toBeUndefined();
+    expect(blockedOn({ blocked_on: 7 })).toBeUndefined();
   });
 });
 

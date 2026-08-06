@@ -30,7 +30,7 @@ def _write_session_file(
     status: str,
     kind: str = "interactive",
     status_updated_at: int = 1785480000000,
-    waiting_for: str | None = None,
+    blocked_on: str | None = None,
 ) -> Path:
     """Write a minimal ``<pid>.json`` matching Claude's schema.
 
@@ -53,7 +53,7 @@ def _write_session_file(
                 "status": status,
                 "statusUpdatedAt": status_updated_at,
                 "updatedAt": status_updated_at,
-                **({"waitingFor": waiting_for} if waiting_for is not None else {}),
+                **({"waitingFor": blocked_on} if blocked_on is not None else {}),
             }
         ),
         encoding="utf-8",
@@ -310,19 +310,19 @@ def test_waiting_carries_its_reason(tmp_path: Path) -> None:
     """``waiting`` exposes ``waitingFor`` so the UI can say what it is parked on."""
     sessions = tmp_path / "sessions"
     parked = _write_session_file(
-        sessions, pid=1, session_id="s", status="waiting", waiting_for="permission prompt"
+        sessions, pid=1, session_id="s", status="waiting", blocked_on="permission prompt"
     )
     status = read_session_status(parked)
     assert status is not None
     assert status.runner_status == RUNNING
-    assert status.waiting_for == "permission prompt"
+    assert status.blocked_on == "permission prompt"
 
     # The writer merges updates into the existing record, so a reason left
     # behind by an earlier ``waiting`` must not leak onto a later status.
     busy = _write_session_file(
-        sessions, pid=2, session_id="s", status="busy", waiting_for="permission prompt"
+        sessions, pid=2, session_id="s", status="busy", blocked_on="permission prompt"
     )
-    assert read_session_status(busy).waiting_for is None
+    assert read_session_status(busy).blocked_on is None
 
 
 def test_poller_publishes_when_only_the_reason_changes(tmp_path: Path) -> None:
@@ -344,11 +344,11 @@ def test_poller_publishes_when_only_the_reason_changes(tmp_path: Path) -> None:
     assert published == [(RUNNING, None)]
 
     _write_session_file(
-        sessions, pid=1, session_id="s", status="waiting", waiting_for="dialog open"
+        sessions, pid=1, session_id="s", status="waiting", blocked_on="dialog open"
     )
     poller.tick()
     assert published == [(RUNNING, None), (RUNNING, "dialog open")]
-    assert poller.waiting_for == "dialog open"
+    assert poller.blocked_on == "dialog open"
 
 
 def test_waiting_level_does_not_decay(tmp_path: Path) -> None:
@@ -366,7 +366,7 @@ def test_waiting_level_does_not_decay(tmp_path: Path) -> None:
         session_id="s",
         status="waiting",
         status_updated_at=int((now - 3600) * 1000),
-        waiting_for="input needed",
+        blocked_on="input needed",
     )
     published: list[tuple[str, str | None]] = []
     poller = SessionStatusPoller(

@@ -319,7 +319,7 @@ export interface ChatState {
    * mirror, so the working indicator names it instead of shimmering with
    * no explanation. `null` whenever the session is not parked.
    */
-  waitingFor: string | null;
+  blockedOn: string | null;
   /**
    * Whether the active session is a native-terminal wrapper
    * (claude-native / codex-native), derived from the `omnigent.wrapper`
@@ -941,7 +941,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   status: "idle",
   sessionStatus: "idle",
   backgroundTaskCount: 0,
-  waitingFor: null,
+  blockedOn: null,
   isNativeTerminalSession: false,
   nativeVendorOwnsModel: false,
   boundAgentId: null,
@@ -1235,7 +1235,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       // count is sticky (see the `session_status` handler) precisely so a
       // trailing idle can't wipe it, so it has to be cleared explicitly here.
       backgroundTaskCount: 0,
-      waitingFor: null,
+      blockedOn: null,
     }));
 
     // Pin the destination before joining the send chain: a stalled prior
@@ -1384,7 +1384,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
             // instead of being left on a silent, empty composer.
             set((s) => ({ blocks: [...s.blocks, makeClientErrorBlock(message, code)] }));
           }
-          set({ status: "idle", sessionStatus: "idle", backgroundTaskCount: 0, waitingFor: null });
+          set({ status: "idle", sessionStatus: "idle", backgroundTaskCount: 0, blockedOn: null });
         }
       }
     } finally {
@@ -1544,7 +1544,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         status: "idle",
         sessionStatus: "idle",
         backgroundTaskCount: 0,
-        waitingFor: null,
+        blockedOn: null,
       };
       if (s.activeResponse?.state === "streaming") {
         patch.activeResponse = {
@@ -1636,7 +1636,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         status: "idle",
         sessionStatus: "idle",
         backgroundTaskCount: 0,
-        waitingFor: null,
+        blockedOn: null,
         isNativeTerminalSession: false,
         nativeVendorOwnsModel: false,
         boundAgentId: null,
@@ -2603,7 +2603,7 @@ async function bindStream(
         // live SSE edge that set this is long gone, so the count rides in on
         // the snapshot (server keeps it sticky past the trailing PTY `idle`).
         backgroundTaskCount: session.backgroundTaskCount ?? 0,
-        waitingFor: null,
+        blockedOn: null,
         selectedEffort: effectiveEffort,
         selectedModel:
           catalogWonBindRace && preservedModelValid ? state.selectedModel : effectiveModel,
@@ -4419,7 +4419,7 @@ export function handleSessionEvent(event: StreamEvent): void {
           // Not sticky, unlike the background tally: every edge carries the
           // current reason (the runner re-attaches it to its own pane edges),
           // so an absent one means "no longer parked".
-          waitingFor: event.waitingFor ?? null,
+          blockedOn: event.blockedOn ?? null,
         };
         // The background-shell tally is STICKY. Only the Stop-hook-derived
         // status carries an authoritative count (the forwarder relabels its

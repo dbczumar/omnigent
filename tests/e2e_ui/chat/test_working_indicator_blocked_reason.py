@@ -4,7 +4,7 @@ A native-terminal agent can block on a prompt that lives only in its TUI —
 a permission request, a sandbox request, an open dialog — which the web
 chat does not mirror. The session is still running, so the indicator stays
 lit, but a bare rotating "Working…" hides the fact that nothing will move
-until someone answers. The status edge carries a ``waiting_for`` reason and
+until someone answers. The status edge carries a ``blocked_on`` reason and
 the indicator names it instead.
 
 Drives the real status edges through the Sessions events route (the same
@@ -41,20 +41,20 @@ def _publish_status(
     session_id: str,
     status: str,
     *,
-    waiting_for: str | None = None,
+    blocked_on: str | None = None,
 ) -> None:
     """Publish a session status through the native-harness events route.
 
     :param base_url: Base URL of the local e2e server.
     :param session_id: Session/conversation id.
     :param status: Session status to publish, e.g. ``"running"``.
-    :param waiting_for: Why the session is parked, e.g. ``"permission
+    :param blocked_on: Why the session is parked, e.g. ``"permission
         prompt"``. ``None`` omits the field — the session is not parked.
     :returns: None.
     """
     data: dict[str, object] = {"status": status}
-    if waiting_for is not None:
-        data["waiting_for"] = waiting_for
+    if blocked_on is not None:
+        data["blocked_on"] = blocked_on
     resp = httpx.post(
         f"{base_url}/v1/sessions/{session_id}/events",
         json={"type": "external_session_status", "data": data},
@@ -85,14 +85,14 @@ def test_working_indicator_names_what_the_agent_is_parked_on(
     # 2. The agent parks on a prompt that lives only in its TUI. The session
     #    is still running, so the indicator stays lit — but it now says what
     #    it is waiting on rather than shimmering with no explanation.
-    _publish_status(base_url, session_id, "running", waiting_for="permission prompt")
-    expect(working).to_contain_text("Waiting: permission prompt", timeout=15_000)
+    _publish_status(base_url, session_id, "running", blocked_on="permission prompt")
+    expect(working).to_contain_text("Blocked on: permission prompt", timeout=15_000)
 
     # 3. The prompt is answered and work resumes: the reason is dropped (it is
     #    not sticky) and the ordinary rotating label comes back.
     _publish_status(base_url, session_id, "running")
     expect(working).to_contain_text(_WORKING_LABEL_RE, timeout=15_000)
-    expect(working).not_to_contain_text("Waiting:", timeout=15_000)
+    expect(working).not_to_contain_text("Blocked on:", timeout=15_000)
 
     # 4. The turn ends: the indicator goes out regardless.
     _publish_status(base_url, session_id, "idle")

@@ -2147,11 +2147,11 @@ def create_runner_app(
     def _publish_session_status(
         session_id: str,
         status: str,
-        waiting_for: str | None = None,
+        blocked_on: str | None = None,
     ) -> None:
         event: dict[str, object] = {"type": "session.status", "status": status}
-        if waiting_for is not None:
-            event["waiting_for"] = waiting_for
+        if blocked_on is not None:
+            event["blocked_on"] = blocked_on
         _publish_event(session_id, event)
 
     resource_registry.set_session_status_publisher(_publish_session_status)
