@@ -65,6 +65,7 @@ import {
   getSessionSlim,
   fetchInitialHistoryWindow,
   fetchSessionItemsPage,
+  INITIAL_WINDOW_ITEMS,
   interrupt as interruptSession,
   openSessionStream,
   postEvent,
@@ -2320,16 +2321,17 @@ async function bindStream(
   // Always refetch the snapshot on bind. A cached session snapshot can
   // be stale after the agent commits new items while the user is viewing
   // another conversation; reusing it drops messages until a page refresh.
-  // Bind waits for only the newest page. HistoryAutoLoader grows the initial
-  // window after render, and `loadMoreHistory` handles later scroll-up paging.
+  // Bind fetches the whole initial window in one request; nothing loads more
+  // until the reader scrolls up (`loadMoreHistory`).
   // `retry: false` because the most common failure here is "invalid conv
   // id in URL" (not transient).
   if (queryClient === null) {
     throw new Error("chatStore.bindStream: queryClient not initialized");
   }
   try {
-    // Fetch one page here so the newest items can render after one round-trip.
-    // HistoryAutoLoader fetches any additional initial pages after this commit.
+    // One larger page, so opening a session is a single round trip that then
+    // stays still — rather than a small page followed by background growth
+    // the reader sees as the transcript shifting seconds after it settled.
     const [session, page] = await Promise.all([
       queryClient.fetchQuery({
         queryKey: ["session", id],
@@ -2337,7 +2339,7 @@ async function bindStream(
         staleTime: 0,
         retry: false,
       }),
-      fetchSessionItemsPage(id),
+      fetchSessionItemsPage(id, { limit: INITIAL_WINDOW_ITEMS }),
     ]);
     if (get().conversationId !== id) return;
     const items = page.items;

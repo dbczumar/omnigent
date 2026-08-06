@@ -829,6 +829,22 @@ export async function fetchSessionItemsPage(
   return { items: [...page.data].reverse(), hasMore: page.has_more };
 }
 
+/**
+ * Items the initial window requests, in one round trip.
+ *
+ * Opening a session must not keep fetching afterwards: growing the window
+ * from the transcript's layout effect meant the reader watched history land
+ * for seconds after the page had already settled, with the content shifting
+ * under them each time — and they never asked for it. So the open pays for a
+ * single, larger page instead, and older history is fetched only when they
+ * actually scroll up.
+ *
+ * Sized to cover the previous prompt for a normal turn without the walk this
+ * replaces; a tool-heavy turn can still run longer, and reaching further back
+ * is then the reader's scroll, not a background fetch.
+ */
+export const INITIAL_WINDOW_ITEMS = 100;
+
 /** Pages allowed while looking for the previous user-message boundary. */
 export const MAX_INITIAL_PAGES = 8;
 
