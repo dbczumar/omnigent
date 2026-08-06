@@ -2653,6 +2653,14 @@ async function completeInitialWindow(
   const stale = (): boolean =>
     get().conversationId !== id || get().historyGeneration !== generation;
 
+  // Yield first so the bind's page renders before the rest of the window is
+  // fetched: the newest turn is on screen while the older pages load, and the
+  // request never competes with that first paint.
+  await new Promise<void>((resolve) => {
+    setTimeout(resolve, 0);
+  });
+  if (stale()) return;
+
   set({ loadingMoreHistory: true });
   try {
     const window = await fetchInitialHistoryWindow(id, seed);
