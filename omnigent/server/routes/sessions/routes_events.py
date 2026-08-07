@@ -120,6 +120,7 @@ from omnigent.server.routes._sessions.helpers import (
     SessionLiveness,
     _apply_pending_policy_ask_writes,
     _await_settled_managed_launch,
+    _background_task_delivery_status,
     _build_actor,
     _build_skill_slash_command_policy_body,
     _dispatch_skill_slash_command_to_runner,
@@ -160,7 +161,6 @@ from omnigent.server.routes._sessions.helpers import (
     _stop_session_host_runner,
     _stop_session_via_runner,
     _stream_live_events,
-    _subagent_delivery_status,
     _wait_for_runner_client,
 )
 from omnigent.server.routes._sessions.orchestration import (
@@ -890,10 +890,18 @@ def register_events_routes(
                 and raw_bg_count >= 0
                 else None
             )
-            # A sub-agent's background-task ``waiting`` must deliver as ``idle``
-            # so the parent's terminal-delivery branch below fires (otherwise
-            # the orchestrator hangs); the tally still drives the child spinner.
-            effective_status = _subagent_delivery_status(status, bg_count, conv)
+            # Why a still-running session is parked, e.g. a permission prompt
+            # the web UI does not mirror. Absent or blank = not parked, so the
+            # indicator falls back to its ordinary working label.
+            raw_blocked_on = body.data.get("blocked_on")
+            blocked_on = (
+                raw_blocked_on if isinstance(raw_blocked_on, str) and raw_blocked_on else None
+            )
+            # A background-task ``waiting`` marks an ended turn, so deliver it
+            # as ``idle``: the session takes a new message now, and for a
+            # sub-agent the terminal-delivery branch below must fire (otherwise
+            # the orchestrator hangs). The tally still drives the spinner.
+            effective_status = _background_task_delivery_status(status, bg_count, conv)
             if effective_status != status:
                 status = effective_status
                 body.data["status"] = status
@@ -903,6 +911,7 @@ def register_events_routes(
                 status_error,
                 response_id=response_id,
                 background_task_count=bg_count,
+                blocked_on=blocked_on,
             )
             forward_body = body.model_dump()
             forward_body["data"] = await _enrich_idle_status_with_subagent_output(
@@ -1490,6 +1499,9 @@ def register_events_routes(
             author_attribution_required=(access.level is not None and access.level < LEVEL_OWNER),
             runner_router=runner_router,
             native_terminal_ready=native_terminal_ready,
+            # Read only for the gateway-backing check that decides which router
+            # serves this turn; absent, routing keeps its default posture.
+            host_store=getattr(request.app.state, "host_store", None),
         )
         if pending_background_title is not None:
             pending_background_title.schedule()
