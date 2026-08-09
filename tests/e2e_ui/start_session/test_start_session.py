@@ -2492,6 +2492,109 @@ async def _drive_create_folder(base_url: str, session_id: str) -> None:
             await browser.close()
 
 
+def test_start_session_type_tilde_path(seeded_session: tuple[str, str]) -> None:
+    """Typing a ``~/…`` path in the workspace picker navigates there.
+
+    The picker opens at the composer's seeded working directory — an
+    *absolute* path (the host's home). Because it never lands on the empty
+    "home" view, it used to never resolve the host's home dir, so a typed
+    ``~/Desktop`` couldn't be expanded and the path bar silently snapped back
+    to the previous directory (the reported bug: ``~/…`` "just reverts").
+
+    This drives that gesture end to end: open the browser (seeded at
+    ``/home/e2e``), type ``~/Desktop`` in the path bar, press Enter, and assert
+    the listing navigates into ``/home/e2e/Desktop`` and the picked path reaches
+    ``POST /v1/sessions`` as ``workspace``.
+    """
+    base_url, session_id = seeded_session
+    _run_in_fresh_loop(_drive_type_tilde_path(base_url, session_id))
+
+
+async def _drive_type_tilde_path(base_url: str, session_id: str) -> None:
+    async with async_playwright() as pw:
+        browser = await pw.chromium.launch()
+        page = await browser.new_page()
+        try:
+            create_bodies: list[dict[str, Any]] = []
+            await _register_common_routes(
+                page, created_session_id=session_id, create_bodies=create_bodies
+            )
+
+            async def handle_filesystem(route: Route) -> None:
+                # Home ("/home/e2e", listed as "~" and as the absolute path)
+                # shows "Desktop"; "/home/e2e/Desktop" shows its child. The
+                # entries carry absolute paths so home resolves to "/home/e2e"
+                # from any listing's parent.
+                path_part = route.request.url.split("?")[0]
+                if path_part.endswith("/filesystem/home/e2e/Desktop"):
+                    entries = [
+                        {
+                            "name": "notes",
+                            "path": "/home/e2e/Desktop/notes",
+                            "type": "directory",
+                            "bytes": None,
+                            "modified_at": 0,
+                        }
+                    ]
+                else:
+                    entries = [
+                        {
+                            "name": "Desktop",
+                            "path": "/home/e2e/Desktop",
+                            "type": "directory",
+                            "bytes": None,
+                            "modified_at": 0,
+                        }
+                    ]
+                await route.fulfill(
+                    status=200,
+                    content_type="application/json",
+                    body=json.dumps({"object": "list", "data": entries, "has_more": False}),
+                )
+
+            # Registered last so it wins over the broader **/v1/hosts glob.
+            await page.route(_FILESYSTEM_RE, handle_filesystem)
+
+            # No recent seed: the composer derives home from the listing and
+            # seeds the working directory to it, so the picker opens at the
+            # absolute "/home/e2e" — never the empty home view.
+            await page.goto(f"{base_url}/")
+            await page.get_by_test_id("new-chat-landing-input").wait_for(
+                state="visible", timeout=30_000
+            )
+            await expect(page.get_by_test_id("new-chat-landing-workspace-chip")).to_contain_text(
+                "e2e"
+            )
+
+            # Open the browser and type a ~-relative path, then commit with Enter.
+            await page.get_by_test_id("new-chat-landing-workspace-chip").click()
+            await expect(page.get_by_test_id("workspace-picker")).to_be_visible()
+            path_input = page.get_by_test_id("workspace-picker-path-input")
+            await path_input.fill("~/Desktop")
+            await path_input.press("Enter")
+
+            # The listing navigated into the tilde-expanded directory — its
+            # child confirms we're inside /home/e2e/Desktop (pre-fix the bar
+            # reverted to /home/e2e and this row never appeared).
+            await expect(page.get_by_test_id("workspace-picker-entry-notes")).to_be_visible()
+
+            # Filling the message closes the popover; the chip follows the
+            # navigated folder.
+            await page.get_by_test_id("new-chat-landing-input").fill("explore the desktop")
+            await expect(page.get_by_test_id("new-chat-landing-workspace-chip")).to_contain_text(
+                "Desktop"
+            )
+
+            await page.get_by_test_id("new-chat-landing-submit").click()
+
+            await _wait_until(lambda: len(create_bodies) == 1)
+            body = create_bodies[0]
+            assert body["host_id"] == _HOST_ID, body
+            assert body["workspace"] == "/home/e2e/Desktop", body
+        finally:
+            await browser.close()
+
+
 def test_start_session_add_worktree(seeded_session: tuple[str, str]) -> None:
     """Naming a branch attaches a git worktree spec to the create call.
 
