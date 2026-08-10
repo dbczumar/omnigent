@@ -961,7 +961,17 @@ function renderItem(
         />
       );
     case "error":
-      return <ErrorBanner key={key} message={item.message} source={item.source} code={item.code} />;
+      return (
+        <ErrorBanner
+          key={key}
+          message={item.message}
+          source={item.source}
+          code={item.code}
+          title={item.title}
+          cause={item.cause}
+          remediation={item.remediation}
+        />
+      );
     case "policy_denied":
       return <PolicyDeniedBanner key={key} reason={item.reason} phase={item.phase} />;
     case "retry":

@@ -81,7 +81,16 @@ export type RenderItem =
       stderr: string | null;
     }
   | { kind: "policy_denied"; itemId: string | null; reason: string; phase: string }
-  | { kind: "error"; itemId: string | null; message: string; source: string; code: string }
+  | {
+      kind: "error";
+      itemId: string | null;
+      message: string;
+      source: string;
+      code: string;
+      title?: string;
+      cause?: string;
+      remediation?: string;
+    }
   | {
       kind: "retry";
       itemId: string | null;
@@ -911,6 +920,9 @@ function buildAssistantItems(
         message: b.message,
         source: b.source,
         code: b.code,
+        ...(b.title ? { title: b.title } : {}),
+        ...(b.cause ? { cause: b.cause } : {}),
+        ...(b.remediation ? { remediation: b.remediation } : {}),
       });
       i += 1;
       continue;

@@ -53,7 +53,7 @@ import type {
   ToolGroup,
   UserMessageBlock,
 } from "@/lib/blocks";
-import { LIVE_ITEM_PREFIX } from "@/lib/blocks";
+import { LIVE_ITEM_PREFIX, structuredErrorFields } from "@/lib/blocks";
 import { BlockStream } from "@/lib/blockStream";
 import { itemsToBlocks } from "@/lib/itemsToBlocks";
 import type { ConversationItem } from "@/lib/conversationItems";
@@ -2588,6 +2588,7 @@ async function bindStream(
               message: session.lastTaskError.message,
               source: "",
               code: session.lastTaskError.code,
+              ...structuredErrorFields(session.lastTaskError),
             }
           : null;
       const preserveCachedCursor = cachedItemIds !== null && !replaceCachedWindow;
@@ -4525,6 +4526,7 @@ export function handleSessionEvent(event: StreamEvent): void {
               message: event.error.message,
               source: "",
               code: event.error.code,
+              ...structuredErrorFields(event.error),
             } satisfies ErrorBlock,
           ];
         }

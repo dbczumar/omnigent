@@ -458,8 +458,12 @@ export interface SessionStatusEvent {
   status: "idle" | "launching" | "running" | "waiting" | "failed";
   responseId?: string;
   backgroundTaskCount?: number;
-  /** Structured failure detail; only present when `status === "failed"`. */
-  error?: { code: string; message: string };
+  /**
+   * Structured failure detail; only present when `status === "failed"`.
+   * Carries the optional `title` / `cause` / `remediation` fields when the
+   * runner classified the failure (see `ErrorInfo`).
+   */
+  error?: ErrorInfo;
 }
 
 /**

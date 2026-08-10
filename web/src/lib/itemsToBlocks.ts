@@ -26,6 +26,7 @@ import {
   type UserMessageBlock,
   slashCommandEchoItemId,
   slashCommandEchoText,
+  structuredErrorFields,
 } from "./blocks";
 import { formatNativeLabel, formatToolArgsBrief } from "./blockStream";
 import {
@@ -236,6 +237,7 @@ function errorToBlock(item: ErrorItem): ErrorBlock {
     source: item.source,
     code: item.code,
     message: item.message,
+    ...structuredErrorFields(item),
   };
 }
 
