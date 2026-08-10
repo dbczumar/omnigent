@@ -2595,6 +2595,95 @@ async def _drive_type_tilde_path(base_url: str, session_id: str) -> None:
             await browser.close()
 
 
+def test_start_session_type_nonexistent_path(seeded_session: tuple[str, str]) -> None:
+    """Typing a path that doesn't exist shows an error, not the old listing.
+
+    Previously a typed path the host 404s on left the picker showing the
+    *previous* valid directory's contents: the filesystem query kept the old
+    listing on screen as placeholder data while it burned through its default
+    retries on the deterministic 404, so for several seconds nothing signalled
+    that the path was bad (the reported bug). With the 404 no longer retried,
+    the picker drops the stale rows immediately and surfaces a "doesn't exist"
+    message.
+
+    This drives that end to end: open the browser (seeded at ``/home/e2e``,
+    showing ``Desktop``), type a nonexistent ``~/does-not-exist``, press Enter,
+    and assert the picker shows the doesn't-exist error and no longer lists the
+    previous directory's ``Desktop`` entry.
+    """
+    base_url, session_id = seeded_session
+    _run_in_fresh_loop(_drive_type_nonexistent_path(base_url, session_id))
+
+
+async def _drive_type_nonexistent_path(base_url: str, session_id: str) -> None:
+    async with async_playwright() as pw:
+        browser = await pw.chromium.launch()
+        page = await browser.new_page()
+        try:
+            create_bodies: list[dict[str, Any]] = []
+            await _register_common_routes(
+                page, created_session_id=session_id, create_bodies=create_bodies
+            )
+
+            async def handle_filesystem(route: Route) -> None:
+                # Home ("/home/e2e", and the bare home listing) shows "Desktop";
+                # the typed "/home/e2e/does-not-exist" 404s exactly as the host
+                # does for a missing path.
+                path_part = route.request.url.split("?")[0]
+                if path_part.endswith("/filesystem/home/e2e/does-not-exist"):
+                    await route.fulfill(
+                        status=404,
+                        content_type="application/json",
+                        body=json.dumps({"detail": "path does not exist"}),
+                    )
+                    return
+                entries = [
+                    {
+                        "name": "Desktop",
+                        "path": "/home/e2e/Desktop",
+                        "type": "directory",
+                        "bytes": None,
+                        "modified_at": 0,
+                    }
+                ]
+                await route.fulfill(
+                    status=200,
+                    content_type="application/json",
+                    body=json.dumps({"object": "list", "data": entries, "has_more": False}),
+                )
+
+            # Registered last so it wins over the broader **/v1/hosts glob.
+            await page.route(_FILESYSTEM_RE, handle_filesystem)
+
+            await page.goto(f"{base_url}/")
+            await page.get_by_test_id("new-chat-landing-input").wait_for(
+                state="visible", timeout=30_000
+            )
+            await expect(page.get_by_test_id("new-chat-landing-workspace-chip")).to_contain_text(
+                "e2e"
+            )
+
+            # Open the browser; the valid home listing shows Desktop.
+            await page.get_by_test_id("new-chat-landing-workspace-chip").click()
+            await expect(page.get_by_test_id("workspace-picker")).to_be_visible()
+            await expect(page.get_by_test_id("workspace-picker-entry-Desktop")).to_be_visible()
+
+            # Type a nonexistent path and commit with Enter.
+            path_input = page.get_by_test_id("workspace-picker-path-input")
+            await path_input.fill("~/does-not-exist")
+            await path_input.press("Enter")
+
+            # The picker surfaces a doesn't-exist error (pre-fix it silently kept
+            # showing the previous directory while retrying the 404)...
+            error = page.get_by_test_id("workspace-picker-error")
+            await expect(error).to_be_visible()
+            await expect(error).to_contain_text("doesn't exist")
+            # ...and the previous directory's rows are gone — no stale listing.
+            await expect(page.get_by_test_id("workspace-picker-entry-Desktop")).to_have_count(0)
+        finally:
+            await browser.close()
+
+
 def test_start_session_add_worktree(seeded_session: tuple[str, str]) -> None:
     """Naming a branch attaches a git worktree spec to the create call.
 
