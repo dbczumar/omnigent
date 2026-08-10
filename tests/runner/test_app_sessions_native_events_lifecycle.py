@@ -759,6 +759,12 @@ async def test_claude_native_model_options_use_session_launch_catalog(
 
     monkeypatch.setattr("omnigent.claude_native.resolve_native_claude_config", _resolve)
 
+    async def _probe_unavailable(claude_config: object) -> None:
+        del claude_config
+        return
+
+    monkeypatch.setattr("omnigent.claude_native.probe_claude_model_options", _probe_unavailable)
+
     async def _fake_auto_create(
         session_id: str,
         resource_registry: Any,
@@ -818,6 +824,103 @@ async def test_claude_native_model_options_use_session_launch_catalog(
     assert second.json() == expected
     # Auto-create and both UI reads shared one launch-time live query.
     assert resolved_specs == [claude_spec]
+
+
+@pytest.mark.asyncio
+async def test_claude_native_model_options_serves_probe_union_after_pending(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A slow probe answers 503-pending, then the union rows, then the cache.
+
+    The server's fetch retries 503s, so an in-flight probe holds the
+    catalog back rather than serving a stale list; once the harness
+    answers, its rows join the configured ones and the session serves that
+    union for its lifetime.
+    """
+    from omnigent.claude_native import ClaudeNativeUcodeConfig
+    from omnigent.runner import app as runner_app_module
+
+    conv_id = "9c527915981fe729dd9a19a6dfcbca49"
+    claude_spec = AgentSpec(
+        spec_version=1,
+        name="t",
+        executor=ExecutorSpec(type="omnigent", config={"harness": "claude-native"}),
+    )
+
+    async def _resolver(agent_id: str, session_id: str | None = None) -> AgentSpec:
+        del agent_id, session_id
+        return claude_spec
+
+    config = ClaudeNativeUcodeConfig(
+        env={"ANTHROPIC_DEFAULT_OPUS_MODEL": "system.ai.claude-opus-4-10"},
+        api_key_helper="printf token",
+        model="system.ai.claude-opus-4-10",
+    )
+    monkeypatch.setattr(
+        "omnigent.claude_native.resolve_native_claude_config",
+        lambda *, spec: config,
+    )
+    release = asyncio.Event()
+
+    async def _slow_probe(
+        claude_config: object,
+    ) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+        del claude_config
+        await release.wait()
+        return [{"id": "sonnet[1m]", "model": "claude-sonnet-5[1m]"}], []
+
+    monkeypatch.setattr("omnigent.claude_native.probe_claude_model_options", _slow_probe)
+    monkeypatch.setattr(runner_app_module, "_CLAUDE_MODEL_OPTIONS_INLINE_WAIT_S", 0.01)
+
+    async def _fake_auto_create(
+        session_id: str,
+        resource_registry: Any,
+        publish_event: Any,
+        **kwargs: Any,
+    ) -> SessionResourceView:
+        del resource_registry, publish_event
+        resolver = kwargs.get("resolve_launch_config")
+        recorder = kwargs.get("record_launch_config")
+        assert callable(resolver)
+        assert callable(recorder)
+        recorder(session_id, await resolver())
+        return SessionResourceView(
+            id="terminal_claude_main",
+            type="terminal",
+            session_id=session_id,
+            name="claude:main",
+            metadata={"terminal_name": "claude", "session_key": "main", "running": True},
+        )
+
+    monkeypatch.setattr(
+        "omnigent.runner.native.orchestration._auto_create_claude_terminal", _fake_auto_create
+    )
+    app = create_runner_app(
+        process_manager=_FakeProcessManager(_ScriptedHarnessClient([])),  # type: ignore[arg-type]
+        spec_resolver=_resolver,
+        server_client=NullServerClient(),  # type: ignore[arg-type]
+    )
+
+    async with _runner_client(app) as client:
+        create_resp = await client.post(
+            "/v1/sessions",
+            json={"session_id": conv_id, "agent_id": "880b5afda28ad55ff74cbeb9b5fc67fb"},
+        )
+        assert create_resp.status_code == 201, create_resp.text
+        pending = await client.get(f"/v1/sessions/{conv_id}/claude-model-options")
+        assert pending.status_code == 503
+        assert pending.json()["error"] == "claude_native_model_options_pending"
+        release.set()
+        resolved = await client.get(f"/v1/sessions/{conv_id}/claude-model-options")
+        cached = await client.get(f"/v1/sessions/{conv_id}/claude-model-options")
+
+    expected_ids = [row["id"] for row in resolved.json()["models"]]
+    assert resolved.status_code == 200
+    # Configured tier rows keep the rich spelling; the probe contributes
+    # the rows the config does not cover.
+    assert "opus" in expected_ids
+    assert "sonnet[1m]" in expected_ids
+    assert cached.json() == resolved.json()
 
 
 @pytest.mark.asyncio

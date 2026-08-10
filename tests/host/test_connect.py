@@ -3996,6 +3996,51 @@ async def test_handle_model_options_serves_claude_sdk_endpoint_listing(
     _cleanup_host(host)
 
 
+async def test_handle_model_options_claude_sdk_rides_the_probe_when_endpoints_list_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A subscription SDK launch serves the claude CLI's probed rows.
+
+    Subscription providers list nothing endpoint-side (the curated
+    stand-ins are gone), and the SDK drives the claude CLI — so the CLI's
+    probed listing is the truth for this lane too.
+    """
+    from omnigent.host.model_options_cache import ModelOptionsResult
+    from omnigent.model_catalog import ModelListing
+
+    def _fake_listing(spec: object, harness: str) -> ModelListing:
+        assert harness == "claude-sdk"
+        return ModelListing(
+            source="static",
+            verified=False,
+            models=(),
+            note="the claude CLI login exposes no model-listing API before launch",
+        )
+
+    monkeypatch.setattr("omnigent.model_catalog.list_models_for_worker", _fake_listing)
+    host = _make_host_process()
+
+    async def _fake_probed() -> ModelOptionsResult:
+        return ModelOptionsResult(
+            models=[{"id": "sonnet", "model": "claude-sonnet-5", "displayName": "Sonnet 5"}],
+            routable_models=[],
+        )
+
+    monkeypatch.setattr(host, "_probed_claude_model_options", _fake_probed)
+
+    result = await host._handle_model_options(
+        HostModelOptionsFrame(request_id="req_sdk_sub", harness="claude-sdk"),
+    )
+
+    assert result == HostModelOptionsResultFrame(
+        request_id="req_sdk_sub",
+        status="ok",
+        models=[{"id": "sonnet", "model": "claude-sonnet-5", "displayName": "Sonnet 5"}],
+        routable_models=[],
+    )
+    _cleanup_host(host)
+
+
 async def test_model_options_frame_replies_off_the_receive_loop(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -2156,8 +2156,7 @@ class HostProcess:
         :returns: The cached/probed listing, or ``None``.
         """
         from omnigent.claude_native import (
-            claude_native_model_options,
-            probe_claude_model_options,
+            claude_model_options_with_probe,
             resolve_native_claude_config,
         )
 
@@ -2174,32 +2173,7 @@ class HostProcess:
 
             async def _resolve() -> ModelOptionsResult:
                 config = await asyncio.to_thread(resolve_native_claude_config, spec=None)
-                configured = await asyncio.to_thread(claude_native_model_options, config)
-                probe = await probe_claude_model_options(config)
-                if probe is None:
-                    # Probe unavailable (claude missing / hung): the
-                    # configured rows are the best remaining answer.
-                    merged = configured
-                    gateway_rows: list[dict[str, object]] = []
-                else:
-                    alias_rows, gateway_rows = probe
-                    if config is not None:
-                        # A resolved config's tier rows carry the pinned
-                        # model ids and display names for the same aliases
-                        # the harness printed — keep them as the rich
-                        # spelling and let the probe contribute the rest.
-                        merged = list(configured)
-                    else:
-                        # Bare subscription launch: the harness's own
-                        # printed alias list IS the picker; the static
-                        # fallback rows would only restate a subset.
-                        merged = []
-                    seen = {row.get("id") for row in merged} | {row.get("model") for row in merged}
-                    for row in (*alias_rows, *gateway_rows):
-                        if row["id"] in seen:
-                            continue
-                        seen.add(row["id"])
-                        merged.append(row)
+                merged, gateway_rows = await claude_model_options_with_probe(config)
                 routable = list(config.routable_models) if config is not None else []
                 routable.extend(
                     row["id"]
@@ -2371,6 +2345,18 @@ class HostProcess:
                     status="failed",
                     error="failed to resolve Claude SDK model options",
                 )
+            if not listing.models:
+                # Subscription / CLI-login providers list nothing endpoint-side.
+                # The SDK drives the claude CLI, so the CLI's own probed rows
+                # (its aliases resolve inside the harness) are the truth here.
+                probed = await self._probed_claude_model_options()
+                if probed is not None:
+                    return HostModelOptionsResultFrame(
+                        request_id=frame.request_id,
+                        status="ok",
+                        models=probed.models,
+                        routable_models=probed.routable_models,
+                    )
             return HostModelOptionsResultFrame(
                 request_id=frame.request_id,
                 status="ok",

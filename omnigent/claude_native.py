@@ -103,7 +103,6 @@ from omnigent.host.daemon_launch import (
     wait_for_host_online,
     wait_for_runner_online,
 )
-from omnigent.model_fallbacks import static_model_fallback
 from omnigent.native_coding_agents import native_shell_terminal_spec
 from omnigent.native_terminal import (
     DAEMON_HOST_ONLINE_TIMEOUT_S as _DAEMON_HOST_ONLINE_TIMEOUT_S,
@@ -123,7 +122,6 @@ from omnigent.native_terminal import (
 from omnigent.native_terminal import (
     terminal_attach_url as _attach_url,
 )
-from omnigent.onboarding.provider_config import SUBSCRIPTION_KIND
 from omnigent.terminals.ws_bridge import (
     WS_CLOSE_TERMINAL_DETACHED,
     WS_CLOSE_TERMINAL_NOT_FOUND,
@@ -424,8 +422,8 @@ def resolve_claude_native_model_selection(
     extra Sonnet 5 row uses Omnigent's ``sonnet_5`` id because it occupies
     Claude Code's provider-configured custom model slot. Resolve that id to
     the exact custom option, preserving provider suffixes such as ``[1m]``.
-    Direct Claude logins have no provider config, so they use the canonical
-    Anthropic model id.
+    Direct Claude logins have no provider config, so the pick degrades to
+    the ``sonnet`` family alias, which Claude resolves itself.
 
     On a gateway/Bedrock endpoint, a family alias with no tier pin (launch env
     or managed settings) resolves to the provider's default model — Claude
@@ -456,26 +454,9 @@ def resolve_claude_native_model_selection(
             return provider_fallback
         if claude_config.model:
             return claude_config.model
-    fallback = static_model_fallback(SUBSCRIPTION_KIND, "claude")
-    if fallback is None:
-        raise ValueError("Claude subscription fallback has no routable Sonnet model")
-    exact_match = next(
-        (
-            model_id
-            for model_id in fallback.model_ids
-            if _claude_model_display_name("sonnet", model_id) == _UCODE_CLAUDE_CUSTOM_TIER_LABEL
-        ),
-        None,
-    )
-    if exact_match is not None:
-        return exact_match
-    family_match = next(
-        (model_id for model_id in fallback.model_ids if "claude-sonnet-" in model_id.lower()),
-        None,
-    )
-    if family_match is None:
-        raise ValueError("Claude subscription fallback has no routable Sonnet model")
-    return family_match
+    # No provider config pins the custom slot: hand Claude Code its own
+    # ``sonnet`` alias and let it resolve the current Sonnet itself.
+    return "sonnet"
 
 
 def claude_config_with_routed_arms_pinned(
@@ -1036,6 +1017,38 @@ async def probe_claude_model_options(
     if base_url and env_overrides.get(_CLAUDE_GATEWAY_DISCOVERY_ENV) == "1":
         gateway_rows = await asyncio.to_thread(_claude_gateway_artifact_rows, base_url)
     return alias_rows, gateway_rows
+
+
+async def claude_model_options_with_probe(
+    claude_config: ClaudeNativeUcodeConfig | None,
+) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    """
+    The full Claude listing: configured rows ∪ the harness's own answer.
+
+    One composition shared by every surface (the host's pre-launch picker
+    and the runner's session listing), so the two cannot drift. A resolved
+    provider config keeps its tier rows as the rich spelling and the probe
+    contributes the rest; a bare subscription launch is the probe's rows
+    alone. A failed probe falls back to the configured rows.
+
+    :param claude_config: The resolved launch config, or ``None``.
+    :returns: ``(rows, gateway_rows)`` — the merged picker rows, plus the
+        harness-discovered gateway rows on their own for callers that track
+        routability.
+    """
+    configured = await asyncio.to_thread(claude_native_model_options, claude_config)
+    probe = await probe_claude_model_options(claude_config)
+    if probe is None:
+        return configured, []
+    alias_rows, gateway_rows = probe
+    merged = list(configured) if claude_config is not None else []
+    seen = {row.get("id") for row in merged} | {row.get("model") for row in merged}
+    for row in (*alias_rows, *gateway_rows):
+        if row["id"] in seen:
+            continue
+        seen.add(row["id"])
+        merged.append(row)
+    return merged, gateway_rows
 
 
 def build_native_claude_terminal_env(
