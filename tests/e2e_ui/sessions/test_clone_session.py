@@ -452,9 +452,15 @@ def test_clone_submit_spins_while_the_fork_is_in_flight(
     )
 
     parked: list[Route] = []
+
     # Returning without resolving parks the request in the browser and
     # leaves the test's thread free to assert. The route is released below.
-    page.route(re.compile(r"/v1/sessions/[^/]+/fork"), parked.append)
+    # Must be a plain function, not ``parked.append``: Playwright stamps an
+    # attribute onto the handler it is given, which a builtin method rejects.
+    def park_fork(route: Route) -> None:
+        parked.append(route)
+
+    page.route(re.compile(r"/v1/sessions/[^/]+/fork"), park_fork)
 
     page.goto(f"{base_url}/c/{session_id}")
 
