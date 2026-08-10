@@ -91,7 +91,9 @@ def test_new_shell_launches_and_opens(page: Page, terminal_session: tuple[str, s
     terminal_view = rail.get_by_test_id("terminal-view")
     expect(terminal_view.last).to_be_visible(timeout=20_000)
     expect(terminal_view.last).to_have_attribute("data-state", "connected", timeout=20_000)
-    expect(page.locator('[data-testid="main-terminal-view"][data-visible="true"]')).to_have_count(0)
+    expect(page.locator('[data-testid="main-terminal-view"][data-visible="true"]')).to_have_count(
+        0
+    )
     expect(page.get_by_placeholder("Ask the agent anything…")).to_be_visible()
 
     # The tab's x closes the shell — its xterm unmounts and the rail falls
