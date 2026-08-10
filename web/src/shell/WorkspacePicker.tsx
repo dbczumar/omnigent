@@ -13,6 +13,7 @@ import {
 import { useEffect, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
+import { Spinner } from "@/components/ui/spinner";
 import { useCreateHostDirectory, useHostFilesystem } from "@/hooks/useHostFilesystem";
 
 /**
@@ -596,7 +597,11 @@ export function WorkspacePicker({
               className="shrink-0 rounded p-1 text-muted-foreground hover:bg-accent hover:text-accent-foreground disabled:opacity-30"
               data-testid="workspace-picker-new-folder-create"
             >
-              <CheckIcon className="size-4" />
+              {createDir.isPending ? (
+                <Spinner className="size-4" />
+              ) : (
+                <CheckIcon className="size-4" />
+              )}
             </button>
             <button
               type="button"
