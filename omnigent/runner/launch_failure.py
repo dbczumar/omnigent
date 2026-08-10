@@ -175,12 +175,18 @@ def classify_terminal_failure(
 # even an unclassified failure reads as English instead of a raw enum. Terminal
 # exits that a matcher recognizes use the richer diagnosis above; this table
 # is the floor for everything else.
+#
+# This is the canonical source; the frontend keeps a hand-mirrored copy
+# (``FAILURE_CODE_DESCRIPTIONS`` in ``web/src/components/blocks/StatusBlocks.tsx``)
+# because the failure card renders client-side. Keep the two in sync when adding
+# or editing a code.
 _FAILURE_CODE_DESCRIPTIONS: dict[str, str] = {
     "required_terminal_exited": (
         "The agent's terminal exited unexpectedly, so the session can't continue."
     ),
     "terminal_launch_failed": "The agent's terminal couldn't be started on the host.",
     "runner_error": "Something went wrong setting up the turn on the host.",
+    "runner_disconnected": "The connection to the host dropped unexpectedly.",
     "connection_error": "The connection to the agent dropped mid-turn.",
     "context_length_exceeded": "The conversation grew past the model's context window.",
     "executor_error": "The agent runtime hit an error while running the turn.",
@@ -189,6 +195,12 @@ _FAILURE_CODE_DESCRIPTIONS: dict[str, str] = {
 
 def describe_failure_code(code: str | None) -> str | None:
     """Return a one-line English description for a failure *code*.
+
+    Server-side counterpart of the frontend's ``FAILURE_CODE_DESCRIPTIONS``
+    map. The live failure card is rendered client-side, so this function is
+    currently a parity mirror exercised by tests; it exists so a server-side
+    caller (e.g. a future REPL/CLI failure renderer) has the same code→sentence
+    fallback the web UI uses, without re-deriving it.
 
     :param code: The machine-readable failure code, e.g. ``"runner_error"``.
     :returns: A human sentence, or ``None`` for an unknown/empty code (callers

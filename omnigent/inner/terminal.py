@@ -1062,9 +1062,13 @@ class TerminalInstance:
     def _remember_exit_status(self, fields: str) -> None:
         """Record the exit code from a ``#{pane_dead} #{pane_dead_status}`` row.
 
-        tmux prints one row per pane; a dead pane's second field is the inner
-        process's wait-status (empty while alive). Parsed best-effort — a
-        missing or non-numeric status just leaves the code unset.
+        A managed terminal is single-pane by construction (:attr:`tmux_target`
+        is always ``"main"``), so ``list-panes`` returns exactly one row and its
+        two fields describe that pane: ``pane_dead`` (``1`` once the inner
+        process exits) and ``pane_dead_status`` (the wait-status, empty while
+        alive). Reading only the first two whitespace tokens is therefore
+        unambiguous. Parsed best-effort — a missing or non-numeric status just
+        leaves the code unset.
         """
         parts = fields.split()
         if len(parts) >= 2 and parts[0] == "1":
