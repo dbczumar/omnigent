@@ -1338,10 +1338,12 @@ async def test_runner_disconnect_grace_defers_failed_marking(
 ) -> None:
     """A tunnel drop marks sessions failed only after the reconnect grace.
 
-    Drives a real WS disconnect for a dedicated runner and asserts (a)
-    the bound session is NOT failed inside the grace, (b) it IS failed
-    once the grace expires with the runner still gone, and (c) a
-    reconnect inside the grace suppresses the marking entirely.
+    Drives a real WS disconnect for a dedicated runner whose session is
+    seeded mid-turn (``running`` — offline reconciliation only fails
+    interrupted turns) and asserts (a) the session is NOT failed inside
+    the grace, (b) it IS failed once the grace expires with the runner
+    still gone, and (c) a reconnect inside the grace suppresses the
+    marking entirely.
     """
     from omnigent.runner.routing import RoutedRunner
     from omnigent.runtime import get_conversation_store
@@ -1398,7 +1400,7 @@ async def test_runner_disconnect_grace_defers_failed_marking(
 
     communicator = await _connect_runner_tunnel(ap_app, runner_id)
     await _send_hello_and_wait(communicator, ap_app, runner_id, harnesses=[_TEST_HARNESS_NAME])
-    sessions_module._session_status_cache.pop(session_id, None)
+    sessions_module._session_status_cache[session_id] = "running"
 
     reconnect_communicator: ApplicationCommunicator | None = None
     try:
@@ -1424,7 +1426,7 @@ async def test_runner_disconnect_grace_defers_failed_marking(
         await _send_hello_and_wait(
             communicator2, ap_app, runner_id, harnesses=[_TEST_HARNESS_NAME]
         )
-        sessions_module._session_status_cache.pop(session_id, None)
+        sessions_module._session_status_cache[session_id] = "running"
         await communicator2.send_input({"type": "websocket.disconnect", "code": 1000})
         await communicator2.wait(timeout=2.0)
         reconnect_communicator = await _connect_runner_tunnel(ap_app, runner_id)
@@ -1450,3 +1452,95 @@ async def test_runner_disconnect_grace_defers_failed_marking(
 # out of ``test_sessions_three_layer.py`` + this file into a shared
 # ``_three_layer_helpers.py`` module once a third caller arrives. Kept
 # duplicated for now to keep this PR scoped to fixture + tests only.
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("_isolated_session_status_cache")
+async def test_on_runner_disconnect_spares_idle_sessions_and_labels_interrupted_ones(
+    tunnel_three_layer_stack: _TunnelStack,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A real tunnel drop fails only the mid-turn session, with its cause.
+
+    Sub-agents ride their parent's runner, so ``_on_runner_disconnect``
+    sees every session bound to it. It used to mark them all ``failed``
+    with no ``ErrorDetail``, which painted finished sub-agents red and
+    left a failure the UI could not tell from a real one (and that
+    ``_publish_runner_recovered_status`` could not clear, since it
+    matches on the disconnect code). Drives a genuine WS close on a
+    dedicated runner and asserts the idle session is untouched while the
+    running one carries ``runner_disconnected``.
+    """
+    from omnigent.runtime import get_conversation_store
+    from omnigent.server.routes import sessions as sessions_module
+
+    ap_client = tunnel_three_layer_stack.ap_client
+    ap_app = tunnel_three_layer_stack.ap_app
+    runner_id = "runner-offline-reconcile-test"
+
+    # Shrink the reconnect grace so the deferred reconciliation lands
+    # within the test's wait window.
+    monkeypatch.setattr("omnigent.server.routes.sessions.RUNNER_DISCONNECT_GRACE_S", 0.05)
+
+    communicator = await _connect_runner_tunnel(ap_app, runner_id)
+    await _send_hello_and_wait(
+        communicator,
+        ap_app,
+        runner_id,
+        harnesses=[_TEST_HARNESS_NAME],
+    )
+
+    store = get_conversation_store()
+    session_ids: list[str] = []
+    for _ in range(2):
+        create_resp = await ap_client.post(
+            "/v1/sessions",
+            data={"metadata": json.dumps({})},
+            files={
+                "bundle": (
+                    "agent.tar.gz",
+                    _build_harness_agent_bundle(),
+                    "application/gzip",
+                ),
+            },
+        )
+        assert create_resp.status_code == 201, create_resp.text
+        session_id = create_resp.json()["session_id"]
+        # Bind through the store (not a PATCH) so no relay spawns: this test
+        # is about the app-level fan-out, and a relay would also react to the
+        # close, making the assertion ambiguous about which path ran.
+        store.replace_runner_id(session_id, runner_id)
+        session_ids.append(session_id)
+
+    running_id, idle_id = session_ids
+    sessions_module._session_status_cache[running_id] = "running"
+    sessions_module._session_status_cache[idle_id] = "idle"
+
+    try:
+        await communicator.send_input({"type": "websocket.disconnect", "code": 1006})
+
+        async def _hook_ran() -> None:
+            while sessions_module._session_status_cache.get(running_id) != "failed":
+                await asyncio.sleep(0.01)
+
+        await asyncio.wait_for(_hook_ran(), timeout=5.0)
+
+        # The interrupted turn is failed AND carries the cause, so the client
+        # renders a recoverable "Disconnected" and recovery can clear it.
+        running_conv = store.get_conversation(running_id)
+        assert running_conv is not None
+        assert sessions_module._last_task_error_from_labels(running_conv.labels) == {
+            "code": "runner_disconnected",
+            "message": "Runner disconnected unexpectedly.",
+        }
+
+        # The idle session had no turn to fail: status and labels untouched.
+        assert sessions_module._session_status_cache.get(idle_id) == "idle"
+        idle_conv = store.get_conversation(idle_id)
+        assert idle_conv is not None
+        assert sessions_module._last_task_error_from_labels(idle_conv.labels) is None
+    finally:
+        with contextlib.suppress(asyncio.TimeoutError, Exception):
+            await communicator.wait(timeout=2.0)
+        for session_id in session_ids:
+            sessions_module._session_status_cache.pop(session_id, None)
