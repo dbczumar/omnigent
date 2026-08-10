@@ -7542,12 +7542,23 @@ async def test_probe_claude_model_options_runs_bare_and_skips_artifact(
 async def test_probe_claude_model_options_resolves_each_alias_via_the_harness(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Every printed alias gets its own ``--model`` resolution run.
+    """Every kept alias gets its own ``--model`` resolution run.
 
     The harness resolves each alias itself (exact id from the init event,
-    label from the printed line); a failing resolution leaves that alias's
-    bare row, never the whole probe.
+    label from the printed line); rows show only the resolved label with
+    1M-context resolutions marked, aliases duplicating an earlier row's
+    (model, label) are dropped, ``default`` never becomes a row (the
+    picker has its own Default choice), and a failing resolution leaves
+    that alias's bare row, never the whole probe.
     """
+    resolutions = {
+        "opus": ("claude-opus-5", "Opus 5"),
+        "fable": ("claude-fable-5", "Fable 5"),
+        "best": ("claude-fable-5", "Fable 5"),
+        "sonnet[1m]": ("claude-sonnet-5[1m]", "Sonnet 5"),
+        "opus[1m]": ("claude-opus-5[1m]", "Opus 5 (1M context)"),
+        "fable[1m]": ("claude-fable-5", "Fable 5"),
+    }
 
     class _Run:
         def __init__(self, stdout: bytes, returncode: int = 0) -> None:
@@ -7559,14 +7570,19 @@ async def test_probe_claude_model_options_resolves_each_alias_via_the_harness(
 
     async def _fake_exec(command: str, *args: str, **kwargs: Any) -> _Run:
         if "--model" not in args:
-            return _Run(b"Usage: /model <name>. Available: sonnet, opus, or a full model ID.\n")
+            return _Run(
+                b"Usage: /model <name>. Available: sonnet, opus, fable, best, "
+                b"sonnet[1m], opus[1m], fable[1m], default, or a full model ID.\n"
+            )
         assert "--output-format" in args and "stream-json" in args and "--verbose" in args
         alias = args[args.index("--model") + 1]
+        assert alias != "default", "the skipped alias must not spawn a resolution run"
         if alias == "sonnet":
             return _Run(b"", returncode=1)
+        model, label = resolutions[alias]
         events = [
-            {"type": "system", "subtype": "init", "model": "claude-opus-5"},
-            {"type": "result", "result": "Current model: Opus 5 (effort: high)"},
+            {"type": "system", "subtype": "init", "model": model},
+            {"type": "result", "result": f"Current model: {label} (effort: high)"},
         ]
         return _Run("\n".join(json.dumps(event) for event in events).encode())
 
@@ -7578,7 +7594,14 @@ async def test_probe_claude_model_options_resolves_each_alias_via_the_harness(
     alias_rows, _gateway_rows = probe
     assert alias_rows == [
         {"id": "sonnet", "model": "sonnet", "displayName": "sonnet"},
-        {"id": "opus", "model": "claude-opus-5", "displayName": "opus — Opus 5"},
+        {"id": "opus", "model": "claude-opus-5", "displayName": "Opus 5"},
+        {"id": "fable", "model": "claude-fable-5", "displayName": "Fable 5"},
+        {
+            "id": "sonnet[1m]",
+            "model": "claude-sonnet-5[1m]",
+            "displayName": "Sonnet 5 (1M context)",
+        },
+        {"id": "opus[1m]", "model": "claude-opus-5[1m]", "displayName": "Opus 5 (1M context)"},
     ]
 
 

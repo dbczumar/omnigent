@@ -941,23 +941,23 @@ async def _resolve_claude_model_aliases(
 
 def _claude_alias_row(alias: str, resolution: dict[str, str]) -> dict[str, object]:
     """
-    One picker row for a printed alias, enriched by its resolution.
+    One picker row for a printed alias, shown as its resolution.
 
-    ``id`` stays the alias — launches pass it through unchanged — while
-    the resolution contributes the exact model id and a label that keeps
-    the alias visible (distinct aliases can share a label, e.g. ``sonnet``
-    and ``sonnet[1m]`` both print "Sonnet 5").
+    ``id`` stays the alias — launches pass it through unchanged — while the
+    display shows only the resolved label. Labels are normalized so every
+    1M-context resolution (a ``[1m]``-suffixed model id) says so; the
+    harness omits the marker for some of them (e.g. ``sonnet[1m]`` prints
+    just "Sonnet 5").
 
     :param alias: The harness-printed alias.
     :param resolution: Its resolution, possibly empty.
     :returns: The picker row.
     """
     label = resolution.get("label")
-    return {
-        "id": alias,
-        "model": resolution.get("model") or alias,
-        "displayName": f"{alias} — {label}" if label else alias,
-    }
+    model = resolution.get("model") or alias
+    if label and model.endswith("[1m]") and "1M context" not in label:
+        label = f"{label} (1M context)"
+    return {"id": alias, "model": model, "displayName": label or alias}
 
 
 async def probe_claude_model_options(
@@ -977,9 +977,10 @@ async def probe_claude_model_options(
 
     :param claude_config: The resolved native launch config
         (:func:`resolve_native_claude_config`), or ``None``.
-    :returns: ``(alias_rows, gateway_rows)`` — the printed aliases as picker
-        rows plus any harness-discovered gateway rows — or ``None`` when the
-        probe failed (callers fall back to the configured/static rows).
+    :returns: ``(alias_rows, gateway_rows)`` — the printed aliases as
+        deduplicated picker rows plus any harness-discovered gateway rows —
+        or ``None`` when the probe failed (callers fall back to the
+        configured/static rows).
     """
     env_overrides = claude_config.env if claude_config is not None else {}
     base_url = env_overrides.get(_UCODE_CLAUDE_BASE_URL_ENV)
@@ -1015,10 +1016,23 @@ async def probe_claude_model_options(
         )
         return None
     aliases = _parse_claude_model_aliases(stdout.decode(errors="replace"))
+    # The picker renders its own top-level Default choice (launch with no
+    # model), which is exactly what the harness's ``default`` alias does —
+    # listing it again would duplicate that row.
+    aliases = [alias for alias in aliases if alias != "default"]
     resolutions = await _resolve_claude_model_aliases(claude_config, aliases)
-    alias_rows: list[dict[str, object]] = [
-        _claude_alias_row(alias, resolutions.get(alias, {})) for alias in aliases
-    ]
+    alias_rows: list[dict[str, object]] = []
+    seen_rows: set[tuple[object, object]] = set()
+    for alias in aliases:
+        row = _claude_alias_row(alias, resolutions.get(alias, {}))
+        # Distinct aliases can resolve to the same model with the same
+        # label (``best`` and ``fable[1m]`` both land on ``fable``'s row
+        # today); repeating them is picker noise.
+        key = (row["model"], row["displayName"])
+        if key in seen_rows:
+            continue
+        seen_rows.add(key)
+        alias_rows.append(row)
     gateway_rows: list[dict[str, object]] = []
     if base_url and env_overrides.get(_CLAUDE_GATEWAY_DISCOVERY_ENV) == "1":
         gateway_rows = await asyncio.to_thread(_claude_gateway_artifact_rows, base_url)
