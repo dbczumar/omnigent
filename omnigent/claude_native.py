@@ -1022,16 +1022,15 @@ async def probe_claude_model_options(
     aliases = [alias for alias in aliases if alias != "default"]
     resolutions = await _resolve_claude_model_aliases(claude_config, aliases)
     alias_rows: list[dict[str, object]] = []
-    seen_rows: set[tuple[object, object]] = set()
+    seen_models: set[object] = set()
     for alias in aliases:
         row = _claude_alias_row(alias, resolutions.get(alias, {}))
-        # Distinct aliases can resolve to the same model with the same
-        # label (``best`` and ``fable[1m]`` both land on ``fable``'s row
-        # today); repeating them is picker noise.
-        key = (row["model"], row["displayName"])
-        if key in seen_rows:
+        # Distinct aliases can resolve to a model an earlier row already
+        # covers (``best``, ``fable[1m]``, and ``opusplan`` all do today);
+        # repeating the model is picker noise.
+        if row["model"] in seen_models:
             continue
-        seen_rows.add(key)
+        seen_models.add(row["model"])
         alias_rows.append(row)
     gateway_rows: list[dict[str, object]] = []
     if base_url and env_overrides.get(_CLAUDE_GATEWAY_DISCOVERY_ENV) == "1":

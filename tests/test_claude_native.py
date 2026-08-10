@@ -7546,18 +7546,21 @@ async def test_probe_claude_model_options_resolves_each_alias_via_the_harness(
 
     The harness resolves each alias itself (exact id from the init event,
     label from the printed line); rows show only the resolved label with
-    1M-context resolutions marked, aliases duplicating an earlier row's
-    (model, label) are dropped, ``default`` never becomes a row (the
-    picker has its own Default choice), and a failing resolution leaves
-    that alias's bare row, never the whole probe.
+    1M-context resolutions marked, aliases resolving to a model an
+    earlier row already covers are dropped (``best``, ``fable[1m]``, and
+    ``opusplan`` here), ``default`` never becomes a row (the picker has
+    its own Default choice), and a failing resolution leaves that alias's
+    bare row, never the whole probe.
     """
     resolutions = {
+        "sonnet": ("claude-sonnet-5", "Sonnet 5"),
         "opus": ("claude-opus-5", "Opus 5"),
         "fable": ("claude-fable-5", "Fable 5"),
         "best": ("claude-fable-5", "Fable 5"),
         "sonnet[1m]": ("claude-sonnet-5[1m]", "Sonnet 5"),
         "opus[1m]": ("claude-opus-5[1m]", "Opus 5 (1M context)"),
         "fable[1m]": ("claude-fable-5", "Fable 5"),
+        "opusplan": ("claude-sonnet-5", "Opus in plan mode, else Sonnet"),
     }
 
     class _Run:
@@ -7571,13 +7574,13 @@ async def test_probe_claude_model_options_resolves_each_alias_via_the_harness(
     async def _fake_exec(command: str, *args: str, **kwargs: Any) -> _Run:
         if "--model" not in args:
             return _Run(
-                b"Usage: /model <name>. Available: sonnet, opus, fable, best, "
-                b"sonnet[1m], opus[1m], fable[1m], default, or a full model ID.\n"
+                b"Usage: /model <name>. Available: sonnet, opus, haiku, fable, best, "
+                b"sonnet[1m], opus[1m], fable[1m], opusplan, default, or a full model ID.\n"
             )
         assert "--output-format" in args and "stream-json" in args and "--verbose" in args
         alias = args[args.index("--model") + 1]
         assert alias != "default", "the skipped alias must not spawn a resolution run"
-        if alias == "sonnet":
+        if alias == "haiku":
             return _Run(b"", returncode=1)
         model, label = resolutions[alias]
         events = [
@@ -7593,8 +7596,9 @@ async def test_probe_claude_model_options_resolves_each_alias_via_the_harness(
     assert probe is not None
     alias_rows, _gateway_rows = probe
     assert alias_rows == [
-        {"id": "sonnet", "model": "sonnet", "displayName": "sonnet"},
+        {"id": "sonnet", "model": "claude-sonnet-5", "displayName": "Sonnet 5"},
         {"id": "opus", "model": "claude-opus-5", "displayName": "Opus 5"},
+        {"id": "haiku", "model": "haiku", "displayName": "haiku"},
         {"id": "fable", "model": "claude-fable-5", "displayName": "Fable 5"},
         {
             "id": "sonnet[1m]",
