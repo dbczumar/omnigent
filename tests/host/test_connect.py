@@ -180,6 +180,8 @@ async def test_handle_model_options_does_not_invent_codex_default(
 ) -> None:
     """A catalog entry is not a default unless Codex resolves it as one."""
     from omnigent import codex_native_app_server
+
+    monkeypatch.setattr(codex_native_app_server, "probe_codex_model_options", _raise_codex_probe)
     from omnigent.model_catalog import ModelEntry, ModelListing
 
     monkeypatch.setattr(
@@ -274,6 +276,8 @@ async def test_handle_model_options_filters_direct_openai_through_codex_catalog(
 ) -> None:
     """Direct OpenAI availability is intersected with Codex compatibility."""
     from omnigent import codex_native_app_server
+
+    monkeypatch.setattr(codex_native_app_server, "probe_codex_model_options", _raise_codex_probe)
     from omnigent.model_catalog import ModelEntry, ModelListing, ResolvedModelProvider
 
     monkeypatch.setattr(
@@ -355,6 +359,8 @@ async def test_handle_model_options_tolerates_codex_discovery_failure(
 ) -> None:
     """Discovery failures keep the implicit default without unsafe model rows."""
     from omnigent import codex_native_app_server
+
+    monkeypatch.setattr(codex_native_app_server, "probe_codex_model_options", _raise_codex_probe)
     from omnigent.model_catalog import ModelEntry, ModelListing, ResolvedModelProvider
 
     monkeypatch.setattr(
@@ -411,6 +417,8 @@ async def test_handle_model_options_marks_only_first_codex_default(
 ) -> None:
     """Malformed Codex catalogs cannot mark multiple picker rows as default."""
     from omnigent import codex_native_app_server
+
+    monkeypatch.setattr(codex_native_app_server, "probe_codex_model_options", _raise_codex_probe)
     from omnigent.model_catalog import ModelEntry, ModelListing, ResolvedModelProvider
 
     model_ids = ("coding-first", "coding-second")
@@ -470,6 +478,8 @@ async def test_handle_model_options_keeps_custom_gateway_catalog(
 ) -> None:
     """Custom gateway ids remain selectable without Codex alias filtering."""
     from omnigent import codex_native_app_server
+
+    monkeypatch.setattr(codex_native_app_server, "probe_codex_model_options", _raise_codex_probe)
     from omnigent.model_catalog import ModelEntry, ModelListing, ResolvedModelProvider
 
     monkeypatch.setattr(

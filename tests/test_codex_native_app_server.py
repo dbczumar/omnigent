@@ -1866,29 +1866,90 @@ async def test_probe_codex_model_options_uses_launch_config_and_marks_default(
     assert Path(env["CODEX_HOME"]).is_dir()
 
 
-async def test_probe_codex_model_options_skips_without_databricks_profile(
+async def test_probe_codex_model_options_probes_every_launch_shape(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
-    """No Databricks routing -> ``None`` and nothing is booted."""
+    """A non-Databricks launch still probes, with its own overrides verbatim.
+
+    The plain Codex-login shape carries no ``DATABRICKS_HOST`` and no
+    provider overrides beyond what the launch resolved (here the dismissal
+    pin), and with no launch-pinned model Codex's own default marker
+    stands.
+    """
     from omnigent import codex_native_app_server
 
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
     monkeypatch.setattr(
         codex_native_app_server,
         "resolve_native_codex_launch",
         lambda *, model: codex_native_app_server.NativeCodexLaunch(
-            config_overrides=[],
+            config_overrides=['model_provider="openai"'],
             model=None,
             profile=None,
         ),
     )
+    monkeypatch.setattr(codex_native_app_server, "_clean_codex_env", lambda: {"PATH": "/bin"})
+    captured: dict[str, object] = {}
 
-    async def _must_not_start(**_kwargs: object) -> object:
-        raise AssertionError("the probe must not boot codex without a profile")
+    class _FakeProcess:
+        pid = None
+        returncode: int | None = None
+
+        def terminate(self) -> None:
+            self.returncode = 0
+
+        def kill(self) -> None:
+            self.returncode = -1
+
+        async def wait(self) -> int:
+            self.returncode = 0 if self.returncode is None else self.returncode
+            return self.returncode
+
+    async def _fake_start(
+        *,
+        codex_path: str,
+        listen_url: str,
+        env: dict[str, str],
+        cwd: Path,
+        config_overrides: tuple[str, ...] = (),
+    ) -> _FakeProcess:
+        captured["env"] = dict(env)
+        captured["config_overrides"] = list(config_overrides)
+        return _FakeProcess()
+
+    async def _fake_wait(process: object, port: int) -> None:
+        del process, port
+
+    class _FakeClient:
+        def __init__(self, *, ws_url: str, client_name: str) -> None:
+            del ws_url, client_name
+
+        async def connect(self) -> None:
+            return None
+
+        async def close(self) -> None:
+            return None
+
+        async def request(self, method: str, params: dict[str, object]) -> dict[str, object]:
+            del method, params
+            return {
+                "result": {
+                    "data": [{"id": "gpt-5.6-sol", "isDefault": True}, {"id": "gpt-5.5"}],
+                    "nextCursor": None,
+                }
+            }
 
     monkeypatch.setattr(
-        codex_native_app_server, "_start_codex_model_discovery_process", _must_not_start
+        codex_native_app_server, "_start_codex_model_discovery_process", _fake_start
     )
+    monkeypatch.setattr(codex_native_app_server, "_wait_for_discovery_listener", _fake_wait)
+    monkeypatch.setattr(codex_native_app_server, "CodexAppServerClient", _FakeClient)
 
-    assert (
-        await codex_native_app_server.probe_codex_model_options(codex_path="/test/codex") is None
-    )
+    rows = await codex_native_app_server.probe_codex_model_options(codex_path="/test/codex")
+
+    assert rows == [{"id": "gpt-5.6-sol", "isDefault": True}, {"id": "gpt-5.5"}]
+    assert captured["config_overrides"] == ['model_provider="openai"']
+    env = captured["env"]
+    assert isinstance(env, dict)
+    assert "DATABRICKS_HOST" not in env

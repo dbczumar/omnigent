@@ -846,39 +846,42 @@ def _mark_probe_default(rows: list[_JsonObject], pinned_model: str | None) -> li
     return marked
 
 
-async def probe_codex_model_options(*, codex_path: str | None = None) -> list[_JsonObject] | None:
+async def probe_codex_model_options(*, codex_path: str | None = None) -> list[_JsonObject]:
     """
     Ask a session-configured Codex app-server for its own model list.
 
     The harness is the source of truth for what a session's ``/model``
     picker would offer, so the probe boots ``codex app-server`` with the
-    SAME materialization a session launch gets — the resolved Databricks
-    provider overrides (gateway base URL + minted auth + model pin) and
-    ``DATABRICKS_HOST`` — and reads its ``model/list`` verbatim. Dynamic
-    listing is deliberately scoped to Databricks AI Gateway routing; every
-    other launch shape returns ``None`` so callers keep their existing
-    behavior.
+    SAME materialization a session launch gets — for every launch shape.
+    A Databricks profile contributes its provider overrides (gateway base
+    URL + minted auth + model pin) and ``DATABRICKS_HOST``; other provider
+    shapes carry their resolved ``-c`` overrides verbatim; the plain
+    Codex-login shape probes bare, which yields Codex's own visible
+    catalog. The probe home is isolated (never the user's real
+    ``~/.codex``), so login-gated catalog extras may be absent — the price
+    of a side-effect-free probe.
 
     :param codex_path: Optional Codex executable override.
-    :returns: The probe rows with a single default marked, or ``None`` when
-        the ambient launch does not route through a Databricks profile.
+    :returns: The probe rows with a single default marked.
     :raises ImportError: When the Codex CLI is unavailable.
-    :raises OSError: When the profile resolves no workspace host.
+    :raises OSError: When a Databricks profile resolves no workspace host.
     :raises RuntimeError: When the probe app-server exits before connecting.
     :raises TimeoutError: When the probe app-server does not become ready.
     """
     launch = await asyncio.to_thread(resolve_native_codex_launch, model=None)
-    if launch.profile is None:
-        return None
     resolved_codex = codex_path or _find_codex_cli()
     if not resolved_codex:
         raise ImportError("Native Codex model probing requires the 'codex' CLI on PATH.")
-    databricks = await asyncio.to_thread(
-        _databricks_launch_materialization, model=launch.model, profile=launch.profile
-    )
-    config_overrides = [*launch.config_overrides, *databricks.config_overrides]
+    config_overrides = list(launch.config_overrides)
+    pinned_model = launch.model
     env = _clean_codex_env()
-    env["DATABRICKS_HOST"] = databricks.host
+    if launch.profile is not None:
+        databricks = await asyncio.to_thread(
+            _databricks_launch_materialization, model=launch.model, profile=launch.profile
+        )
+        config_overrides.extend(databricks.config_overrides)
+        env["DATABRICKS_HOST"] = databricks.host
+        pinned_model = databricks.model
     codex_home = await asyncio.to_thread(_probe_codex_home, config_overrides)
     env["CODEX_HOME"] = str(codex_home)
     port = _allocate_loopback_port()
@@ -909,7 +912,7 @@ async def probe_codex_model_options(*, codex_path: str | None = None) -> list[_J
         except TimeoutError:
             _proc.kill_tree(process)
             await process.wait()
-    return _mark_probe_default(rows, databricks.model)
+    return _mark_probe_default(rows, pinned_model)
 
 
 def _build_native_codex_app_server_argv(

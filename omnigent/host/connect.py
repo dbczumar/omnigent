@@ -2110,11 +2110,11 @@ class HostProcess:
         """
         Cached harness-truth Codex listing, or ``None`` to use the legacy path.
 
-        The probe is scoped to launches routing through a Databricks AI
-        Gateway profile; anything else — including every probe failure —
-        returns ``None`` so the caller keeps today's behavior.
+        Every launch shape is answered by probing the configured Codex
+        binary itself; only a probe failure returns ``None``, and the
+        caller then falls back to the catalog-reconstruction path.
 
-        :returns: The cached/probed listing, or ``None``.
+        :returns: The cached/probed listing, or ``None`` on probe failure.
         """
         from omnigent.codex_native_app_server import (
             probe_codex_model_options,
@@ -2123,16 +2123,12 @@ class HostProcess:
 
         try:
             launch = await asyncio.to_thread(resolve_native_codex_launch, model=None)
-            if launch.profile is None:
-                return None
             fingerprint = fingerprint_of(
                 "codex-native", launch.profile, launch.model, tuple(launch.config_overrides)
             )
 
             async def _resolve() -> ModelOptionsResult:
                 rows = await probe_codex_model_options()
-                if rows is None:
-                    raise RuntimeError("codex launch no longer routes through Databricks")
                 routable = [
                     row["id"] for row in rows if isinstance(row.get("id"), str) and row["id"]
                 ]
