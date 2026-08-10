@@ -525,9 +525,13 @@ def test_host_badge_switches_the_session_to_another_host(
     # Radix renders the items only while the dropdown is open. Open it to prove
     # the host it is already on is NOT offered — moving there is a no-op.
     trigger.click()
-    expect(page.get_by_test_id(f"switch-host-option-{target_id}")).to_have_count(1)
+    target_option = page.get_by_test_id(f"switch-host-option-{target_id}")
+    expect(target_option).to_have_count(1)
     expect(page.get_by_test_id(f"switch-host-option-{_FAKE_HOST_ID}")).to_have_count(0)
-    page.keyboard.press("Escape")
+    # Pick it to close the dropdown. NOT Escape: with the select already closed
+    # that keypress reaches the dialog and dismisses the whole thing.
+    target_option.click()
+    expect(target_option).to_have_count(0)
 
     directory = page.get_by_test_id("workspace-path-input")
     expect(directory).to_be_visible(timeout=15_000)
