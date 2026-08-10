@@ -195,6 +195,14 @@ _CLAUDE_NONESSENTIAL_TRAFFIC_ENV = "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"
 #: The harness-written discovery artifact, relative to the user's home.
 _CLAUDE_GATEWAY_MODELS_CACHE_RELPATH = Path(".claude") / "cache" / "gateway-models.json"
 _CLAUDE_MODEL_PROBE_TIMEOUT_S = 20.0
+#: Wall-clock cap for the per-alias resolution fan-out as a whole; aliases
+#: still unresolved when it expires keep their bare rows (the cache's
+#: revalidation retries them later). Startup dominates each run and
+#: stretches with box load (measured 0.7s–17s for the same command), so the
+#: concurrency covers a whole alias set in one wave and the budget fits one
+#: slow wave.
+_CLAUDE_ALIAS_RESOLUTION_BUDGET_S = 30.0
+_CLAUDE_ALIAS_RESOLUTION_CONCURRENCY = 12
 _CLAUDE_CODE_ENABLE_TOOL_SEARCH_ENV = "ENABLE_TOOL_SEARCH"
 _CLAUDE_CODE_CUSTOM_HEADERS_ENV = "ANTHROPIC_CUSTOM_HEADERS"
 # Claude Code forwards the ANTHROPIC_CUSTOM_HEADERS value verbatim as
@@ -749,27 +757,57 @@ def _parse_claude_model_aliases(stdout: str) -> list[str]:
     return []
 
 
-async def probe_claude_model_options(
+def _parse_claude_current_model(stdout: str) -> dict[str, str]:
+    """
+    Extract the resolved model from a stream-json ``/model`` probe run.
+
+    Two harness-owned facts, taken verbatim: the ``init`` event's exact
+    model id, and the printed ``Current model:`` label with only the
+    trailing ``(effort: …)`` suffix stripped — so labels like
+    ``Opus 4.8 (1M context)`` survive untouched.
+
+    :param stdout: The run's ``--output-format stream-json`` stdout.
+    :returns: Whichever of ``{"model": …, "label": …}`` parsed.
+    """
+    resolved: dict[str, str] = {}
+    for line in stdout.splitlines():
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(event, dict):
+            continue
+        if event.get("type") == "system" and event.get("subtype") == "init":
+            model = event.get("model")
+            if isinstance(model, str) and model:
+                resolved["model"] = model
+        if event.get("type") == "result":
+            for text_line in str(event.get("result", "")).splitlines():
+                _, marker, tail = text_line.partition("Current model:")
+                if not marker:
+                    continue
+                label = re.sub(r"\s*\(effort:[^)]*\)\s*$", "", tail).strip()
+                if label:
+                    resolved["label"] = label
+                break
+    return resolved
+
+
+def _claude_model_probe_invocation(
     claude_config: ClaudeNativeUcodeConfig | None,
-) -> tuple[list[dict[str, object]], list[dict[str, object]]] | None:
+    extra_args: Sequence[str] = (),
+) -> tuple[str, list[str], dict[str, str]]:
     """
-    Ask Claude Code itself which models it would offer, via one headless run.
+    Assemble one headless ``/model`` probe invocation.
 
-    The harness is the source of truth: a short ``claude -p "/model"`` run
-    with the session-launch env makes Claude Code print its own alias list
-    and — when the env opts into gateway model discovery — fire its own
-    ``/v1/models`` fetch and write its artifact. Both outputs are read
-    verbatim; no selection semantics are replicated here. Runs for every
-    config shape, including the bare subscription launch (``None`` config).
+    Shared by the alias-enumeration run and the per-alias resolution runs
+    so the two cannot drift: same launch resolution, session env, speed
+    env, and env-unset list.
 
-    :param claude_config: The resolved native launch config
-        (:func:`resolve_native_claude_config`), or ``None``.
-    :returns: ``(alias_rows, gateway_rows)`` — the printed aliases as picker
-        rows plus any harness-discovered gateway rows — or ``None`` when the
-        probe failed (callers fall back to the configured/static rows).
+    :param claude_config: The resolved native launch config, or ``None``.
+    :param extra_args: Appended CLI args (e.g. ``--model <alias>``).
+    :returns: ``(command, launch_args, env)`` ready to exec.
     """
-    env_overrides = claude_config.env if claude_config is not None else {}
-    base_url = env_overrides.get(_UCODE_CLAUDE_BASE_URL_ENV)
     from omnigent.claude_launcher import resolve_claude_launch
 
     args = [
@@ -781,6 +819,7 @@ async def probe_claude_model_options(
         "--mcp-config",
         '{"mcpServers":{}}',
         "--no-session-persistence",
+        *extra_args,
     ]
     if claude_config is not None and claude_config.api_key_helper:
         args.extend(("--settings", json.dumps({"apiKeyHelper": claude_config.api_key_helper})))
@@ -802,6 +841,149 @@ async def probe_claude_model_options(
     env.pop(_CLAUDE_NONESSENTIAL_TRAFFIC_ENV, None)
     if claude_config is not None and claude_config.api_key_helper:
         env.pop(_ANTHROPIC_API_KEY_ENV, None)
+    return command, launch_args, env
+
+
+async def _resolve_claude_model_alias(
+    claude_config: ClaudeNativeUcodeConfig | None,
+    alias: str,
+) -> dict[str, str]:
+    """
+    Ask the harness what one printed alias resolves to.
+
+    A ``--model <alias>`` run in stream-json mode carries the exact model
+    id in its init event and the human label in its ``Current model:``
+    line; both are the harness's own resolution, never computed here.
+
+    :param claude_config: The resolved native launch config, or ``None``.
+    :param alias: The alias exactly as the harness printed it.
+    :returns: Whichever of ``{"model": …, "label": …}`` resolved; empty on
+        any failure (the alias keeps its bare row).
+    """
+    command, launch_args, env = _claude_model_probe_invocation(
+        claude_config,
+        ("--model", alias, "--output-format", "stream-json", "--verbose"),
+    )
+    try:
+        process = await asyncio.create_subprocess_exec(
+            command,
+            *launch_args,
+            cwd=str(Path.home()),
+            env=env,
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+    except OSError:
+        _logger.debug("Claude alias resolution could not launch for %r", alias, exc_info=True)
+        return {}
+    try:
+        async with asyncio.timeout(_CLAUDE_MODEL_PROBE_TIMEOUT_S):
+            stdout, _stderr = await process.communicate()
+    except (TimeoutError, asyncio.CancelledError) as exc:
+        if process.returncode is None:
+            process.kill()
+        with contextlib.suppress(Exception):
+            await process.wait()
+        if isinstance(exc, asyncio.CancelledError):
+            raise
+        _logger.debug("Claude alias resolution timed out for %r", alias)
+        return {}
+    if process.returncode != 0:
+        _logger.debug("Claude alias resolution exited %s for %r", process.returncode, alias)
+        return {}
+    return _parse_claude_current_model(stdout.decode(errors="replace"))
+
+
+async def _resolve_claude_model_aliases(
+    claude_config: ClaudeNativeUcodeConfig | None,
+    aliases: Sequence[str],
+) -> dict[str, dict[str, str]]:
+    """
+    Resolve every printed alias concurrently, best-effort.
+
+    Bounded fan-out under one overall budget: whatever resolved in time is
+    kept and the rest stay bare, so a hung harness cannot stretch the
+    probe indefinitely.
+
+    :param claude_config: The resolved native launch config, or ``None``.
+    :param aliases: The harness-printed aliases.
+    :returns: Non-empty resolutions keyed by alias.
+    """
+    if not aliases:
+        return {}
+    semaphore = asyncio.Semaphore(_CLAUDE_ALIAS_RESOLUTION_CONCURRENCY)
+
+    async def _bounded(alias: str) -> dict[str, str]:
+        async with semaphore:
+            return await _resolve_claude_model_alias(claude_config, alias)
+
+    tasks = {alias: asyncio.create_task(_bounded(alias)) for alias in aliases}
+    try:
+        async with asyncio.timeout(_CLAUDE_ALIAS_RESOLUTION_BUDGET_S):
+            await asyncio.gather(*tasks.values())
+    except TimeoutError:
+        for task in tasks.values():
+            task.cancel()
+        await asyncio.gather(*tasks.values(), return_exceptions=True)
+        done = sum(1 for task in tasks.values() if not task.cancelled())
+        _logger.warning(
+            "Claude alias resolution budget expired; keeping %d/%d resolutions",
+            done,
+            len(tasks),
+        )
+    return {
+        alias: task.result()
+        for alias, task in tasks.items()
+        if not task.cancelled() and task.exception() is None and task.result()
+    }
+
+
+def _claude_alias_row(alias: str, resolution: dict[str, str]) -> dict[str, object]:
+    """
+    One picker row for a printed alias, enriched by its resolution.
+
+    ``id`` stays the alias — launches pass it through unchanged — while
+    the resolution contributes the exact model id and a label that keeps
+    the alias visible (distinct aliases can share a label, e.g. ``sonnet``
+    and ``sonnet[1m]`` both print "Sonnet 5").
+
+    :param alias: The harness-printed alias.
+    :param resolution: Its resolution, possibly empty.
+    :returns: The picker row.
+    """
+    label = resolution.get("label")
+    return {
+        "id": alias,
+        "model": resolution.get("model") or alias,
+        "displayName": f"{alias} — {label}" if label else alias,
+    }
+
+
+async def probe_claude_model_options(
+    claude_config: ClaudeNativeUcodeConfig | None,
+) -> tuple[list[dict[str, object]], list[dict[str, object]]] | None:
+    """
+    Ask Claude Code itself which models it would offer.
+
+    The harness is the source of truth: a short ``claude -p "/model"`` run
+    with the session-launch env makes Claude Code print its own alias list
+    and — when the env opts into gateway model discovery — fire its own
+    ``/v1/models`` fetch and write its artifact. Each printed alias is then
+    resolved to its concrete model by a per-alias harness run. All outputs
+    are read verbatim; no selection semantics are replicated here. Runs for
+    every config shape, including the bare subscription launch (``None``
+    config).
+
+    :param claude_config: The resolved native launch config
+        (:func:`resolve_native_claude_config`), or ``None``.
+    :returns: ``(alias_rows, gateway_rows)`` — the printed aliases as picker
+        rows plus any harness-discovered gateway rows — or ``None`` when the
+        probe failed (callers fall back to the configured/static rows).
+    """
+    env_overrides = claude_config.env if claude_config is not None else {}
+    base_url = env_overrides.get(_UCODE_CLAUDE_BASE_URL_ENV)
+    command, launch_args, env = _claude_model_probe_invocation(claude_config)
     try:
         process = await asyncio.create_subprocess_exec(
             command,
@@ -833,8 +1015,9 @@ async def probe_claude_model_options(
         )
         return None
     aliases = _parse_claude_model_aliases(stdout.decode(errors="replace"))
+    resolutions = await _resolve_claude_model_aliases(claude_config, aliases)
     alias_rows: list[dict[str, object]] = [
-        {"id": alias, "model": alias, "displayName": alias} for alias in aliases
+        _claude_alias_row(alias, resolutions.get(alias, {})) for alias in aliases
     ]
     gateway_rows: list[dict[str, object]] = []
     if base_url and env_overrides.get(_CLAUDE_GATEWAY_DISCOVERY_ENV) == "1":

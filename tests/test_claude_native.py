@@ -7453,6 +7453,49 @@ def test_parse_claude_model_aliases_reads_the_usage_line() -> None:
     assert claude_native._parse_claude_model_aliases("no usage line here") == []
 
 
+@pytest.mark.parametrize(
+    ("stdout", "expected"),
+    [
+        pytest.param(
+            json.dumps({"type": "system", "subtype": "init", "model": "claude-opus-5"})
+            + "\n"
+            + json.dumps({"type": "result", "result": "Current model: Opus 5 (effort: high)"}),
+            {"model": "claude-opus-5", "label": "Opus 5"},
+            id="id-and-label",
+        ),
+        pytest.param(
+            json.dumps(
+                {
+                    "type": "result",
+                    "result": "Current model: Opus 4.8 (1M context) (effort: high)",
+                }
+            ),
+            {"label": "Opus 4.8 (1M context)"},
+            id="only-the-effort-suffix-is-stripped",
+        ),
+        pytest.param(
+            json.dumps(
+                {
+                    "type": "result",
+                    "result": "Current model: Opus in plan mode, else Sonnet (effort: high)",
+                }
+            ),
+            {"label": "Opus in plan mode, else Sonnet"},
+            id="prose-label-kept-verbatim",
+        ),
+        pytest.param("Current model: Opus 5\nnot json", {}, id="non-stream-json-yields-nothing"),
+    ],
+)
+def test_parse_claude_current_model(stdout: str, expected: dict[str, str]) -> None:
+    """The stream-json run's exact id and printed label parse verbatim.
+
+    Only the trailing ``(effort: …)`` suffix is stripped from the label —
+    context markers and prose like opusplan's description survive, because
+    the parser knows no model names.
+    """
+    assert claude_native._parse_claude_current_model(stdout) == expected
+
+
 async def test_probe_claude_model_options_runs_bare_and_skips_artifact(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -7494,6 +7537,49 @@ async def test_probe_claude_model_options_runs_bare_and_skips_artifact(
         {"id": "opus", "model": "opus", "displayName": "opus"},
     ]
     assert gateway_rows == []
+
+
+async def test_probe_claude_model_options_resolves_each_alias_via_the_harness(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every printed alias gets its own ``--model`` resolution run.
+
+    The harness resolves each alias itself (exact id from the init event,
+    label from the printed line); a failing resolution leaves that alias's
+    bare row, never the whole probe.
+    """
+
+    class _Run:
+        def __init__(self, stdout: bytes, returncode: int = 0) -> None:
+            self.returncode = returncode
+            self._stdout = stdout
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            return self._stdout, b""
+
+    async def _fake_exec(command: str, *args: str, **kwargs: Any) -> _Run:
+        if "--model" not in args:
+            return _Run(b"Usage: /model <name>. Available: sonnet, opus, or a full model ID.\n")
+        assert "--output-format" in args and "stream-json" in args and "--verbose" in args
+        alias = args[args.index("--model") + 1]
+        if alias == "sonnet":
+            return _Run(b"", returncode=1)
+        events = [
+            {"type": "system", "subtype": "init", "model": "claude-opus-5"},
+            {"type": "result", "result": "Current model: Opus 5 (effort: high)"},
+        ]
+        return _Run("\n".join(json.dumps(event) for event in events).encode())
+
+    monkeypatch.setattr("asyncio.create_subprocess_exec", _fake_exec)
+
+    probe = await claude_native.probe_claude_model_options(None)
+
+    assert probe is not None
+    alias_rows, _gateway_rows = probe
+    assert alias_rows == [
+        {"id": "sonnet", "model": "sonnet", "displayName": "sonnet"},
+        {"id": "opus", "model": "claude-opus-5", "displayName": "opus — Opus 5"},
+    ]
 
 
 async def test_probe_claude_model_options_runs_the_harness_and_reads_artifact(
