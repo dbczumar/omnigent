@@ -2057,8 +2057,66 @@ def create_app(
         )
 
     # ── Tunnel lifecycle callbacks (Step 8.5 crash recovery) ───
+
+    # Pending per-runner grace timers: a disconnect schedules the
+    # failed-marking after RUNNER_DISCONNECT_GRACE_S instead of doing it
+    # immediately, so transient tunnel drops (ingress recycles,
+    # sleep-wake reconnects) that re-register within the grace never
+    # flap their sessions to failed.
+    _disconnect_grace_tasks: dict[str, asyncio.Task[None]] = {}
+
+    def _cancel_disconnect_grace(runner_id: str) -> None:
+        """Cancel and forget the pending disconnect-grace timer, if any."""
+        pending = _disconnect_grace_tasks.pop(runner_id, None)
+        if pending is not None and not pending.done():
+            pending.cancel()
+
+    async def _mark_disconnected_runner_failed(runner_id: str) -> None:
+        """Failed-mark a dropped runner's sessions once the grace expires.
+
+        A runner that re-registered inside the grace makes this a no-op
+        via the live-tunnel re-check (the same newest-wins rule the
+        immediate path used).
+
+        :param runner_id: The disconnected runner's id.
+        """
+        from omnigent.server.routes.sessions import (
+            RUNNER_DISCONNECT_GRACE_S,
+            _publish_status,
+            _session_status_cache,
+        )
+
+        await asyncio.sleep(RUNNER_DISCONNECT_GRACE_S)
+        if tunnel_registry.get(runner_id) is not None:
+            _logger.info(
+                "Runner %s reconnected within the disconnect grace; skipping offline-marking",
+                runner_id,
+            )
+            return
+        # Direct by-runner lookup: read-after-write consistent (the
+        # listing path may be served from an eventually-consistent
+        # search index in alternate store backends) and
+        # O(sessions-on-this-runner) instead of a 500-row scan.
+        # Archived sessions are included by construction — an archived
+        # session can still be runner-bound, and skipping it here would
+        # leave it stuck "running" forever.
+        affected = [
+            c.id
+            for c in await asyncio.to_thread(
+                conversation_store.list_conversations_by_runner_id, runner_id
+            )
+        ]
+        _logger.warning(
+            "Runner %s disconnected; marking %d session(s) offline",
+            runner_id,
+            len(affected),
+        )
+        for session_id in affected:
+            _session_status_cache[session_id] = "failed"
+            _publish_status(session_id, "failed")
+
     async def _on_runner_disconnect(runner_id: str) -> None:
-        """Mark sessions pinned to *this* runner as offline.
+        """Schedule offline-marking for sessions pinned to *this* runner.
 
         Filters by ``runner_id`` against ``conversation_store`` so a
         disconnect on one runner does not flip every cached session
@@ -2068,13 +2126,15 @@ def create_app(
         in lockstep with the publish so the list endpoint stays
         coherent.
 
+        The user-visible failed flip waits out a reconnect grace
+        (``RUNNER_DISCONNECT_GRACE_S``): transient drops re-register
+        well inside it and the timer's live-tunnel re-check turns them
+        into no-ops, so routine recycles never flap sessions to failed.
+        Runner invalidation and liveness clearing stay immediate so
+        reconnect re-initialization still happens.
+
         :param runner_id: The disconnected runner's id.
         """
-        from omnigent.server.routes.sessions import (
-            _publish_status,
-            _session_status_cache,
-        )
-
         # Newest-wins guard: a superseded tunnel's teardown fires this
         # hook after a fresh tunnel for the same ``runner_id`` already
         # registered (``TunnelRegistry.register`` retires the old
@@ -2098,27 +2158,20 @@ def create_app(
         # replicas flip offline immediately rather than after the TTL.
         session_live_state.clear_runner_liveness(runner_id)
 
-        # Direct by-runner lookup: read-after-write consistent (the
-        # listing path may be served from an eventually-consistent
-        # search index in alternate store backends) and
-        # O(sessions-on-this-runner) instead of a 500-row scan.
-        # Archived sessions are included by construction — an archived
-        # session can still be runner-bound, and skipping it here would
-        # leave it stuck "running" forever.
-        affected = [
-            c.id
-            for c in await asyncio.to_thread(
-                conversation_store.list_conversations_by_runner_id, runner_id
-            )
-        ]
-        _logger.warning(
-            "Runner %s disconnected; marking %d session(s) offline",
-            runner_id,
-            len(affected),
+        # Replace any pending timer so a rapid drop-reconnect-drop gives
+        # each outage a full grace window.
+        _cancel_disconnect_grace(runner_id)
+        task = asyncio.create_task(
+            _mark_disconnected_runner_failed(runner_id),
+            name=f"runner-disconnect-grace-{runner_id}",
         )
-        for session_id in affected:
-            _session_status_cache[session_id] = "failed"
-            _publish_status(session_id, "failed")
+        _disconnect_grace_tasks[runner_id] = task
+
+        def _clear_grace_slot(t: asyncio.Task[None]) -> None:
+            if _disconnect_grace_tasks.get(runner_id) is t:
+                _disconnect_grace_tasks.pop(runner_id, None)
+
+        task.add_done_callback(_clear_grace_slot)
 
     async def _on_runner_exited(runner_id: str, error: str) -> None:
         """Mark a crashed runner's session(s) failed and push the cause.
@@ -2141,6 +2194,10 @@ def create_app(
         )
         from omnigent.server.schemas import ErrorDetail
 
+        # The crash report is authoritative and carries the cause; a
+        # pending disconnect-grace timer would later re-publish a plain
+        # ``failed`` on top and mask it.
+        _cancel_disconnect_grace(runner_id)
         affected = [
             c.id
             for c in await asyncio.to_thread(
