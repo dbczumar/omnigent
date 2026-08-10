@@ -27,7 +27,7 @@ from websockets.exceptions import InvalidStatus, InvalidURI
 from omnigent._platform import IS_POSIX, WINDOWS_ENV_PASSTHROUGH
 from omnigent.env_credentials import env_names_with_omnigent_prefix
 from omnigent.gateway_inference import gateway_inference_map
-from omnigent.harness_aliases import canonicalize_harness
+from omnigent.harness_aliases import canonicalize_harness, is_claude_sdk_harness_name
 from omnigent.harness_availability import HARNESS_BINARY_MISSING, HarnessAvailability
 from omnigent.host import HOST_FATAL_EXIT_CODE
 from omnigent.host.frames import (
@@ -75,6 +75,11 @@ from omnigent.host.git_worktree import (
     remove_worktree,
 )
 from omnigent.host.identity import HostIdentity, load_or_create_host_identity
+from omnigent.host.model_options_cache import (
+    ModelOptionsCache,
+    ModelOptionsResult,
+    fingerprint_of,
+)
 from omnigent.host.runner_zygote import ZygoteManager, ZygoteRunnerProc, ZygoteUnavailable
 from omnigent.inner import _proc
 from omnigent.onboarding.harness_auth import (
@@ -768,6 +773,9 @@ class HostProcess:
         self._watcher_tasks: set[asyncio.Task[None]] = set()
         # Strong ref to the orphan-reaper task (see :meth:`_orphan_reaper_loop`).
         self._reaper_task: asyncio.Task[None] | None = None
+        # Pre-launch harness model listings: probe results cached per config
+        # fingerprint so picker requests never wait on a harness boot.
+        self._model_options_cache = ModelOptionsCache()
         # Number of host-owned ``subprocess`` operations (e.g. the git worktree
         # commands in :mod:`omnigent.host.git_worktree`) currently in flight.
         # The orphan reaper skips its sweep while this is >0 so it never
@@ -2061,6 +2069,142 @@ class HostProcess:
             payload=payload,
         )
 
+    async def _answer_model_options(
+        self,
+        ws: websockets.asyncio.client.ClientConnection,
+        frame: HostModelOptionsFrame,
+    ) -> None:
+        """
+        Resolve one model-options request and send the reply frame.
+
+        Runs as its own task so a cold harness probe never blocks the
+        tunnel receive loop (the server's request future times out on its
+        own when the reply cannot be delivered).
+
+        :param ws: The live tunnel connection to answer on.
+        :param frame: The request frame.
+        :returns: None.
+        """
+        try:
+            result = await self._handle_model_options(frame)
+        except Exception:
+            _logger.exception("Model options resolution crashed for %r", frame.harness)
+            result = HostModelOptionsResultFrame(
+                request_id=frame.request_id,
+                status="failed",
+                error=f"model options resolution crashed for {frame.harness!r}",
+            )
+        with contextlib.suppress(Exception):
+            await ws.send(encode_host_frame(result))
+
+    async def _prewarm_model_options(self) -> None:
+        """
+        Warm the model-listing cache for the probing harnesses at startup.
+
+        :returns: None. Probe failures are absorbed by the probe wrappers.
+        """
+        await self._probed_codex_model_options()
+        await self._probed_claude_model_options()
+
+    async def _probed_codex_model_options(self) -> ModelOptionsResult | None:
+        """
+        Cached harness-truth Codex listing, or ``None`` to use the legacy path.
+
+        The probe is scoped to launches routing through a Databricks AI
+        Gateway profile; anything else — including every probe failure —
+        returns ``None`` so the caller keeps today's behavior.
+
+        :returns: The cached/probed listing, or ``None``.
+        """
+        from omnigent.codex_native_app_server import (
+            probe_codex_model_options,
+            resolve_native_codex_launch,
+        )
+
+        try:
+            launch = await asyncio.to_thread(resolve_native_codex_launch, model=None)
+            if launch.profile is None:
+                return None
+            fingerprint = fingerprint_of(
+                "codex-native", launch.profile, launch.model, tuple(launch.config_overrides)
+            )
+
+            async def _resolve() -> ModelOptionsResult:
+                rows = await probe_codex_model_options()
+                if rows is None:
+                    raise RuntimeError("codex launch no longer routes through Databricks")
+                routable = [
+                    row["id"] for row in rows if isinstance(row.get("id"), str) and row["id"]
+                ]
+                return ModelOptionsResult(models=rows, routable_models=routable)
+
+            return await self._model_options_cache.get(
+                "codex-native", fingerprint=fingerprint, resolve=_resolve
+            )
+        except Exception:  # noqa: BLE001 — fall open to the legacy catalog path
+            _logger.warning(
+                "Codex model probe unavailable; falling back to catalog resolution",
+                exc_info=True,
+            )
+            return None
+
+    async def _probed_claude_model_options(self) -> ModelOptionsResult | None:
+        """
+        Cached Claude listing (config rows ∪ harness-discovered gateway rows).
+
+        The whole lane is cached under the resolved config's fingerprint, so
+        picker requests skip both the per-request model refresh and the
+        discovery probe. Any failure returns ``None`` and the caller re-runs
+        today's direct resolution.
+
+        :returns: The cached/probed listing, or ``None``.
+        """
+        from omnigent.claude_native import (
+            claude_native_model_options,
+            probe_claude_gateway_models,
+            resolve_native_claude_config,
+        )
+
+        try:
+            light = await asyncio.to_thread(
+                resolve_native_claude_config, spec=None, refresh_models=False
+            )
+            fingerprint = fingerprint_of(
+                "claude-native",
+                sorted(light.env.items()) if light is not None else None,
+                light.api_key_helper if light is not None else None,
+                light.model if light is not None else None,
+            )
+
+            async def _resolve() -> ModelOptionsResult:
+                config = await asyncio.to_thread(resolve_native_claude_config, spec=None)
+                models = await asyncio.to_thread(claude_native_model_options, config)
+                gateway_rows = await probe_claude_gateway_models(config) or []
+                seen_ids = {row.get("id") for row in models}
+                seen_models = {row.get("model") for row in models}
+                merged = models + [
+                    row
+                    for row in gateway_rows
+                    if row["id"] not in seen_ids and row["id"] not in seen_models
+                ]
+                routable = list(config.routable_models) if config is not None else []
+                routable.extend(
+                    row["id"]
+                    for row in gateway_rows
+                    if isinstance(row.get("id"), str) and row["id"] not in routable
+                )
+                return ModelOptionsResult(models=merged, routable_models=routable)
+
+            return await self._model_options_cache.get(
+                "claude-native", fingerprint=fingerprint, resolve=_resolve
+            )
+        except Exception:  # noqa: BLE001 — fall open to the direct resolution
+            _logger.warning(
+                "Claude model listing cache unavailable; resolving directly",
+                exc_info=True,
+            )
+            return None
+
     async def _handle_model_options(
         self,
         frame: HostModelOptionsFrame,
@@ -2075,6 +2219,18 @@ class HostProcess:
         """
         harness = canonicalize_harness(frame.harness) or frame.harness
         if harness == "codex-native":
+            # Harness-truth lane: a Databricks-gateway launch is answered by
+            # probing the configured Codex binary itself. Everything else —
+            # and every probe failure — falls through to the catalog path
+            # below, unchanged.
+            probed = await self._probed_codex_model_options()
+            if probed is not None:
+                return HostModelOptionsResultFrame(
+                    request_id=frame.request_id,
+                    status="ok",
+                    models=probed.models,
+                    routable_models=probed.routable_models,
+                )
             try:
                 from omnigent.codex_native_app_server import (
                     discover_codex_model_options,
@@ -2178,11 +2334,49 @@ class HostProcess:
                 models=models,
             )
 
+        if is_claude_sdk_harness_name(harness):
+            # SDK-mode Claude is a pass-through client with no model catalog
+            # of its own, so the endpoint listing IS the harness truth — the
+            # ids are already in the exact spelling the SDK sends.
+            try:
+                from omnigent.model_catalog import list_models_for_worker
+                from omnigent.spec.types import AgentSpec, ExecutorSpec
+
+                sdk_spec = AgentSpec(
+                    spec_version=1,
+                    name="claude-sdk-prelaunch",
+                    executor=ExecutorSpec(
+                        type="omnigent",
+                        config={"harness": "claude-sdk"},
+                    ),
+                )
+                listing = await asyncio.to_thread(list_models_for_worker, sdk_spec, "claude-sdk")
+            except Exception:
+                _logger.exception("Failed to resolve pre-launch Claude SDK model options")
+                return HostModelOptionsResultFrame(
+                    request_id=frame.request_id,
+                    status="failed",
+                    error="failed to resolve Claude SDK model options",
+                )
+            return HostModelOptionsResultFrame(
+                request_id=frame.request_id,
+                status="ok",
+                models=[{"id": model.id, "displayName": model.id} for model in listing.models],
+                routable_models=[model.id for model in listing.models],
+            )
         if harness != "claude-native":
             return HostModelOptionsResultFrame(
                 request_id=frame.request_id,
                 status="failed",
                 error=f"model options are unsupported for harness {frame.harness!r}",
+            )
+        probed = await self._probed_claude_model_options()
+        if probed is not None:
+            return HostModelOptionsResultFrame(
+                request_id=frame.request_id,
+                status="ok",
+                models=probed.models,
+                routable_models=probed.routable_models,
             )
         try:
             from omnigent.claude_native import (
@@ -2463,6 +2657,7 @@ class HostProcess:
         except (KeyboardInterrupt, asyncio.CancelledError):
             pass
         finally:
+            self._model_options_cache.close()
             if self._reaper_task is not None:
                 self._reaper_task.cancel()
                 self._reaper_task = None
@@ -2695,12 +2890,21 @@ class HostProcess:
         readiness_task = asyncio.create_task(
             self._harness_readiness_loop(ws, configured_harnesses)
         )
+        # Warm the pre-launch model listings once a server can actually ask
+        # for them, so the first picker open is served from cache instead of
+        # waiting on a harness probe. Cache-fresh reconnects are a no-op.
+        prewarm_task = asyncio.create_task(
+            self._prewarm_model_options(), name="host-model-options-prewarm"
+        )
         try:
             while True:
                 raw = await ws.recv()
                 if isinstance(raw, str):
                     await self._handle_raw_message(ws, raw)
         finally:
+            prewarm_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await prewarm_task
             readiness_task.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await readiness_task
@@ -2856,7 +3060,16 @@ class HostProcess:
             fs_result = await asyncio.to_thread(self._handle_fs_request, frame)
             await ws.send(encode_host_frame(fs_result))
         elif isinstance(frame, HostModelOptionsFrame):
-            await ws.send(encode_host_frame(await self._handle_model_options(frame)))
+            # Resolving model options can probe a real harness binary
+            # (seconds when cold), and this dispatch runs on the tunnel
+            # receive loop — answering inline would stall every other frame.
+            # Reply from a tracked task instead.
+            answer_task = asyncio.create_task(
+                self._answer_model_options(ws, frame),
+                name=f"host-model-options-{frame.request_id}",
+            )
+            self._watcher_tasks.add(answer_task)
+            answer_task.add_done_callback(self._watcher_tasks.discard)
 
 
 def run_host_process(

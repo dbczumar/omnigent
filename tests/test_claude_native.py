@@ -321,6 +321,10 @@ def test_ucode_config_for_profile_reads_allowlisted_claude_state(
             # The gateway allowlists beta flags and 400s the whole request on
             # an unknown one, so the CLI's experimental betas stay off.
             "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS": "1",
+            # Opt in to Claude Code's own gateway model discovery so the
+            # session picker (and the host's model probe) can show the
+            # gateway's live inventory once it serves GET /v1/models.
+            "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY": "1",
         },
         api_key_helper="printf token",
         model="databricks-claude-opus-test",
@@ -7351,3 +7355,170 @@ def test_routed_arms_keep_the_existing_pin_when_no_spelling_is_servable() -> Non
     )
     assert claude_native.claude_config_with_routed_arms_pinned(None, ("claude-opus-4-8",)) is None
     assert claude_native.claude_config_with_routed_arms_pinned(config, ()) is config
+
+
+# ── Gateway model probe (harness-truth discovery) ─────────────────────────
+
+
+def _gateway_probe_config(**env_extra: str) -> Any:
+    """A ucode-shaped config whose env opts into gateway model discovery."""
+    return claude_native.ClaudeNativeUcodeConfig(
+        env={
+            "ANTHROPIC_BASE_URL": "https://gw.example/anthropic",
+            "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY": "1",
+            **env_extra,
+        },
+        api_key_helper="printf token",
+    )
+
+
+def _write_gateway_artifact(home: Path, base_url: str, models: list[dict[str, Any]]) -> None:
+    """Write the discovery artifact Claude Code would have produced."""
+    artifact = home / ".claude" / "cache" / "gateway-models.json"
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    artifact.write_text(json.dumps({"baseUrl": base_url, "models": models}), encoding="utf-8")
+
+
+def test_claude_gateway_artifact_rows_read_the_harness_conclusion(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Rows come from the harness-written artifact, keyed to our gateway.
+
+    The artifact holds Claude Code's own post-filter discovery result; a
+    baseUrl mismatch means another launch overwrote it, which must read as
+    no rows rather than another gateway's models.
+    """
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+    _write_gateway_artifact(
+        tmp_path,
+        "https://gw.example/anthropic/",
+        [
+            {"id": "system.ai.claude-opus-4-8", "display_name": "Opus 4.8 (Gateway)"},
+            {"id": "system.ai.claude-sonnet-5"},
+            {"display_name": "no id -> dropped"},
+        ],
+    )
+
+    rows = claude_native._claude_gateway_artifact_rows("https://gw.example/anthropic")
+
+    assert rows == [
+        {
+            "id": "system.ai.claude-opus-4-8",
+            "model": "system.ai.claude-opus-4-8",
+            "displayName": "Opus 4.8 (Gateway)",
+        },
+        {
+            "id": "system.ai.claude-sonnet-5",
+            "model": "system.ai.claude-sonnet-5",
+            "displayName": "system.ai.claude-sonnet-5",
+        },
+    ]
+    assert claude_native._claude_gateway_artifact_rows("https://other.example") == []
+
+
+def test_claude_gateway_artifact_rows_tolerate_missing_or_malformed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+    assert claude_native._claude_gateway_artifact_rows("https://gw.example") == []
+    artifact = tmp_path / ".claude" / "cache" / "gateway-models.json"
+    artifact.parent.mkdir(parents=True)
+    artifact.write_text("not json", encoding="utf-8")
+    assert claude_native._claude_gateway_artifact_rows("https://gw.example") == []
+
+
+async def test_probe_claude_gateway_models_skips_without_discovery_inputs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Lane off (no config / no base URL / no opt-in) -> None, no subprocess."""
+
+    def _must_not_launch(command: str, args: list[str]) -> tuple[str, list[str]]:
+        raise AssertionError("the probe must not launch claude when the lane is off")
+
+    monkeypatch.setattr("omnigent.claude_launcher.resolve_claude_launch", _must_not_launch)
+
+    assert await claude_native.probe_claude_gateway_models(None) is None
+    no_gateway = claude_native.ClaudeNativeUcodeConfig(env={})
+    assert await claude_native.probe_claude_gateway_models(no_gateway) is None
+    no_opt_in = claude_native.ClaudeNativeUcodeConfig(
+        env={"ANTHROPIC_BASE_URL": "https://gw.example"}
+    )
+    assert await claude_native.probe_claude_gateway_models(no_opt_in) is None
+
+
+async def test_probe_claude_gateway_models_runs_the_harness_and_reads_artifact(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The probe launches Claude Code with the launch env and reads its artifact.
+
+    Speed env vars ride along, the nonessential-traffic kill-switch is
+    stripped (Claude treats it as covering discovery), the apiKeyHelper is
+    delivered via ``--settings``, and the rows are whatever the harness
+    wrote — no discovery semantics live here.
+    """
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+    monkeypatch.setenv("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1")
+    monkeypatch.setenv("CLAUDECODE", "1")
+    captured: dict[str, Any] = {}
+
+    class _FakeProcess:
+        returncode = 0
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            return b"Current model: Opus\n", b""
+
+    async def _fake_exec(command: str, *args: str, **kwargs: Any) -> _FakeProcess:
+        captured["command"] = command
+        captured["args"] = list(args)
+        captured["env"] = dict(kwargs["env"])
+        # The artifact appears only because the harness run produced it.
+        _write_gateway_artifact(
+            tmp_path,
+            "https://gw.example/anthropic",
+            [{"id": "system.ai.claude-opus-4-8", "display_name": "Opus 4.8 (Gateway)"}],
+        )
+        return _FakeProcess()
+
+    monkeypatch.setattr("asyncio.create_subprocess_exec", _fake_exec)
+
+    rows = await claude_native.probe_claude_gateway_models(_gateway_probe_config())
+
+    assert rows == [
+        {
+            "id": "system.ai.claude-opus-4-8",
+            "model": "system.ai.claude-opus-4-8",
+            "displayName": "Opus 4.8 (Gateway)",
+        }
+    ]
+    args = captured["args"]
+    assert args[:2] == ["-p", "/model"]
+    assert "--strict-mcp-config" in args and "--no-session-persistence" in args
+    settings_payload = json.loads(args[args.index("--settings") + 1])
+    assert settings_payload == {"apiKeyHelper": "printf token"}
+    env = captured["env"]
+    assert env["ANTHROPIC_BASE_URL"] == "https://gw.example/anthropic"
+    assert env["CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"] == "1"
+    assert env["DISABLE_TELEMETRY"] == "1"
+    assert env["DISABLE_AUTOUPDATER"] == "1"
+    assert "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC" not in env
+    assert "CLAUDECODE" not in env
+
+
+async def test_probe_claude_gateway_models_returns_none_on_probe_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A failing harness run yields None so callers keep configured rows."""
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+
+    class _FailedProcess:
+        returncode = 1
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            return b"", b"boom"
+
+    async def _fake_exec(command: str, *args: str, **kwargs: Any) -> _FailedProcess:
+        return _FailedProcess()
+
+    monkeypatch.setattr("asyncio.create_subprocess_exec", _fake_exec)
+
+    assert await claude_native.probe_claude_gateway_models(_gateway_probe_config()) is None

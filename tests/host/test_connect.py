@@ -103,12 +103,23 @@ async def test_handle_model_options_uses_host_claude_configuration(
     )
 
 
+async def _raise_codex_probe(**_kwargs: object) -> object:
+    """Stub: the harness probe is down, so lanes must fall open."""
+    raise RuntimeError("codex probe unavailable")
+
+
 async def test_handle_model_options_uses_codex_provider_catalog(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The Codex launch picker comes from the host's resolved provider catalog."""
+    """The Codex launch picker comes from the host's resolved provider catalog.
+
+    The harness probe is stubbed to fail, so this also proves the fall-open
+    contract: a probe failure degrades to the catalog path unchanged.
+    """
     from omnigent import codex_native_app_server
     from omnigent.model_catalog import ModelEntry, ModelListing
+
+    monkeypatch.setattr(codex_native_app_server, "probe_codex_model_options", _raise_codex_probe)
 
     def _fake_list_models_for_worker(spec: object, harness: str) -> ModelListing:
         assert harness == "codex-native"
@@ -189,9 +200,15 @@ async def test_handle_model_options_does_not_invent_codex_default(
 async def test_handle_model_options_uses_databricks_catalog_default(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The Databricks profile path labels its effective catalog default."""
+    """The Databricks profile path labels its effective catalog default.
+
+    The harness probe is stubbed to fail, so this also proves the fall-open
+    contract for the profile-routed shape.
+    """
     from omnigent import codex_native_app_server
     from omnigent.model_catalog import ModelEntry, ModelListing
+
+    monkeypatch.setattr(codex_native_app_server, "probe_codex_model_options", _raise_codex_probe)
 
     monkeypatch.setattr(
         "omnigent.model_catalog.list_models_for_worker",
@@ -3784,3 +3801,209 @@ async def test_launch_cancelled_midspawn_does_not_leak_untracked_runner(
     while time.monotonic() < deadline and spawned[0].poll() is None:
         await asyncio.sleep(0.05)
     assert spawned[0].poll() is not None, "abandoned runner was leaked, still alive"
+
+
+async def test_handle_model_options_serves_codex_probe_rows_and_caches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Databricks-routed Codex request is answered by the harness probe.
+
+    The probe rows pass through verbatim with their ids as the routable
+    set, and the second request is served from the fingerprint cache —
+    the harness is booted once.
+    """
+    from omnigent import codex_native_app_server
+
+    monkeypatch.setattr(
+        codex_native_app_server,
+        "resolve_native_codex_launch",
+        lambda *, model: codex_native_app_server.NativeCodexLaunch(
+            config_overrides=[],
+            model="databricks-gpt-5-4",
+            profile="oss",
+        ),
+    )
+    probe_calls: list[int] = []
+
+    async def _fake_probe(**_kwargs: object) -> list[dict[str, object]]:
+        probe_calls.append(1)
+        return [
+            {"id": "gpt-5.6-sol", "displayName": "GPT-5.6-Sol"},
+            {"id": "gpt-5.4", "displayName": "gpt-5.4", "isDefault": True},
+        ]
+
+    monkeypatch.setattr(codex_native_app_server, "probe_codex_model_options", _fake_probe)
+    host = _make_host_process()
+
+    first = await host._handle_model_options(
+        HostModelOptionsFrame(request_id="req_1", harness="codex-native"),
+    )
+    second = await host._handle_model_options(
+        HostModelOptionsFrame(request_id="req_2", harness="codex-native"),
+    )
+
+    assert first == HostModelOptionsResultFrame(
+        request_id="req_1",
+        status="ok",
+        models=[
+            {"id": "gpt-5.6-sol", "displayName": "GPT-5.6-Sol"},
+            {"id": "gpt-5.4", "displayName": "gpt-5.4", "isDefault": True},
+        ],
+        routable_models=["gpt-5.6-sol", "gpt-5.4"],
+    )
+    assert second.models == first.models
+    assert probe_calls == [1]
+    _cleanup_host(host)
+
+
+async def test_handle_model_options_unions_claude_gateway_discovery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Claude rows = configured tier rows ∪ harness-discovered gateway rows.
+
+    The union is exact-id deduped (a gateway id already pinned by a tier row
+    is not repeated) and the routable set covers both sources.
+    """
+    from omnigent import claude_native
+
+    config = claude_native.ClaudeNativeUcodeConfig(
+        env={"ANTHROPIC_BASE_URL": "https://gw.example"},
+        routable_models=("system.ai.claude-sonnet-5[1m]",),
+    )
+    monkeypatch.setattr(
+        claude_native,
+        "resolve_native_claude_config",
+        lambda *, spec, refresh_models=True: config,
+    )
+    monkeypatch.setattr(
+        claude_native,
+        "claude_native_model_options",
+        lambda _config: [
+            {"id": "sonnet", "model": "system.ai.claude-sonnet-5", "displayName": "Sonnet 5"},
+        ],
+    )
+
+    async def _fake_probe(_config: object) -> list[dict[str, object]]:
+        return [
+            # Exact dup of the tier row's pinned model -> deduped.
+            {
+                "id": "system.ai.claude-sonnet-5",
+                "model": "system.ai.claude-sonnet-5",
+                "displayName": "Sonnet 5 (Gateway)",
+            },
+            {
+                "id": "system.ai.claude-opus-4-8",
+                "model": "system.ai.claude-opus-4-8",
+                "displayName": "Opus 4.8 (Gateway)",
+            },
+        ]
+
+    monkeypatch.setattr(claude_native, "probe_claude_gateway_models", _fake_probe)
+    host = _make_host_process()
+
+    result = await host._handle_model_options(
+        HostModelOptionsFrame(request_id="req_claude", harness="claude-native"),
+    )
+
+    assert result == HostModelOptionsResultFrame(
+        request_id="req_claude",
+        status="ok",
+        models=[
+            {"id": "sonnet", "model": "system.ai.claude-sonnet-5", "displayName": "Sonnet 5"},
+            {
+                "id": "system.ai.claude-opus-4-8",
+                "model": "system.ai.claude-opus-4-8",
+                "displayName": "Opus 4.8 (Gateway)",
+            },
+        ],
+        routable_models=[
+            "system.ai.claude-sonnet-5[1m]",
+            "system.ai.claude-sonnet-5",
+            "system.ai.claude-opus-4-8",
+        ],
+    )
+    _cleanup_host(host)
+
+
+async def test_handle_model_options_serves_claude_sdk_endpoint_listing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SDK-mode Claude is a pass-through client, so the endpoint listing is
+    the harness truth — served in the exact wire spelling the SDK sends."""
+    from omnigent.model_catalog import ModelEntry, ModelListing
+
+    def _fake_listing(spec: object, harness: str) -> ModelListing:
+        assert harness == "claude-sdk"
+        return ModelListing(
+            source="gateway",
+            verified=True,
+            models=(
+                ModelEntry(id="databricks-claude-sonnet-5", family="claude"),
+                ModelEntry(id="databricks-claude-opus-4-8", family="claude"),
+            ),
+            note="test catalog",
+        )
+
+    monkeypatch.setattr("omnigent.model_catalog.list_models_for_worker", _fake_listing)
+    host = _make_host_process()
+
+    result = await host._handle_model_options(
+        HostModelOptionsFrame(request_id="req_sdk", harness="claude-sdk"),
+    )
+
+    assert result == HostModelOptionsResultFrame(
+        request_id="req_sdk",
+        status="ok",
+        models=[
+            {"id": "databricks-claude-sonnet-5", "displayName": "databricks-claude-sonnet-5"},
+            {"id": "databricks-claude-opus-4-8", "displayName": "databricks-claude-opus-4-8"},
+        ],
+        routable_models=["databricks-claude-sonnet-5", "databricks-claude-opus-4-8"],
+    )
+    _cleanup_host(host)
+
+
+async def test_model_options_frame_replies_off_the_receive_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A slow probe must not stall the tunnel receive loop.
+
+    ``_handle_raw_message`` returns while the probe is still blocked; the
+    reply frame arrives from the dispatched task once the probe finishes.
+    """
+    from omnigent import codex_native_app_server
+    from omnigent.host.frames import encode_host_frame
+
+    monkeypatch.setattr(
+        codex_native_app_server,
+        "resolve_native_codex_launch",
+        lambda *, model: codex_native_app_server.NativeCodexLaunch(
+            config_overrides=[],
+            model=None,
+            profile="oss",
+        ),
+    )
+    release_probe = asyncio.Event()
+
+    async def _slow_probe(**_kwargs: object) -> list[dict[str, object]]:
+        await release_probe.wait()
+        return [{"id": "gpt-5.6-sol", "displayName": "GPT-5.6-Sol"}]
+
+    monkeypatch.setattr(codex_native_app_server, "probe_codex_model_options", _slow_probe)
+    host = _make_host_process()
+    ws = _RecordingWS()
+    raw = encode_host_frame(HostModelOptionsFrame(request_id="req_slow", harness="codex-native"))
+
+    # Returns immediately — the receive loop is free while the probe blocks.
+    await asyncio.wait_for(host._handle_raw_message(ws, raw), timeout=1.0)
+    assert ws.sent == []
+    assert len(host._watcher_tasks) == 1
+
+    release_probe.set()
+    await asyncio.wait_for(ws.first_send.wait(), timeout=2.0)
+    reply = decode_host_frame(ws.sent[0])
+    assert isinstance(reply, HostModelOptionsResultFrame)
+    assert reply.request_id == "req_slow"
+    assert reply.status == "ok"
+    assert reply.models == [{"id": "gpt-5.6-sol", "displayName": "GPT-5.6-Sol"}]
+    _cleanup_host(host)

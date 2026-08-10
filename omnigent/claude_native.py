@@ -184,6 +184,17 @@ _CLAUDE_CODE_NESTED_SESSION_ENV = "CLAUDECODE"
 _CLAUDE_CODE_API_KEY_HELPER_TTL_ENV = "CLAUDE_CODE_API_KEY_HELPER_TTL_MS"
 _CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS_ENV = "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS"
 _CLAUDE_CODE_USE_GATEWAY_ENV = "CLAUDE_CODE_USE_GATEWAY"
+#: Opt-in for Claude Code's startup gateway model discovery: with this set and
+#: ``ANTHROPIC_BASE_URL`` pointing at a gateway, the CLI fetches
+#: ``GET /v1/models`` itself and caches the (client-filtered) result to
+#: ``~/.claude/cache/gateway-models.json``.
+_CLAUDE_GATEWAY_DISCOVERY_ENV = "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"
+#: Kill-switch Claude Code treats as covering gateway model discovery too —
+#: a probe env carrying it silently returns no gateway rows.
+_CLAUDE_NONESSENTIAL_TRAFFIC_ENV = "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"
+#: The harness-written discovery artifact, relative to the user's home.
+_CLAUDE_GATEWAY_MODELS_CACHE_RELPATH = Path(".claude") / "cache" / "gateway-models.json"
+_CLAUDE_MODEL_PROBE_TIMEOUT_S = 20.0
 _CLAUDE_CODE_ENABLE_TOOL_SEARCH_ENV = "ENABLE_TOOL_SEARCH"
 _CLAUDE_CODE_CUSTOM_HEADERS_ENV = "ANTHROPIC_CUSTOM_HEADERS"
 # Claude Code forwards the ANTHROPIC_CUSTOM_HEADERS value verbatim as
@@ -666,6 +677,139 @@ def claude_native_model_options(
         }
         for model_id, label in _CLAUDE_NATIVE_STATIC_MODEL_OPTIONS
     ]
+
+
+def _claude_gateway_artifact_rows(base_url: str) -> list[dict[str, object]]:
+    """
+    Read the gateway rows Claude Code's own discovery wrote for *base_url*.
+
+    The artifact is the harness's post-filter conclusion — reading it (rather
+    than replaying the fetch) keeps Claude's discovery semantics inside
+    Claude. The file holds one gateway's result keyed by ``baseUrl``; a
+    mismatch means another launch overwrote it, which reads as no rows.
+
+    :param base_url: The probe's gateway origin, e.g.
+        ``"https://x.databricks.com/anthropic"``.
+    :returns: Picker rows for the discovered models; empty when the artifact
+        is absent, unreadable, or keyed to a different gateway.
+    """
+    artifact = Path.home() / _CLAUDE_GATEWAY_MODELS_CACHE_RELPATH
+    try:
+        payload = json.loads(artifact.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    if not isinstance(payload, dict):
+        return []
+    cached_url = payload.get("baseUrl")
+    if not isinstance(cached_url, str) or cached_url.rstrip("/") != base_url.rstrip("/"):
+        return []
+    rows: list[dict[str, object]] = []
+    for entry in payload.get("models", []):
+        if not isinstance(entry, dict):
+            continue
+        model_id = entry.get("id")
+        if not isinstance(model_id, str) or not model_id:
+            continue
+        display_name = entry.get("display_name")
+        rows.append(
+            {
+                "id": model_id,
+                "model": model_id,
+                "displayName": (
+                    display_name if isinstance(display_name, str) and display_name else model_id
+                ),
+            }
+        )
+    return rows
+
+
+async def probe_claude_gateway_models(
+    claude_config: ClaudeNativeUcodeConfig | None,
+) -> list[dict[str, object]] | None:
+    """
+    Run Claude Code so it discovers the gateway's models itself, and read them.
+
+    The harness is the source of truth: a short ``claude -p "/model"`` run
+    with the session-launch env fires Claude Code's own startup gateway
+    discovery (its fetch, its filters) and writes its artifact; the rows come
+    from that artifact verbatim. No discovery semantics are replicated here.
+    Skipped entirely — ``None`` — when the launch env carries no gateway
+    base URL or no discovery opt-in, so non-gateway configs keep today's
+    behavior without spawning anything.
+
+    :param claude_config: The resolved native launch config
+        (:func:`resolve_native_claude_config`), or ``None``.
+    :returns: Discovered gateway rows (possibly empty), or ``None`` when the
+        discovery lane is off for this config or the probe failed.
+    """
+    if claude_config is None:
+        return None
+    base_url = claude_config.env.get(_UCODE_CLAUDE_BASE_URL_ENV)
+    if not base_url or claude_config.env.get(_CLAUDE_GATEWAY_DISCOVERY_ENV) != "1":
+        return None
+    from omnigent.claude_launcher import resolve_claude_launch
+
+    args = [
+        "-p",
+        "/model",
+        # The probe asks one client-side question; the MCP fleet, session
+        # persistence, and background chatter are irrelevant startup weight.
+        "--strict-mcp-config",
+        "--mcp-config",
+        '{"mcpServers":{}}',
+        "--no-session-persistence",
+    ]
+    if claude_config.api_key_helper:
+        args.extend(("--settings", json.dumps({"apiKeyHelper": claude_config.api_key_helper})))
+    command, launch_args = resolve_claude_launch("claude", args)
+    env = dict(os.environ)
+    env.update(build_native_claude_terminal_env(claude_config))
+    env.update(
+        {
+            "DISABLE_TELEMETRY": "1",
+            "DISABLE_ERROR_REPORTING": "1",
+            "DISABLE_AUTOUPDATER": "1",
+        }
+    )
+    # Mirrors the native terminal's env-unset list, plus the nonessential-
+    # traffic kill-switch, which Claude Code treats as covering gateway
+    # discovery — leaving it set would silently return no rows.
+    env.pop("DATABRICKS_CONFIG_PROFILE", None)
+    env.pop(_CLAUDE_CODE_NESTED_SESSION_ENV, None)
+    env.pop(_CLAUDE_NONESSENTIAL_TRAFFIC_ENV, None)
+    if claude_config.api_key_helper:
+        env.pop(_ANTHROPIC_API_KEY_ENV, None)
+    try:
+        process = await asyncio.create_subprocess_exec(
+            command,
+            *launch_args,
+            cwd=str(Path.home()),
+            env=env,
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+    except OSError:
+        _logger.warning("Claude model probe could not launch the claude CLI", exc_info=True)
+        return None
+    try:
+        async with asyncio.timeout(_CLAUDE_MODEL_PROBE_TIMEOUT_S):
+            _stdout, stderr = await process.communicate()
+    except (TimeoutError, asyncio.CancelledError):
+        if process.returncode is None:
+            process.kill()
+        with contextlib.suppress(Exception):
+            await process.wait()
+        _logger.warning("Claude model probe timed out; keeping configured rows only")
+        return None
+    if process.returncode != 0:
+        _logger.warning(
+            "Claude model probe exited %s: %s",
+            process.returncode,
+            stderr.decode(errors="replace").strip()[-500:],
+        )
+        return None
+    return await asyncio.to_thread(_claude_gateway_artifact_rows, base_url)
 
 
 def build_native_claude_terminal_env(
@@ -1900,6 +2044,11 @@ def _ucode_config_for_profile(
         # ANTHROPIC_CUSTOM_HEADERS. Tool search rides on a rejected flag
         # (``advanced-tool-use``), so it was never reachable here anyway.
         _CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS_ENV: "1",
+        # Let Claude Code discover the gateway's own model inventory at
+        # startup (GET /v1/models). Harmless until the gateway serves that
+        # endpoint (the fetch 404s instantly); once it does, sessions and the
+        # pre-launch model probe light up together.
+        _CLAUDE_GATEWAY_DISCOVERY_ENV: "1",
     }
     # Pin each Claude Code model-tier alias to the corresponding Databricks
     # gateway model ID so that the /model picker natively shows gateway model
