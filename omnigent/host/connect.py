@@ -2161,7 +2161,7 @@ class HostProcess:
         """
         from omnigent.claude_native import (
             claude_native_model_options,
-            probe_claude_gateway_models,
+            probe_claude_model_options,
             resolve_native_claude_config,
         )
 
@@ -2178,15 +2178,32 @@ class HostProcess:
 
             async def _resolve() -> ModelOptionsResult:
                 config = await asyncio.to_thread(resolve_native_claude_config, spec=None)
-                models = await asyncio.to_thread(claude_native_model_options, config)
-                gateway_rows = await probe_claude_gateway_models(config) or []
-                seen_ids = {row.get("id") for row in models}
-                seen_models = {row.get("model") for row in models}
-                merged = models + [
-                    row
-                    for row in gateway_rows
-                    if row["id"] not in seen_ids and row["id"] not in seen_models
-                ]
+                configured = await asyncio.to_thread(claude_native_model_options, config)
+                probe = await probe_claude_model_options(config)
+                if probe is None:
+                    # Probe unavailable (claude missing / hung): the
+                    # configured rows are the best remaining answer.
+                    merged = configured
+                    gateway_rows: list[dict[str, object]] = []
+                else:
+                    alias_rows, gateway_rows = probe
+                    if config is not None:
+                        # A resolved config's tier rows carry the pinned
+                        # model ids and display names for the same aliases
+                        # the harness printed — keep them as the rich
+                        # spelling and let the probe contribute the rest.
+                        merged = list(configured)
+                    else:
+                        # Bare subscription launch: the harness's own
+                        # printed alias list IS the picker; the static
+                        # fallback rows would only restate a subset.
+                        merged = []
+                    seen = {row.get("id") for row in merged} | {row.get("model") for row in merged}
+                    for row in (*alias_rows, *gateway_rows):
+                        if row["id"] in seen:
+                            continue
+                        seen.add(row["id"])
+                        merged.append(row)
                 routable = list(config.routable_models) if config is not None else []
                 routable.extend(
                     row["id"]

@@ -69,10 +69,22 @@ pytestmark = pytest.mark.asyncio
 async def test_handle_model_options_uses_host_claude_configuration(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The launch picker is resolved on the host that will start Claude."""
+    """The launch picker is resolved on the host that will start Claude.
+
+    The harness probe is stubbed to fail, so the configured rows are the
+    whole answer — the fall-back contract.
+    """
     from omnigent import claude_native
 
-    monkeypatch.setattr(claude_native, "resolve_native_claude_config", lambda *, spec: None)
+    async def _failed_probe(_config: object) -> None:
+        return None
+
+    monkeypatch.setattr(claude_native, "probe_claude_model_options", _failed_probe)
+    monkeypatch.setattr(
+        claude_native,
+        "resolve_native_claude_config",
+        lambda *, spec, refresh_models=True: None,
+    )
     monkeypatch.setattr(
         claude_native,
         "claude_native_model_options",
@@ -3859,10 +3871,12 @@ async def test_handle_model_options_serves_codex_probe_rows_and_caches(
 async def test_handle_model_options_unions_claude_gateway_discovery(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Claude rows = configured tier rows ∪ harness-discovered gateway rows.
+    """Claude rows = configured tier rows ∪ the harness's printed aliases
+    ∪ harness-discovered gateway rows.
 
-    The union is exact-id deduped (a gateway id already pinned by a tier row
-    is not repeated) and the routable set covers both sources.
+    The union is exact-id deduped (an alias or gateway id already carried by
+    a tier row is not repeated) and the routable set covers config plus
+    discovery.
     """
     from omnigent import claude_native
 
@@ -3883,8 +3897,15 @@ async def test_handle_model_options_unions_claude_gateway_discovery(
         ],
     )
 
-    async def _fake_probe(_config: object) -> list[dict[str, object]]:
-        return [
+    async def _fake_probe(
+        _config: object,
+    ) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+        alias_rows = [
+            # Exact dup of the tier row's own id -> deduped.
+            {"id": "sonnet", "model": "sonnet", "displayName": "sonnet"},
+            {"id": "opusplan", "model": "opusplan", "displayName": "opusplan"},
+        ]
+        gateway_rows = [
             # Exact dup of the tier row's pinned model -> deduped.
             {
                 "id": "system.ai.claude-sonnet-5",
@@ -3897,8 +3918,9 @@ async def test_handle_model_options_unions_claude_gateway_discovery(
                 "displayName": "Opus 4.8 (Gateway)",
             },
         ]
+        return alias_rows, gateway_rows
 
-    monkeypatch.setattr(claude_native, "probe_claude_gateway_models", _fake_probe)
+    monkeypatch.setattr(claude_native, "probe_claude_model_options", _fake_probe)
     host = _make_host_process()
 
     result = await host._handle_model_options(
@@ -3910,6 +3932,7 @@ async def test_handle_model_options_unions_claude_gateway_discovery(
         status="ok",
         models=[
             {"id": "sonnet", "model": "system.ai.claude-sonnet-5", "displayName": "Sonnet 5"},
+            {"id": "opusplan", "model": "opusplan", "displayName": "opusplan"},
             {
                 "id": "system.ai.claude-opus-4-8",
                 "model": "system.ai.claude-opus-4-8",

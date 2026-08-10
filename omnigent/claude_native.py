@@ -723,30 +723,53 @@ def _claude_gateway_artifact_rows(base_url: str) -> list[dict[str, object]]:
     return rows
 
 
-async def probe_claude_gateway_models(
-    claude_config: ClaudeNativeUcodeConfig | None,
-) -> list[dict[str, object]] | None:
+def _parse_claude_model_aliases(stdout: str) -> list[str]:
     """
-    Run Claude Code so it discovers the gateway's models itself, and read them.
+    Extract the alias list from ``claude -p "/model"``'s printed usage line.
+
+    The harness prints e.g. ``Usage: /model <name>. Available: sonnet, opus,
+    haiku, fable, best, sonnet[1m], opusplan, default, or a full model ID.``
+    — its own enumeration of every settable alias. Parsing keeps zero model
+    knowledge here: entries are taken verbatim, and only the trailing prose
+    fragment (anything with whitespace) is dropped.
+
+    :param stdout: The probe run's stdout.
+    :returns: Alias tokens in the harness's order; empty when no line parses.
+    """
+    for line in stdout.splitlines():
+        _, marker, tail = line.partition("Available:")
+        if not marker:
+            continue
+        aliases: list[str] = []
+        for entry in tail.split(","):
+            token = entry.strip().rstrip(".")
+            if token and " " not in token:
+                aliases.append(token)
+        return aliases
+    return []
+
+
+async def probe_claude_model_options(
+    claude_config: ClaudeNativeUcodeConfig | None,
+) -> tuple[list[dict[str, object]], list[dict[str, object]]] | None:
+    """
+    Ask Claude Code itself which models it would offer, via one headless run.
 
     The harness is the source of truth: a short ``claude -p "/model"`` run
-    with the session-launch env fires Claude Code's own startup gateway
-    discovery (its fetch, its filters) and writes its artifact; the rows come
-    from that artifact verbatim. No discovery semantics are replicated here.
-    Skipped entirely — ``None`` — when the launch env carries no gateway
-    base URL or no discovery opt-in, so non-gateway configs keep today's
-    behavior without spawning anything.
+    with the session-launch env makes Claude Code print its own alias list
+    and — when the env opts into gateway model discovery — fire its own
+    ``/v1/models`` fetch and write its artifact. Both outputs are read
+    verbatim; no selection semantics are replicated here. Runs for every
+    config shape, including the bare subscription launch (``None`` config).
 
     :param claude_config: The resolved native launch config
         (:func:`resolve_native_claude_config`), or ``None``.
-    :returns: Discovered gateway rows (possibly empty), or ``None`` when the
-        discovery lane is off for this config or the probe failed.
+    :returns: ``(alias_rows, gateway_rows)`` — the printed aliases as picker
+        rows plus any harness-discovered gateway rows — or ``None`` when the
+        probe failed (callers fall back to the configured/static rows).
     """
-    if claude_config is None:
-        return None
-    base_url = claude_config.env.get(_UCODE_CLAUDE_BASE_URL_ENV)
-    if not base_url or claude_config.env.get(_CLAUDE_GATEWAY_DISCOVERY_ENV) != "1":
-        return None
+    env_overrides = claude_config.env if claude_config is not None else {}
+    base_url = env_overrides.get(_UCODE_CLAUDE_BASE_URL_ENV)
     from omnigent.claude_launcher import resolve_claude_launch
 
     args = [
@@ -759,7 +782,7 @@ async def probe_claude_gateway_models(
         '{"mcpServers":{}}',
         "--no-session-persistence",
     ]
-    if claude_config.api_key_helper:
+    if claude_config is not None and claude_config.api_key_helper:
         args.extend(("--settings", json.dumps({"apiKeyHelper": claude_config.api_key_helper})))
     command, launch_args = resolve_claude_launch("claude", args)
     env = dict(os.environ)
@@ -777,7 +800,7 @@ async def probe_claude_gateway_models(
     env.pop("DATABRICKS_CONFIG_PROFILE", None)
     env.pop(_CLAUDE_CODE_NESTED_SESSION_ENV, None)
     env.pop(_CLAUDE_NONESSENTIAL_TRAFFIC_ENV, None)
-    if claude_config.api_key_helper:
+    if claude_config is not None and claude_config.api_key_helper:
         env.pop(_ANTHROPIC_API_KEY_ENV, None)
     try:
         process = await asyncio.create_subprocess_exec(
@@ -794,7 +817,7 @@ async def probe_claude_gateway_models(
         return None
     try:
         async with asyncio.timeout(_CLAUDE_MODEL_PROBE_TIMEOUT_S):
-            _stdout, stderr = await process.communicate()
+            stdout, stderr = await process.communicate()
     except (TimeoutError, asyncio.CancelledError):
         if process.returncode is None:
             process.kill()
@@ -809,7 +832,14 @@ async def probe_claude_gateway_models(
             stderr.decode(errors="replace").strip()[-500:],
         )
         return None
-    return await asyncio.to_thread(_claude_gateway_artifact_rows, base_url)
+    aliases = _parse_claude_model_aliases(stdout.decode(errors="replace"))
+    alias_rows: list[dict[str, object]] = [
+        {"id": alias, "model": alias, "displayName": alias} for alias in aliases
+    ]
+    gateway_rows: list[dict[str, object]] = []
+    if base_url and env_overrides.get(_CLAUDE_GATEWAY_DISCOVERY_ENV) == "1":
+        gateway_rows = await asyncio.to_thread(_claude_gateway_artifact_rows, base_url)
+    return alias_rows, gateway_rows
 
 
 def build_native_claude_terminal_env(

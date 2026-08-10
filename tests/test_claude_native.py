@@ -7427,26 +7427,76 @@ def test_claude_gateway_artifact_rows_tolerate_missing_or_malformed(
     assert claude_native._claude_gateway_artifact_rows("https://gw.example") == []
 
 
-async def test_probe_claude_gateway_models_skips_without_discovery_inputs(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Lane off (no config / no base URL / no opt-in) -> None, no subprocess."""
+def test_parse_claude_model_aliases_reads_the_usage_line() -> None:
+    """The harness's printed alias enumeration parses verbatim.
 
-    def _must_not_launch(command: str, args: list[str]) -> tuple[str, list[str]]:
-        raise AssertionError("the probe must not launch claude when the lane is off")
-
-    monkeypatch.setattr("omnigent.claude_launcher.resolve_claude_launch", _must_not_launch)
-
-    assert await claude_native.probe_claude_gateway_models(None) is None
-    no_gateway = claude_native.ClaudeNativeUcodeConfig(env={})
-    assert await claude_native.probe_claude_gateway_models(no_gateway) is None
-    no_opt_in = claude_native.ClaudeNativeUcodeConfig(
-        env={"ANTHROPIC_BASE_URL": "https://gw.example"}
+    Only the trailing prose fragment is dropped — no alias names are known
+    to the parser, so a new alias in a future Claude release flows through.
+    """
+    stdout = (
+        "Current model: Opus 4.8 (1M context) (effort: high)\n"
+        "Usage: /model <name>. Available: sonnet, opus, haiku, fable, best, "
+        "sonnet[1m], opus[1m], fable[1m], opusplan, default, or a full model ID.\n"
     )
-    assert await claude_native.probe_claude_gateway_models(no_opt_in) is None
+    assert claude_native._parse_claude_model_aliases(stdout) == [
+        "sonnet",
+        "opus",
+        "haiku",
+        "fable",
+        "best",
+        "sonnet[1m]",
+        "opus[1m]",
+        "fable[1m]",
+        "opusplan",
+        "default",
+    ]
+    assert claude_native._parse_claude_model_aliases("no usage line here") == []
 
 
-async def test_probe_claude_gateway_models_runs_the_harness_and_reads_artifact(
+async def test_probe_claude_model_options_runs_bare_and_skips_artifact(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The probe runs for every config shape; the artifact needs the opt-in.
+
+    A bare subscription launch (no config) still asks the harness for its
+    alias list, but never reads the discovery artifact — even one on disk —
+    because no gateway env keyed it to this launch.
+    """
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+    _write_gateway_artifact(
+        tmp_path,
+        "https://stale.example",
+        [{"id": "system.ai.claude-stale", "display_name": "Stale"}],
+    )
+
+    class _FakeProcess:
+        returncode = 0
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            return (
+                b"Usage: /model <name>. Available: sonnet, opus, or a full model ID.\n",
+                b"",
+            )
+
+    async def _fake_exec(command: str, *args: str, **kwargs: Any) -> _FakeProcess:
+        # No --settings without an apiKeyHelper to deliver.
+        assert "--settings" not in args
+        return _FakeProcess()
+
+    monkeypatch.setattr("asyncio.create_subprocess_exec", _fake_exec)
+
+    probe = await claude_native.probe_claude_model_options(None)
+
+    assert probe is not None
+    alias_rows, gateway_rows = probe
+    assert alias_rows == [
+        {"id": "sonnet", "model": "sonnet", "displayName": "sonnet"},
+        {"id": "opus", "model": "opus", "displayName": "opus"},
+    ]
+    assert gateway_rows == []
+
+
+async def test_probe_claude_model_options_runs_the_harness_and_reads_artifact(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """The probe launches Claude Code with the launch env and reads its artifact.
@@ -7465,7 +7515,11 @@ async def test_probe_claude_gateway_models_runs_the_harness_and_reads_artifact(
         returncode = 0
 
         async def communicate(self) -> tuple[bytes, bytes]:
-            return b"Current model: Opus\n", b""
+            return (
+                b"Current model: Opus\n"
+                b"Usage: /model <name>. Available: opus, or a full model ID.\n",
+                b"",
+            )
 
     async def _fake_exec(command: str, *args: str, **kwargs: Any) -> _FakeProcess:
         captured["command"] = command
@@ -7481,9 +7535,12 @@ async def test_probe_claude_gateway_models_runs_the_harness_and_reads_artifact(
 
     monkeypatch.setattr("asyncio.create_subprocess_exec", _fake_exec)
 
-    rows = await claude_native.probe_claude_gateway_models(_gateway_probe_config())
+    probe = await claude_native.probe_claude_model_options(_gateway_probe_config())
 
-    assert rows == [
+    assert probe is not None
+    alias_rows, gateway_rows = probe
+    assert alias_rows == [{"id": "opus", "model": "opus", "displayName": "opus"}]
+    assert gateway_rows == [
         {
             "id": "system.ai.claude-opus-4-8",
             "model": "system.ai.claude-opus-4-8",
@@ -7504,7 +7561,7 @@ async def test_probe_claude_gateway_models_runs_the_harness_and_reads_artifact(
     assert "CLAUDECODE" not in env
 
 
-async def test_probe_claude_gateway_models_returns_none_on_probe_failure(
+async def test_probe_claude_model_options_returns_none_on_probe_failure(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """A failing harness run yields None so callers keep configured rows."""
@@ -7521,4 +7578,4 @@ async def test_probe_claude_gateway_models_returns_none_on_probe_failure(
 
     monkeypatch.setattr("asyncio.create_subprocess_exec", _fake_exec)
 
-    assert await claude_native.probe_claude_gateway_models(_gateway_probe_config()) is None
+    assert await claude_native.probe_claude_model_options(_gateway_probe_config()) is None
