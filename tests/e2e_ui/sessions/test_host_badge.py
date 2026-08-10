@@ -522,20 +522,23 @@ def test_host_badge_switches_the_session_to_another_host(
     # over there" case is one click.
     trigger = page.get_by_test_id("switch-host-select")
     expect(trigger).to_contain_text("e2e-target", timeout=15_000)
-    # Radix renders the items only while the dropdown is open. Open it to prove
-    # the host it is already on is NOT offered — moving there is a no-op.
-    trigger.click()
-    target_option = page.get_by_test_id(f"switch-host-option-{target_id}")
-    expect(target_option).to_have_count(1)
-    expect(page.get_by_test_id(f"switch-host-option-{_FAKE_HOST_ID}")).to_have_count(0)
-    # Pick it to close the dropdown. NOT Escape: with the select already closed
-    # that keypress reaches the dialog and dismisses the whole thing.
-    target_option.click()
-    expect(target_option).to_have_count(0)
+    # The preselection is itself the "origin is excluded" signal: the bound host
+    # is the only other one in the list, so it landing on e2e-target means it
+    # was filtered out. Which hosts the picker offers is pinned exactly (both
+    # normally and after a stranded failure) in SwitchHostDialog.test.tsx — this
+    # test deliberately does NOT open the dropdown, because Radix's dismissable
+    # layer leaves the page briefly unable to receive the submit click.
+    expect(trigger).not_to_contain_text("e2e-host")
 
     directory = page.get_by_test_id("workspace-path-input")
     expect(directory).to_be_visible(timeout=15_000)
     directory.fill("/home/e2e/repo")
+    # Dismiss the path field's suggestion dropdown and wait for it to go before
+    # submitting. It is rendered in flow, so closing it lifts the footer ~24px:
+    # a mousedown on the submit button closes the dropdown, the button moves out
+    # from under the pointer, and the mouseup never lands on it.
+    page.get_by_test_id("switch-host-dialog").get_by_text("Switch host", exact=True).first.click()
+    expect(page.get_by_test_id("workspace-path-dropdown")).to_have_count(0)
 
     switch = page.get_by_test_id("switch-host-button")
     expect(switch).to_be_enabled(timeout=15_000)
