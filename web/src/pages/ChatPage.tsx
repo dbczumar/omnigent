@@ -168,7 +168,7 @@ import {
   hostBacksHarnessWithGateway,
   smartRoutingSourceFor,
 } from "@/lib/smartRoutingAvailability";
-import { useHosts } from "@/hooks/useHosts";
+import { useHostModelOptions, useHosts } from "@/hooks/useHosts";
 import { isSessionScopedDecision, showsRoutingDecisionChip } from "@/lib/routingDecision";
 import {
   Dialog,
@@ -1131,9 +1131,33 @@ export function ChatPage() {
     document.title = showsWorking ? `● ${base}` : base;
   }, [activeConv?.title, subAgentTabTitle, showsWorking, urlConvId]);
 
-  const codexModelOptions = useChatStore((s) => s.codexModelOptions);
+  const sessionModelOptions = useChatStore((s) => s.codexModelOptions);
   const selectedModel = useChatStore((s) => s.selectedModel);
   const llmModel = useChatStore((s) => s.llmModel);
+  // Pre-catalog fallback: a fresh native session's own catalog only arrives
+  // once its CLI is up (codex answers model/list after app-server boot,
+  // ~15s cold), which left the gear's Model list sparse and its Effort row
+  // hidden until then. The session's host already probed the same harness
+  // for the new-chat picker — ride those cached rows (same ids the launch
+  // accepts, ~90ms warm) until the runner's per-session catalog lands;
+  // the runner truth replaces them the moment it arrives. Must stay above
+  // the hydration early-returns below (hook order).
+  const fallbackPickerKind = modelPickerKindForConv({
+    labels: activeSession ? (activeSession.labels ?? {}) : (activeConv?.labels ?? {}),
+  });
+  const hostProbeHarness =
+    fallbackPickerKind === "codex"
+      ? "codex-native"
+      : fallbackPickerKind === "claude"
+        ? "claude-native"
+        : null;
+  const { data: hostProbeOptions } = useHostModelOptions(
+    activeSession?.hostId ?? null,
+    hostProbeHarness ?? "",
+    hostProbeHarness !== null && sessionModelOptions.length === 0,
+  );
+  const codexModelOptions =
+    sessionModelOptions.length > 0 ? sessionModelOptions : (hostProbeOptions ?? []);
 
   // Loading + error gates for `/c/:id` hydration.
   if (urlConvId) {
