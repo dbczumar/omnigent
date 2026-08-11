@@ -3975,8 +3975,9 @@ function ContextRing({ contextWindow, tokensUsed }: { contextWindow: number; tok
  * @param model - Model override or bound agent model id.
  * @param codexModelOptions - Native model metadata, when available.
  * @returns The advertised display label for known native models, a local Claude alias
- *   label for Claude native tiers, the raw model id otherwise, or ``null``
- *   when no model is known.
+ *   label for Claude native tiers, a version-agnostic friendly form for a
+ *   Claude ``[1m]`` alias the catalog doesn't list, the raw model id
+ *   otherwise, or ``null`` when no model is known.
  */
 export function formatStatusModelLabel(
   model: string | null,
@@ -3989,6 +3990,14 @@ export function formatStatusModelLabel(
   if (codexOption) return codexOption.displayName ?? codexOption.id;
   const known = CLAUDE_NATIVE_MODELS.find((m) => m.id === lower);
   if (known) return known.label;
+  // A Claude bracket alias the session's catalog doesn't list (e.g. a pick
+  // made before the catalog carried the row): render it friendly without
+  // claiming a version the client can't know.
+  const bracketAlias = /^([a-z]+)\[1m\]$/.exec(lower);
+  if (bracketAlias) {
+    const family = bracketAlias[1]!;
+    return `${family.charAt(0).toUpperCase()}${family.slice(1)} (1M context)`;
+  }
   return raw;
 }
 

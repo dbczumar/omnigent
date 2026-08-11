@@ -434,6 +434,19 @@ describe("formatModelEffortStatusLabel", () => {
     );
   });
 
+  it("prefers the catalog display name for a Claude [1m] alias", () => {
+    expect(
+      formatModelEffortStatusLabel("sonnet[1m]", "high", [
+        { id: "sonnet[1m]", model: "claude-sonnet-5[1m]", displayName: "Sonnet 5 (1M context)" },
+      ]),
+    ).toBe("Sonnet 5 (1M context) high");
+  });
+
+  it("renders a catalog-less Claude [1m] alias friendly without claiming a version", () => {
+    expect(formatModelEffortStatusLabel("sonnet[1m]", "high")).toBe("Sonnet (1M context) High");
+    expect(formatModelEffortStatusLabel("opus[1m]", null)).toBe("Opus (1M context)");
+  });
+
   it("omits missing pieces", () => {
     expect(formatModelEffortStatusLabel("opus", null)).toBe("Opus");
     expect(formatModelEffortStatusLabel(null, "low")).toBe("Low");
