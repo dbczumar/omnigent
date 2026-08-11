@@ -3091,8 +3091,8 @@ function ConversationRow({
   const [deleteBranch, setDeleteBranch] = useState(false);
   const [shareOpen, setShareOpen] = useState(false);
   // True while an archive is in flight. Drives the "Archiving…" status
-  // row, mirroring delete's "Deleting…" indicator — without it the row
-  // shows nothing while the archive completes.
+  // row — without it the row shows nothing while the archive completes.
+  // Delete needs no counterpart: it drops its row optimistically.
   const [isArchiving, setIsArchiving] = useState(false);
   const gitBranch = conversation.git_branch ?? null;
   // Every row action gates on ownership alone — the sidebar carries no
