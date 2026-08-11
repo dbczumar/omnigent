@@ -115,6 +115,7 @@ import {
 } from "@/store/chatStore";
 import {
   isNativeTerminalSession,
+  nativeCodingAgentForSession,
   nativeCodingAgentForHarness,
   nativeCodingAgentForSubagentWrapper,
   WRAPPER_LABEL_KEY,
@@ -162,6 +163,12 @@ import {
 } from "@/hooks/useWorkspaceChangedFiles";
 import { ComposerMicButton } from "@/components/ComposerMicButton";
 import { isCostRoutingSession, isSubagentRoutingSession } from "@/components/CostRoutingControl";
+import {
+  SMART_ROUTING_ARMS,
+  hostBacksHarnessWithGateway,
+  smartRoutingSourceFor,
+} from "@/lib/smartRoutingAvailability";
+import { useHosts } from "@/hooks/useHosts";
 import { isSessionScopedDecision, showsRoutingDecisionChip } from "@/lib/routingDecision";
 import {
   Dialog,
@@ -224,18 +231,35 @@ function smartRoutingEnabled(serverInfo: ServerInfoValue): boolean {
 }
 
 /**
- * Whether the session's own model can be routed per turn: the deployment flag,
- * plus a top-level agent session that is not a native terminal (their CLI bakes
- * the model at launch and can't per-turn route).
+ * Whether the session's own model can be routed per turn.
+ *
+ * SDK/bundle agent sessions need only the deployment flag. Native Claude
+ * Code / Codex panes ARE routable per turn — the server injects the routed
+ * pick via ``/model`` when ``cost_control_mode_override`` is on, the same
+ * apparatus the create-time gear arms — but only when a router can answer
+ * for their family (the server rejects a routing-on create otherwise): the
+ * external AI-Gateway router needs the family's inference gateway-backed on
+ * the session's host, and the built-in judge covers the rest. An absent
+ * host row reads as backed, mirroring {@link hostBacksHarnessWithGateway}.
  */
 export function isCostRoutingEligible(
   serverInfo: ServerInfoValue,
   session: Session | null | undefined,
+  host?: { gateway_inference?: Record<string, boolean> | null } | null,
 ): boolean {
+  if (serverInfo === "loading" || !serverInfo.smart_routing_enabled) return false;
+  if (!isCostRoutingSession(session)) return false;
+  if (!isNativeTerminalSession(session)) return true;
+  const native = nativeCodingAgentForSession(session);
+  if (native === undefined || !SMART_ROUTING_ARMS.some((arm) => arm === native.harness)) {
+    return false;
+  }
   return (
-    smartRoutingEnabled(serverInfo) &&
-    isCostRoutingSession(session) &&
-    !isNativeTerminalSession(session)
+    smartRoutingSourceFor({
+      externalConfigured: serverInfo.smart_routing_sources.external,
+      ossConfigured: serverInfo.smart_routing_sources.oss,
+      gatewayBacked: hostBacksHarnessWithGateway(host, native.harness),
+    }) !== null
   );
 }
 
@@ -978,13 +1002,16 @@ export function ChatPage() {
 
   // Orchestrator-only: polly's children inherit its agentName, so the gate
   // needs the session predicate (parent linkage), not a bare name check. An
-  // eligible session's Smart Routing toggle lives in the gear modal — Claude
-  // folds it into the Model dropdown; other routable agents get a standalone
-  // Switch row. Native terminal sessions (Claude Code / Codex / Pi / …) are
-  // excluded: their CLI bakes the model at launch and can't per-turn route, so
-  // Smart Routing is meaningless there.
+  // eligible session's Smart Routing option lives in the gear modal — Claude
+  // Code / Codex fold it into the Model dropdown (the server routes native
+  // panes per turn via /model injection); other routable agents get a
+  // standalone Switch row. The session's host row feeds the per-family
+  // gateway check the external router requires.
   const serverInfo = useServerInfo();
-  const costRoutingEligible = isCostRoutingEligible(serverInfo, activeSession);
+  const { data: hostRows } = useHosts();
+  const sessionHost =
+    hostRows?.find((row) => row.host_id === (activeSession?.hostId ?? null)) ?? null;
+  const costRoutingEligible = isCostRoutingEligible(serverInfo, activeSession, sessionHost);
   // Sub-agent routing is a separate knob with a different gate: a native CLI
   // can't per-turn route itself, but the sub-agents it spawns are routed per
   // spawn — where the launch actually installed that apparatus. See
