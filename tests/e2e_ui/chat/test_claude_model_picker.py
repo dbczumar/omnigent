@@ -609,6 +609,101 @@ def test_composer_model_label_never_shows_the_previous_sessions_model(
     )
 
 
+def test_claude_model_label_never_claims_a_version_the_catalog_didnt_give(
+    page: Page,
+    seeded_session: tuple[str, str],
+) -> None:
+    """Pre-catalog, the composer label is friendly but version-free.
+
+    The chip prefers the catalog's display name; before the catalog
+    arrives it must fall back to a mechanical rendering of the alias
+    (``sonnet[1m]`` → "Sonnet (1M context)") — never the raw id, and
+    never a version claim (the old fallback said "Sonnet 4.6" while the
+    catalog resolves the alias to Sonnet 5). Every label the page ever
+    paints is recorded, so a transient wrong label can't hide from a
+    retrying ``expect()``.
+    """
+    base_url, session_id = seeded_session
+    catalog_state = {"ready": False}
+    one_m_catalog = [
+        *_MODEL_OPTIONS,
+        {
+            "id": "sonnet[1m]",
+            "model": "system.ai.claude-sonnet-5[1m]",
+            "displayName": "Sonnet 5 (1M context)",
+            "isDefault": False,
+        },
+    ]
+    _patch_session_as_claude_native(
+        page,
+        session_id,
+        model_override="sonnet[1m]",
+        catalog_state=catalog_state,
+        model_options=one_m_catalog,
+    )
+    stream_script = """
+        (() => {
+          const sessionId = __SESSION_ID__;
+          const originalFetch = window.fetch.bind(window);
+          window.fetch = (input, init) => {
+            const url = typeof input === "string" ? input : input.url;
+            const streamPath = `/v1/sessions/${sessionId}/stream`;
+            if (new URL(url, window.location.origin).pathname === streamPath) {
+              const body = new ReadableStream({
+                start(controller) {
+                  window.__claudeModelStreamController = controller;
+                },
+              });
+              return Promise.resolve(new Response(body, {
+                status: 200,
+                headers: { "content-type": "text/event-stream" },
+              }));
+            }
+            return originalFetch(input, init);
+          };
+        })()
+        """.replace("__SESSION_ID__", json.dumps(session_id))
+    page.add_init_script(stream_script)
+    page.add_init_script(_LABEL_RECORDER)
+
+    page.goto(f"{base_url}/c/{session_id}")
+
+    # Pre-catalog: the mechanical fallback, alias rendered friendly.
+    label = page.get_by_test_id("composer-model-effort-label")
+    expect(label).to_contain_text("Sonnet (1M context)", timeout=15_000)
+    page.wait_for_function("window.__claudeModelStreamController !== undefined")
+
+    # The catalog lands: its display name supersedes the fallback.
+    catalog_state["ready"] = True
+    page.evaluate(
+        """
+        ({ sessionId }) => {
+          const frame = `event: session.model_options\ndata: ${JSON.stringify({
+            conversation_id: sessionId,
+          })}\n\n`;
+          window.__claudeModelStreamController.enqueue(new TextEncoder().encode(frame));
+        }
+        """,
+        {"sessionId": session_id},
+    )
+    expect(label).to_contain_text("Sonnet 5 (1M context)", timeout=10_000)
+
+    log = page.evaluate("window.__modelLabelLog")
+    labels = [entry["text"] for entry in log if entry["text"]]
+    assert labels, "the recorder never saw a composer label"
+    offending = [
+        text
+        for text in labels
+        if "sonnet[1m]" in text.lower() or "4.6" in text or text.strip().startswith("sonnet")
+    ]
+    assert not offending, (
+        f"the composer painted a raw id or an invented version: {offending} "
+        f"(full label sequence: {labels}). Pre-catalog labels must render the "
+        "alias mechanically; versions come only from the catalog."
+    )
+    _screenshot(page, "one-m-label-settled")
+
+
 def test_claude_native_picker_prefers_session_override_over_sticky_model(
     page: Page,
     seeded_session: tuple[str, str],
