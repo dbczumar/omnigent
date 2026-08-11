@@ -24,4 +24,3 @@ export const CLAUDE_NATIVE_MODELS = [
   { id: "sonnet_5", label: "Sonnet 5" },
   { id: "haiku", label: "Haiku" },
 ] as const;
-

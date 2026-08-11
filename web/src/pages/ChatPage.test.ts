@@ -1544,10 +1544,7 @@ describe("isUnboundCodingFork", () => {
 // client must show no routing control at all, and neither must one while the
 // `/v1/info` probe is still in flight.
 describe("routing eligibility gates", () => {
-  function info(
-    smartRouting: boolean,
-    sources?: { external: boolean; oss: boolean },
-  ): ServerInfo {
+  function info(smartRouting: boolean, sources?: { external: boolean; oss: boolean }): ServerInfo {
     return {
       accounts_enabled: false,
       single_user: false,

@@ -2170,9 +2170,7 @@ function deferredNativeStickyModel(session: Session): string | null {
   }
   const stickyModel =
     useChatStore.getState().selectedModel ?? loadPickerPref(PICKER_PREF_MODEL_KEY);
-  return stickyModel != null && isNativeModelCompatible(stickyModel, session)
-    ? stickyModel
-    : null;
+  return stickyModel != null && isNativeModelCompatible(stickyModel, session) ? stickyModel : null;
 }
 
 /**
