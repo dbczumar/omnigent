@@ -104,7 +104,6 @@ import {
   liveCandidateAssistantIndex,
 } from "@/lib/renderItems";
 import { getCurrentAuthorId } from "@/lib/identity";
-import { CLAUDE_NATIVE_MODELS } from "@/lib/claudeNativeModels";
 import { codexEffortLevelsForModel, findNativeModelOption } from "@/lib/codexNativeModels";
 import {
   composerAttachmentKey,
@@ -3974,10 +3973,10 @@ function ContextRing({ contextWindow, tokensUsed }: { contextWindow: number; tok
  *
  * @param model - Model override or bound agent model id.
  * @param codexModelOptions - Native model metadata, when available.
- * @returns The advertised display label for known native models, a local Claude alias
- *   label for Claude native tiers, a version-agnostic friendly form for a
- *   Claude ``[1m]`` alias the catalog doesn't list, the raw model id
- *   otherwise, or ``null`` when no model is known.
+ * @returns The advertised display label for known native models, a
+ *   version-agnostic friendly form for an alias-shaped id the catalog
+ *   doesn't list, the raw model id otherwise, or ``null`` when no model
+ *   is known.
  */
 export function formatStatusModelLabel(
   model: string | null,
@@ -3988,15 +3987,18 @@ export function formatStatusModelLabel(
   const lower = raw.toLowerCase();
   const codexOption = findNativeModelOption(codexModelOptions, raw);
   if (codexOption) return codexOption.displayName ?? codexOption.id;
-  const known = CLAUDE_NATIVE_MODELS.find((m) => m.id === lower);
-  if (known) return known.label;
-  // A Claude bracket alias the session's catalog doesn't list (e.g. a pick
-  // made before the catalog carried the row): render it friendly without
-  // claiming a version the client can't know.
-  const bracketAlias = /^([a-z]+)\[1m\]$/.exec(lower);
-  if (bracketAlias) {
-    const family = bracketAlias[1]!;
-    return `${family.charAt(0).toUpperCase()}${family.slice(1)} (1M context)`;
+  // An alias-shaped id the session's catalog doesn't list (e.g. during
+  // the pre-catalog window): render it friendly mechanically — "sonnet"
+  // → "Sonnet", "sonnet_5" → "Sonnet 5", "sonnet[1m]" → "Sonnet
+  // (1M context)" — without claiming a version the client can't know.
+  // Which model an alias lands on is the harness's answer; the catalog's
+  // display name supersedes this wherever one has arrived.
+  const alias = /^([a-z]+)(?:_(\d+))?(\[1m\])?$/.exec(lower);
+  if (alias) {
+    let label = `${alias[1]!.charAt(0).toUpperCase()}${alias[1]!.slice(1)}`;
+    if (alias[2]) label += ` ${alias[2]}`;
+    if (alias[3]) label += " (1M context)";
+    return label;
   }
   return raw;
 }

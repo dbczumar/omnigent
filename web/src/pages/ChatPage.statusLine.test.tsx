@@ -447,6 +447,12 @@ describe("formatModelEffortStatusLabel", () => {
     expect(formatModelEffortStatusLabel("opus[1m]", null)).toBe("Opus (1M context)");
   });
 
+  it("title-cases catalog-less alias-shaped ids mechanically", () => {
+    expect(formatModelEffortStatusLabel("sonnet", null)).toBe("Sonnet");
+    expect(formatModelEffortStatusLabel("sonnet_5", null)).toBe("Sonnet 5");
+    expect(formatModelEffortStatusLabel("fable", null)).toBe("Fable");
+  });
+
   it("omits missing pieces", () => {
     expect(formatModelEffortStatusLabel("opus", null)).toBe("Opus");
     expect(formatModelEffortStatusLabel(null, "low")).toBe("Low");
