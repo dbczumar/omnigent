@@ -426,6 +426,23 @@ export interface ChatState {
    */
   pendingComposerAttachments: ComposerAttachment[];
   /**
+   * The text + attachments of a send that failed before the server took
+   * ownership of it, handed back so the composer can restore them for a
+   * retry. Without this the message is simply gone: `submit` clears the
+   * composer optimistically, and a first message carried in from the
+   * landing screen has already had its draft dropped and its pending
+   * prompt destructively consumed — so an upload 415 or a runner 503 left
+   * the user with an error and nothing to resend. The composer drains this
+   * (matching on conversation id) and clears it.
+   *
+   * Single-slot: a second failure in the same session replaces the first's
+   * retained draft (last failure wins). A send that fails before any session
+   * id resolves isn't captured — there is no composer keyed to restore it
+   * into — but the landing path binds a session first, so the reported flow
+   * is covered.
+   */
+  failedSendDraft: { conversationId: string; text: string; files: File[] } | null;
+  /**
    * LLM model identifier from the bound agent's spec for the active
    * session, e.g. ``"anthropic/claude-sonnet-4-6"``. Populated from
    * the session snapshot on bind; ``null`` before bind or when the
@@ -512,6 +529,17 @@ export interface ChatState {
    * non-terminal-first sessions.
    */
   terminalPending: boolean;
+  /**
+   * Epoch ms when this client last asked a host to launch a runner for the
+   * open session outside the send path — today, a host switch. The runner
+   * is coming up but nothing on the wire says so yet: the session is not
+   * newly created, so the liveness startup grace doesn't apply, and no turn
+   * is in flight, so it would otherwise read as idle `runner_asleep` and
+   * show nothing at all. Feeds `useSessionLiveness` as a `starting` nudge
+   * and self-expires after `STARTING_GRACE_S`. `null` when no such launch
+   * is outstanding.
+   */
+  runnerLaunchedAt: number | null;
   /**
    * Users currently viewing this session (presence circles in the
    * chat header). Replaced wholesale by every `session.presence` SSE
@@ -683,6 +711,9 @@ export interface ChatState {
   addComposerAttachment: (attachment: ComposerAttachment) => void;
   /** Drain the queued composer attachments (called by the composer). */
   clearPendingComposerAttachments: () => void;
+  /** Stamp {@link ChatState.runnerLaunchedAt} now — call right after a
+   *  successful `launchRunner` for the open session. */
+  markRunnerLaunched: () => void;
   /**
    * Compact the active session's context. Posts a ``compact`` event to the
    * server, which summarises the conversation history in-place. No-ops when
@@ -1063,6 +1094,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   oldestItemId: null,
   flashItemId: null,
   pendingComposerAttachments: [],
+  failedSendDraft: null,
   llmModel: null,
   sessionHarness: null,
   subAgentName: null,
@@ -1075,6 +1107,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   skills: [],
   codexModelOptions: [],
   terminalPending: false,
+  runnerLaunchedAt: null,
   viewers: [],
   sandboxStatus: null,
   mcpStartup: null,
@@ -1469,6 +1502,17 @@ export const useChatStore = create<ChatState>((set, get) => ({
             tempId,
           ),
         }));
+        // Hand the message back to the composer so the user can retry it.
+        // Nothing else holds it at this point: the optimistic bubble is about
+        // to roll back, and a first message carried in from the landing screen
+        // has already had its draft cleared and its pending prompt consumed.
+        // Keyed by session so it restores into the one it was meant for even
+        // if the user navigated away while the send was in flight.
+        if (text.trim() !== "" || (files?.length ?? 0) > 0) {
+          set({
+            failedSendDraft: { conversationId: stashSessionId, text, files: files ?? [] },
+          });
+        }
       }
       // A queued send can target a session the user has since switched away
       // from (submit-time pin). Only roll back the bubble and settle status
@@ -1790,6 +1834,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         // session's composer (which drains the store on mount). Same reset
         // discipline as ``viewers`` above.
         pendingComposerAttachments: [],
+        runnerLaunchedAt: null,
         sandboxStatus: null,
         mcpStartup: null,
         abortController: null,
@@ -1869,6 +1914,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   clearPendingComposerAttachments: () => set({ pendingComposerAttachments: [] }),
+
+  markRunnerLaunched: () => set({ runnerLaunchedAt: Date.now() }),
 
   compact: async () => {
     const { conversationId } = get();
