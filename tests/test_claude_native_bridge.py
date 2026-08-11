@@ -397,7 +397,7 @@ def test_prepare_bridge_dir_persists_and_applies_resolved_sandbox(
         return
 
     monkeypatch.setattr(
-        "omnigent.claude_native_bridge.create_os_environment",
+        "omnigent.inner.os_env.create_os_environment",
         _fake_create_os_environment,
     )
     _build_tools(config)
@@ -484,7 +484,7 @@ def test_prepare_bridge_dir_drops_credential_proxy_instead_of_corrupting_it(
         return
 
     monkeypatch.setattr(
-        "omnigent.claude_native_bridge.create_os_environment",
+        "omnigent.inner.os_env.create_os_environment",
         _fake_create_os_environment,
     )
     _build_tools(config)

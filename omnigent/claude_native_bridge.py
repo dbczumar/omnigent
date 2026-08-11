@@ -61,17 +61,15 @@ from omnigent.kiro_native_bridge import bridge_root as kiro_bridge_root
 if TYPE_CHECKING:
     import httpx
 
+    from omnigent.inner.datamodel import OSEnvSandboxSpec
+    from omnigent.inner.os_env import OSEnvironment
     from omnigent.llms.context_window import ModelPricing
 
-from omnigent.inner.bundle_skills import claude_native_skill_args
-from omnigent.inner.datamodel import OSEnvSandboxSpec, OSEnvSpec
 from omnigent.inner.hook_scripts.subagent_router import (
     AGENT_TOOL_MATCHER as CLAUDE_SUBAGENT_TOOL_MATCHER,
 )
-from omnigent.inner.os_env import OSEnvironment, create_os_environment
 from omnigent.reasoning_effort import CLAUDE_EFFORTS
 from omnigent.tools.base import Tool, ToolContext
-from omnigent.tools.builtins.os_env import build_os_env_tools
 
 _logger = logging.getLogger(__name__)
 
@@ -1722,6 +1720,9 @@ def augment_claude_args(
     )
     if append_system_prompt:
         args.extend(["--append-system-prompt", append_system_prompt])
+    # Imported here: bundle-skills parsing rides the spec graph; launch-only.
+    from omnigent.inner.bundle_skills import claude_native_skill_args
+
     args.extend(
         claude_native_skill_args(
             bundle_dir,
@@ -4580,6 +4581,14 @@ def _build_tools(config: _JsonObject) -> tuple[dict[str, Tool], Callable[[], Non
     :returns: ``(tools, close_tools)`` where ``close_tools``
         releases any helper processes.
     """
+    # Imported here, not at module top: this drags the tools/spec/pydantic
+    # graph (~300 ms of interpreter startup), and this module is on the
+    # import path of every per-chunk/per-tool-call Claude hook subprocess.
+    # Only the bridge MCP server (launch path) ever builds these tools.
+    from omnigent.inner.datamodel import OSEnvSandboxSpec, OSEnvSpec
+    from omnigent.inner.os_env import create_os_environment
+    from omnigent.tools.builtins.os_env import build_os_env_tools
+
     workspace_raw = config.get("workspace")
     workspace = Path(workspace_raw) if isinstance(workspace_raw, str) and workspace_raw else None
     os_env: OSEnvironment | None = None

@@ -306,11 +306,12 @@ def test_package_lazy_exports_resolve_on_access() -> None:
         ("omnigent.claude_native_status", frozenset()),
         (
             "omnigent.claude_native_hook",
-            # The observer/policy hook legitimately speaks HTTP and reads
-            # bridge state; its residual weight is the bridge module's own
-            # import graph (a follow-up diet). The package init's heavy
-            # graph must still stay out of it.
-            frozenset({"httpx", "pydantic", "omnigent.inner.datamodel", "omnigent.spec.parser"}),
+            # The observer path (the most frequent invocation) is pure
+            # stdlib + light bridge state: httpx and the policy machinery
+            # are imported inside the subcommands that speak HTTP, and the
+            # bridge defers its tools/spec/pydantic graph to the launch
+            # path. Nothing heavy may ride the module import.
+            frozenset(),
         ),
     ],
 )
