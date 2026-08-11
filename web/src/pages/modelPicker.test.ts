@@ -60,7 +60,7 @@ describe("CLAUDE_NATIVE_MODELS", () => {
     expect(CLAUDE_NATIVE_MODELS.map((m) => m.label)).toEqual([
       "Fable",
       "Opus",
-      "Sonnet 4.6",
+      "Sonnet",
       "Sonnet 5",
       "Haiku",
     ]);
