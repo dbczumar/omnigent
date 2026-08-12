@@ -1156,8 +1156,14 @@ export function ChatPage() {
     hostProbeHarness ?? "",
     hostProbeHarness !== null && sessionModelOptions.length === 0,
   );
+  // Identity-stable on purpose: substitute only when the host rows actually
+  // exist, else keep the store's own array reference — a fresh [] here would
+  // re-render every options consumer (composer, gear, agent-info popover) on
+  // each streaming/liveness tick.
   const codexModelOptions =
-    sessionModelOptions.length > 0 ? sessionModelOptions : (hostProbeOptions ?? []);
+    sessionModelOptions.length === 0 && hostProbeOptions != null && hostProbeOptions.length > 0
+      ? hostProbeOptions
+      : sessionModelOptions;
 
   // Loading + error gates for `/c/:id` hydration.
   if (urlConvId) {
