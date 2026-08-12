@@ -490,7 +490,9 @@ def test_start_local_server_spawns_runner_as_sibling(
 
     # Server subprocess was spawned.
     assert len(server_popen_calls) == 1
-    assert server_popen_calls[0].args[2:6] == [
+    assert server_popen_calls[0].args[1:7] == [
+        "-P",
+        "-m",
         "omnigent.cli",
         "server",
         "--host",
