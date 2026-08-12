@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import errno
 import logging
+import os
 import subprocess
 import threading
 import time
@@ -55,6 +56,7 @@ from omnigent.host.frames import (
 )
 from omnigent.host.identity import HostIdentity
 from omnigent.host.runner_zygote import ZygoteUnavailable
+from omnigent.inner import _proc
 from omnigent.runner.identity import (
     RUNNER_DELEGATED_AUTH_ENV_VAR,
     RUNNER_ID_ENV_VAR,
@@ -4147,3 +4149,66 @@ def test_zygote_start_failure_disables_it(
     assert host._zygote_disabled is True
     assert zygote.stop_calls == 0
     assert len(popen_argvs) == 1
+
+
+def test_build_runner_env_pins_the_import_root_first() -> None:
+    """The runner env pins this process's package root ahead of PYTHONPATH.
+
+    Paired with the ``-P`` spawn argv: without the pin, a workspace that is
+    an omnigent checkout is imported wholesale in place of the install (the
+    version-skew incident class); without preserving the tail, an
+    operator's own PYTHONPATH entries would be dropped.
+    """
+    root = _proc.omnigent_import_root()
+    # Sanity: the root really is the dir holding the running package.
+    assert (Path(root) / "omnigent" / "__init__.py").is_file()
+
+    env = _build_runner_env(
+        {"PATH": "/usr/bin", "PYTHONPATH": "/operator/extra"},
+        server_url="http://server",
+        runner_id="runner_abc",
+        binding_token="tok",
+        workspace="/ws",
+        parent_pid=42,
+        initial_auth_token=None,
+    )
+
+    assert env["PYTHONPATH"].split(os.pathsep) == [root, "/operator/extra"]
+
+
+def test_direct_runner_spawn_argv_is_cwd_shadow_immune(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The direct runner spawn runs ``python -P -m`` so cwd cannot shadow.
+
+    Runners exec with cwd=workspace; without ``-P`` an omnigent-checkout
+    workspace shadows the installed package for the whole process tree.
+    """
+    zygote = _FakeZygote(fail_at="start", running=False)
+
+    _host, popen_argvs = _spawn_with_fake_zygote(monkeypatch, tmp_path, zygote)
+
+    assert len(popen_argvs) == 1
+    assert popen_argvs[0][1:4] == ["-P", "-m", "omnigent.runner._entry"]
+
+
+def test_pin_and_scrub_import_root_env_round_trip(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pin prepends exactly one root entry; scrub removes exactly that entry.
+
+    Scrub is what keeps the pin out of user-facing children (tmux panes,
+    agent CLIs); it must not touch an operator's own PYTHONPATH entries.
+    """
+    root = _proc.omnigent_import_root()
+    env = {"PYTHONPATH": os.pathsep.join(["/operator/extra", root])}
+    _proc.pin_import_root_env(env)
+    assert env["PYTHONPATH"].split(os.pathsep) == [root, "/operator/extra"]
+
+    monkeypatch.setenv("PYTHONPATH", env["PYTHONPATH"])
+    _proc.scrub_import_root_env()
+    assert os.environ["PYTHONPATH"] == "/operator/extra"
+    monkeypatch.setenv("PYTHONPATH", root)
+    _proc.scrub_import_root_env()
+    assert "PYTHONPATH" not in os.environ

@@ -434,6 +434,12 @@ def main(argv: list[str] | None = None) -> None:
     """
     args = _parse_args(argv if argv is not None else sys.argv[1:])
 
+    from omnigent.inner import _proc
+
+    # Scrub the spawn-time import pin (already in sys.path) so agent CLIs
+    # spawned below do not inherit our package root on PYTHONPATH.
+    _proc.scrub_import_root_env()
+
     # Attach a log handler before anything harness-specific runs. Without this
     # the child has no handler at all, so logging falls back to lastResort:
     # WARNING+ goes to the inherited stderr and every logger.debug/info/

@@ -890,6 +890,7 @@ def test_start_hosts_on_explicit_server(
     assert spawned_args == [
         [
             sys.executable,
+            "-P",
             "-m",
             "omnigent.host._daemon_entry",
             "--server",

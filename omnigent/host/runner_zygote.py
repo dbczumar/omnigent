@@ -213,6 +213,10 @@ class ZygoteManager:
         # reach every child. setdefault keeps an operator override winning.
         for key, value in _proc.malloc_tuning_env().items():
             env.setdefault(key, value)
+        # The zygote imports the whole runner graph at boot; pin it (with the
+        # -P argv below) so the daemon's cwd can never decide which omnigent
+        # every forked runner inherits.
+        _proc.pin_import_root_env(env)
         with contextlib.ExitStack() as stack:
             # The zygote's own stdout/stderr go to its log file when configured,
             # else inherit the daemon's; stdin is always /dev/null.
@@ -227,7 +231,7 @@ class ZygoteManager:
             tty_kwargs = stack.enter_context(child_logging_popen_kwargs(env))
             pass_fds = (child_fd, *tty_kwargs.get("pass_fds", ()))
             return subprocess.Popen(
-                [self._python, "-m", "omnigent.runner._zygote"],
+                _proc.pinned_module_argv("omnigent.runner._zygote", python=self._python),
                 env=env,
                 pass_fds=pass_fds,
                 stdin=subprocess.DEVNULL,

@@ -756,3 +756,27 @@ def test_polled_harness_pid_is_released_from_its_owner(manager: ZygoteManager, t
     # Re-polling is None (code popped) and the zygote is still healthy.
     assert _control_exchange(manager, {"cmd": "poll", "pid": pid})["returncode"] is None
     assert _control_exchange(manager, {"cmd": "ping"}).get("pong") is True
+
+
+def test_zygote_survives_workspace_checkout_shadow_cwd(tmp_path, monkeypatch) -> None:
+    """A cwd that IS an omnigent checkout must not be imported by the zygote.
+
+    ``python -m`` puts the spawn cwd first on ``sys.path``, so a full decoy
+    package there used to replace the installed tree wholesale — every
+    forked runner then ran whatever branch that checkout had (the
+    version-skew incident). ``-P`` plus the PYTHONPATH pin resolve the
+    spawning process's own package instead.
+    """
+    decoy = tmp_path / "omnigent"
+    decoy.mkdir()
+    (decoy / "__init__.py").write_text("raise ImportError('decoy checkout imported')\n")
+    monkeypatch.chdir(tmp_path)
+
+    mgr = ZygoteManager(log_path=tmp_path / "zygote.log")
+    try:
+        mgr.start()
+        assert mgr.is_running()
+        proc = mgr.fork_runner(_fork_env(0), str(tmp_path / "runner.log"), str(tmp_path))
+        assert _wait_exit(proc) == 0
+    finally:
+        mgr.stop()

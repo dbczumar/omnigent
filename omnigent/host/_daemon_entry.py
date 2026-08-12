@@ -43,9 +43,13 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    from omnigent.inner import _proc
     from omnigent.process_logging import configure_process_logging
 
     configure_process_logging("host", force=True)
+    # Scrub the spawn-time import pin (already in sys.path); spawn sites
+    # re-pin their own children explicitly.
+    _proc.scrub_import_root_env()
 
     if args.local == bool(args.server):
         # Both or neither — the CLI always passes exactly one; fail loud.

@@ -1740,9 +1740,13 @@ def main() -> None:
 
     :returns: None.
     """
+    from omnigent.inner import _proc
     from omnigent.process_logging import configure_process_logging
 
     configure_process_logging("runner", force=True)
+    # The spawn-time import pin already landed in sys.path; scrub it so tmux
+    # panes and harness CLIs do not inherit our package root on PYTHONPATH.
+    _proc.scrub_import_root_env()
     _install_crash_logging()
     try:
         asyncio.run(_run_tunnel_from_env())

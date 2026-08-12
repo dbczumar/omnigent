@@ -24,7 +24,10 @@ import logging
 import os
 import signal
 import subprocess
+import sys
+from collections.abc import MutableMapping
 from contextlib import suppress
+from pathlib import Path
 from typing import Protocol, TypedDict
 
 import psutil  # type: ignore[import-untyped]
@@ -107,6 +110,72 @@ class _ProcessLike(Protocol):
 
     def kill(self) -> None:
         pass
+
+
+def omnigent_import_root() -> str:
+    """Directory containing the ``omnigent`` package this process runs.
+
+    Derived from this module's own location, never ``omnigent.__file__``
+    (which is ``None`` under a cwd namespace shadow), so it names the tree
+    the running process actually imported — a checkout root for editable /
+    source runs, site-packages otherwise.
+
+    :returns: Absolute directory path, e.g. ``"/Users/me/omnigent"``.
+    """
+    return str(Path(__file__).resolve().parents[2])
+
+
+def pinned_module_argv(module: str, *, python: str | None = None) -> list[str]:
+    """argv prefix for a ``python -m omnigent.*`` child immune to cwd shadowing.
+
+    ``-m`` puts the child's cwd first on ``sys.path``: a cwd that IS an
+    omnigent checkout replaces the installed package wholesale (version
+    skew), and one merely containing a checkout binds a namespace decoy.
+    ``-P`` drops that entry; pair it with :func:`pin_import_root_env` so
+    the child resolves the parent's own package instead — including from
+    an uninstalled source checkout.
+
+    :param module: Dotted module to run, e.g. ``"omnigent.runner._entry"``.
+    :param python: Interpreter to spawn; ``None`` uses ``sys.executable``.
+    :returns: argv prefix, e.g. ``["/opt/py", "-P", "-m", "omnigent.runner._entry"]``.
+    """
+    return [python or sys.executable, "-P", "-m", module]
+
+
+def pin_import_root_env(env: MutableMapping[str, str]) -> None:
+    """Prepend this process's package root to ``env["PYTHONPATH"]``.
+
+    Counterpart of :func:`pinned_module_argv`: with cwd off the child's
+    ``sys.path``, this pin is what makes the child import the same
+    ``omnigent`` its parent runs. Existing entries are kept after it.
+
+    :param env: Child environment to mutate before spawn.
+    :returns: None.
+    """
+    root = omnigent_import_root()
+    rest = [p for p in env.get("PYTHONPATH", "").split(os.pathsep) if p and p != root]
+    env["PYTHONPATH"] = os.pathsep.join([root, *rest])
+
+
+def scrub_import_root_env() -> None:
+    """Drop this process's package root from ``os.environ["PYTHONPATH"]``.
+
+    Entry-point counterpart of :func:`pin_import_root_env`: the interpreter
+    consumed the pin into ``sys.path`` at startup, and leaving it in the
+    inheritable environment would leak into user-facing children (tmux
+    panes, agent CLIs, user shells). Spawn sites re-pin explicitly.
+
+    :returns: None.
+    """
+    rest = [
+        p
+        for p in os.environ.get("PYTHONPATH", "").split(os.pathsep)
+        if p and p != omnigent_import_root()
+    ]
+    if rest:
+        os.environ["PYTHONPATH"] = os.pathsep.join(rest)
+    else:
+        os.environ.pop("PYTHONPATH", None)
 
 
 def spawn_kwargs() -> SpawnKwargs:

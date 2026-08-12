@@ -3441,14 +3441,15 @@ def _start_local_server(
         _spec = load_spec(agent_path)
         if _spec.executor.profile:
             child_env["DATABRICKS_CONFIG_PROFILE"] = _spec.executor.profile
+    # Paired with the -P argv below: the dev server must import this
+    # process's omnigent even when launched from a foreign checkout cwd.
+    _proc.pin_import_root_env(child_env)
 
     try:
         with child_logging_popen_kwargs(child_env) as logging_kwargs:
             server_proc: subprocess.Popen[bytes] = subprocess.Popen(
                 [
-                    sys.executable,
-                    "-m",
-                    "omnigent.cli",
+                    *_proc.pinned_module_argv("omnigent.cli"),
                     "server",
                     "--host",
                     "127.0.0.1",

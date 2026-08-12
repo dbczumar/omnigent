@@ -27,7 +27,6 @@ import secrets
 import shutil
 import signal
 import socket
-import sys
 import tempfile
 import time
 import uuid
@@ -1229,6 +1228,9 @@ class HarnessProcessManager:
         :param effective_env: The harness subprocess environment.
         :returns: The process handle (real ``Process`` or ``ZygoteHarnessProc``).
         """
+        # Pin the child's omnigent resolution (paired with -P below): harness
+        # workers run in the workspace, which may itself be an omnigent checkout.
+        _proc.pin_import_root_env(effective_env)
         zygote = self._harness_zygote
         if zygote is not None and not self._harness_zygote_disabled:
             try:
@@ -1239,9 +1241,7 @@ class HarnessProcessManager:
                 )
                 self._harness_zygote_disabled = True
         return await asyncio.create_subprocess_exec(
-            sys.executable,
-            "-m",
-            "omnigent.runtime.harnesses._runner",
+            *_proc.pinned_module_argv("omnigent.runtime.harnesses._runner"),
             *runner_argv,
             stdout=None,
             stderr=None,

@@ -683,6 +683,10 @@ def _build_runner_env(
     # MALLOC_ARENA_MAX. setdefault so an operator override still wins.
     for key, value in _proc.malloc_tuning_env().items():
         env.setdefault(key, value)
+    # Runners exec with cwd=workspace and ``-m`` puts cwd on sys.path, so a
+    # workspace that is an omnigent checkout would shadow the install
+    # wholesale; pin resolution to this process's own package instead.
+    _proc.pin_import_root_env(env)
     return env
 
 
@@ -1457,7 +1461,7 @@ class HostProcess:
 
             with child_logging_popen_kwargs(env) as logging_kwargs:
                 proc = subprocess.Popen(
-                    [sys.executable, "-m", "omnigent.runner._entry"],
+                    _proc.pinned_module_argv("omnigent.runner._entry"),
                     env=env,
                     # A daemon may outlive the checkout it started from.
                     cwd=str(workspace),

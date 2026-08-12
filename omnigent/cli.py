@@ -3005,10 +3005,10 @@ def _ensure_host_daemon(server_url: str | None) -> bool:
 
     _HOST_PID_PATH.parent.mkdir(parents=True, exist_ok=True)
     mode_args = ["--local"] if not server_url else ["--server", server_url]
-    args = [sys.executable, "-m", "omnigent.host._daemon_entry", *mode_args]
-    spawned = _spawn_host_daemon_process(
-        args=args, env=_build_host_daemon_env(server_url=server_url)
-    )
+    args = [*_proc.pinned_module_argv("omnigent.host._daemon_entry"), *mode_args]
+    env = _build_host_daemon_env(server_url=server_url)
+    _proc.pin_import_root_env(env)
+    spawned = _spawn_host_daemon_process(args=args, env=env)
     if spawned is None:
         return False
     _persist_spawned_daemon(
@@ -3418,6 +3418,8 @@ def _start_cli_runner_process(
     # an explicit operator export in the parent env still wins.
     for _k, _v in _proc.malloc_tuning_env().items():
         env.setdefault(_k, _v)
+    # Paired with the -P argv below: keep the runner immune to cwd shadowing.
+    _proc.pin_import_root_env(env)
 
     log_path: Path | None = None
     log_fh: BinaryIO | None = None
@@ -3427,7 +3429,7 @@ def _start_cli_runner_process(
     try:
         with child_logging_popen_kwargs(env) as logging_kwargs:
             runner_proc: subprocess.Popen[bytes] = subprocess.Popen(
-                [sys.executable, "-m", "omnigent.runner._entry"],
+                _proc.pinned_module_argv("omnigent.runner._entry"),
                 env=env,
                 stdout=log_fh,
                 stderr=log_fh,
