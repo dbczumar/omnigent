@@ -761,19 +761,24 @@ def test_claude_native_model_options_follow_managed_claude_catalog(
     ]
 
 
-def test_unpinned_family_alias_resolves_to_the_provider_default_model(
+def test_unpinned_family_alias_is_never_swapped_for_the_provider_default(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A tier alias with no env pin cannot reach the gateway as a canonical id."""
+    """Picking an alias never silently runs a different model.
+
+    The old degrade swapped an unpinned family alias for the provider's
+    default model on a gateway endpoint — a Fable pick landed on Opus with
+    no error. Picker rows are pin-backed or probe-vouched now, so the alias
+    passes through; an out-of-band unpinned pick fails visibly at inference
+    instead of silently running the default.
+    """
     monkeypatch.setattr(claude_native, "_CLAUDE_CODE_MANAGED_SETTINGS_PATHS", ())
     config = claude_native.ClaudeNativeUcodeConfig(
         env={"ANTHROPIC_BASE_URL": "https://example.databricks.com/ai-gateway/anthropic"},
         model="databricks-claude-sonnet-4-5",
     )
-    assert (
-        claude_native.resolve_claude_native_model_selection("opus", config)
-        == "databricks-claude-sonnet-4-5"
-    )
+    assert claude_native.resolve_claude_native_model_selection("fable", config) == "fable"
+    assert claude_native.resolve_claude_native_model_selection("opus", config) == "opus"
 
 
 def test_unpinned_family_alias_passes_through_on_the_anthropic_api() -> None:
@@ -7676,6 +7681,62 @@ async def test_probe_claude_model_options_resolves_each_alias_via_the_harness(
         },
         {"id": "opus[1m]", "model": "claude-opus-5[1m]", "displayName": "Opus 5 (1M context)"},
     ]
+
+
+async def test_claude_model_options_with_probe_drops_unservable_rows_on_gateways(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A gateway union offers only rows the endpoint can serve.
+
+    The probe resolves each alias under the launch env: a pinned family
+    lands on the endpoint's own spelling and stays, while an unpinned
+    family resolves to a bare canonical Anthropic id the gateway would
+    reject at inference — offering that row invites a pick that cannot
+    work. A canonical endpoint (bare login) keeps every probed row.
+    """
+    probe_rows = [
+        {"id": "sonnet", "model": "databricks-claude-sonnet-5", "displayName": "Sonnet 5"},
+        {"id": "fable", "model": "claude-fable-5", "displayName": "Fable 5"},
+        {
+            "id": "sonnet[1m]",
+            "model": "databricks-claude-sonnet-5[1m]",
+            "displayName": "Sonnet 5 (1M context)",
+        },
+        {"id": "fable[1m]", "model": "claude-fable-5[1m]", "displayName": "Fable 5 (1M context)"},
+    ]
+
+    async def _fake_probe(
+        claude_config: claude_native.ClaudeNativeUcodeConfig | None,
+    ) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+        del claude_config
+        return [dict(row) for row in probe_rows], []
+
+    monkeypatch.setattr(claude_native, "probe_claude_model_options", _fake_probe)
+    monkeypatch.setattr(
+        claude_native,
+        "claude_native_model_options",
+        lambda config: [
+            {
+                "id": "sonnet",
+                "model": "databricks-claude-sonnet-5",
+                "displayName": "Sonnet 5",
+                "isDefault": True,
+            }
+        ],
+    )
+    gateway_config = claude_native.ClaudeNativeUcodeConfig(
+        env={
+            "ANTHROPIC_BASE_URL": "https://example.databricks.com/ai-gateway/anthropic",
+            "ANTHROPIC_DEFAULT_SONNET_MODEL": "databricks-claude-sonnet-5",
+        },
+        model="databricks-claude-sonnet-5",
+    )
+
+    merged, _gateway_rows = await claude_native.claude_model_options_with_probe(gateway_config)
+    assert [row["id"] for row in merged] == ["sonnet", "sonnet[1m]"]
+
+    merged_bare, _ = await claude_native.claude_model_options_with_probe(None)
+    assert [row["id"] for row in merged_bare] == [row["id"] for row in probe_rows]
 
 
 async def test_probe_claude_model_options_runs_the_harness_and_reads_artifact(

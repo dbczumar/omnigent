@@ -426,25 +426,18 @@ def resolve_claude_native_model_selection(
     Direct Claude logins have no provider config, so the pick degrades to
     the ``sonnet`` family alias, which Claude resolves itself.
 
-    On a gateway/Bedrock endpoint, a family alias with no tier pin (launch env
-    or managed settings) resolves to the provider's default model — Claude
-    Code would canonicalize it to an Anthropic id the endpoint rejects.
+    Every other pick passes through verbatim: picker rows are pin-backed or
+    vouched for by the harness's own probe, so rewriting one switches the
+    pane to a model nobody chose (an unpinned family alias used to degrade
+    to the provider's default model this way — a Fable pick landed on
+    Opus). An out-of-band unpinned alias on a gateway endpoint now fails
+    visibly at inference instead of silently running the default.
 
     :param model: Persisted picker id, built-in alias, or concrete model id.
     :param claude_config: Resolved provider config for the terminal.
     :returns: A model identifier suitable for ``--model`` or ``/model``.
     """
     if model != _UCODE_CLAUDE_CUSTOM_TIER:
-        tier_env = _UCODE_CLAUDE_TIER_TO_ENV.get(model or "")
-        if (
-            tier_env is not None
-            and claude_config is not None
-            and not claude_config.env.get(tier_env)
-            and not _serves_canonical_anthropic_ids(claude_config)
-        ):
-            managed = _managed_claude_model_config()
-            if managed is None or not managed.env.get(tier_env):
-                return claude_config.model or model
         return model
     if claude_config is not None:
         custom_model = claude_config.env.get(_ANTHROPIC_CUSTOM_MODEL_OPTION_ENV)
@@ -1042,6 +1035,14 @@ async def claude_model_options_with_probe(
     if probe is None:
         return configured, []
     alias_rows, gateway_rows = probe
+    if claude_config is not None and not _serves_canonical_anthropic_ids(claude_config):
+        # The endpoint routes its own ids only. A pinned family resolves to
+        # the endpoint's spelling and stays; an unpinned alias resolves to a
+        # bare canonical Anthropic id the endpoint would reject at inference,
+        # so offering that row invites a pick that cannot work.
+        alias_rows = [
+            row for row in alias_rows if not str(row.get("model", "")).startswith("claude-")
+        ]
     merged = list(configured) if claude_config is not None else []
     seen = {row.get("id") for row in merged} | {row.get("model") for row in merged}
     for row in (*alias_rows, *gateway_rows):

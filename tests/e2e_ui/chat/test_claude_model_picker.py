@@ -704,6 +704,80 @@ def test_claude_model_label_never_claims_a_version_the_catalog_didnt_give(
     _screenshot(page, "one-m-label-settled")
 
 
+def test_union_catalog_pick_patches_the_row_id_verbatim(
+    page: Page,
+    seeded_session: tuple[str, str],
+) -> None:
+    """Picking a probe-contributed row saves exactly that row's id.
+
+    A gateway session's catalog is the configured∪probe union: pinned
+    family rows carrying gateway model ids next to probe rows like
+    ``sonnet[1m]``. Picking the probe row must PATCH its id verbatim —
+    the id is the launch contract the runner types into the pane, so any
+    client-side rewrite here switches the session to a model the user
+    did not choose (the bug this guards showed a Fable pick landing on
+    Opus; the web layer was innocent, and must stay that way).
+
+    :param page: Playwright page fixture.
+    :param seeded_session: ``(base_url, session_id)`` for a real
+        server-backed session; the browser snapshot is patched to a
+        claude-native shape with the union catalog.
+    :returns: None.
+    """
+    base_url, session_id = seeded_session
+    union_catalog = [
+        {
+            "id": "opus",
+            "model": "databricks-claude-opus-5",
+            "displayName": "Opus 5",
+            "isDefault": True,
+        },
+        {
+            "id": "sonnet",
+            "model": "databricks-claude-sonnet-5",
+            "displayName": "Sonnet 5",
+            "isDefault": False,
+        },
+        {
+            "id": "sonnet[1m]",
+            "model": "databricks-claude-sonnet-5[1m]",
+            "displayName": "Sonnet 5 (1M context)",
+        },
+    ]
+    # No fixture-pinned model_override: the route fake would force it back
+    # onto every response, including the PATCH echo the store adopts. The
+    # bound ``llm_model`` already implicitly selects the sonnet row.
+    patch_bodies = _patch_session_as_claude_native(
+        page,
+        session_id,
+        model_options=union_catalog,
+        llm_model="databricks-claude-sonnet-5",
+    )
+
+    page.goto(f"{base_url}/c/{session_id}")
+
+    gear = page.get_by_test_id("composer-config-gear")
+    expect(gear).to_be_visible(timeout=15_000)
+    gear.click()
+    page.get_by_test_id("composer-config-model").click()
+    bracket_row = page.locator('[role="option"][data-model-id="sonnet[1m]"]')
+    expect(bracket_row).to_contain_text("Sonnet 5 (1M context)")
+    bracket_row.click()
+    with page.expect_response(
+        lambda response: (
+            response.request.method == "PATCH"
+            and urlparse(response.url).path == f"/v1/sessions/{session_id}"
+            and response.status == 200
+        )
+    ):
+        page.get_by_test_id("composer-config-save").click()
+
+    assert patch_bodies[-1] == {"model_override": "sonnet[1m]"}
+    expect(page.get_by_test_id("composer-model-effort-label")).to_contain_text(
+        "Sonnet 5 (1M context)"
+    )
+
+
 def test_claude_native_picker_prefers_session_override_over_sticky_model(
     page: Page,
     seeded_session: tuple[str, str],
