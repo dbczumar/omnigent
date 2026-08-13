@@ -209,3 +209,8 @@ def test_answered_question_stays_outside_the_worked_fold(
     expect(page.locator(_WORKED_FOLD)).to_have_count(2, timeout=_TURN_TIMEOUT_MS)
     expect(answered).to_be_visible()
     expect(page.locator(f"{_WORKED_FOLD} {_APPROVAL_CARD}")).to_have_count(0)
+
+    # The card reads as a settled answer, not a still-open request: it shows
+    # what was chosen, without the pending-tense "wants to call" ask.
+    expect(answered).to_contain_text(_OPTION_ONE)
+    expect(answered).not_to_contain_text("wants to call")
