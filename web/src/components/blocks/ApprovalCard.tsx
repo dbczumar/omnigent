@@ -48,6 +48,7 @@ import {
   castAskUserQuestionPayload,
   parseAskUserQuestionPreview,
 } from "@/lib/askUserQuestion";
+import { isNativePolicyName, nativeCodingAgentForPolicyName } from "@/lib/nativeCodingAgents";
 import { formatPreview } from "@/lib/previewFormat";
 import type { RenderItem } from "@/lib/renderItems";
 import type { RememberScope } from "@/lib/types";
@@ -73,20 +74,6 @@ function extractOptionLabels(schema: Record<string, unknown>): string[] {
   if (!Array.isArray(enumValues)) return [];
   return enumValues.filter((v): v is string => typeof v === "string" && v.length > 0);
 }
-
-// Native-harness bridges stamp a synthetic `policy_name` such as
-// "claude_native_permission" — provenance, not a user-authored policy. Show
-// the harness product name for those; real policy names render verbatim so
-// users can tell which of their policies asked. The ids originate in
-// `omnigent/server/routes/sessions/routes_hooks.py` (Claude, Cursor) and
-// `routes/_codex_elicitation.py` / `_antigravity_elicitation.py`; a renamed
-// prefix degrades to rendering the raw id, never to a wrong product name.
-const NATIVE_POLICY_LABELS: readonly (readonly [prefix: string, label: string])[] = [
-  ["claude_native_", "Claude Code"],
-  ["codex_native_", "Codex"],
-  ["cursor_native_", "Cursor"],
-  ["agy_native_", "Antigravity"],
-];
 
 /**
  * Verdict submitter — same signature as `chatStore.submitApproval`.
@@ -259,15 +246,18 @@ export function ApprovalCard({
   // external MCP server, etc.) — show a link. Our own /approve/...
   // paths are handled inline with approve/reject buttons.
   const isExternalUrl = typeof url === "string" && url.length > 0 && !url.startsWith("/approve/");
-  const nativeHarnessLabel =
-    NATIVE_POLICY_LABELS.find(([prefix]) => policyName.startsWith(prefix))?.[1] ?? null;
-  // What the header's "· <tag>" slot shows: the friendly harness name
-  // for native prompts, the policy's own name for policy asks.
-  const policyLabel = nativeHarnessLabel ?? policyName;
+  // What the header's "· <tag>" slot shows. Native bridges stamp a synthetic
+  // `policy_name` (provenance, not a policy anyone wrote), so name the product
+  // that asked — and show nothing when the stamp names no vendor. A real policy
+  // name renders verbatim so users can tell which of their policies asked.
+  const isNativePolicy = isNativePolicyName(policyName);
+  const policyLabel = isNativePolicy
+    ? (nativeCodingAgentForPolicyName(policyName)?.displayName ?? "")
+    : policyName;
   // Native prompts also stamp a constant, internal-sounding phase
   // ("pre_tool_use", "codex_command_approval", ...). It carries no
   // information the card doesn't already show, so hide it for them.
-  const showPhase = phase !== "" && nativeHarnessLabel === null;
+  const showPhase = phase !== "" && !isNativePolicy;
   const askUserQuestionTitle =
     policyName.startsWith("agy_") || phase.startsWith("agy_")
       ? "Antigravity needs your input"

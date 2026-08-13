@@ -54,6 +54,49 @@ describe("ApprovalCard — binary approve/reject", () => {
     expect(screen.queryByText(/claude_native_permission/)).toBeNull();
   });
 
+  it("names every native vendor, and shows no tag when the stamp names none", () => {
+    // The prefix table is derived from NATIVE_CODING_AGENTS, so vendors that
+    // stamp `<key>_native_permission` are covered without a per-vendor entry.
+    for (const [policyName, displayName] of [
+      ["kiro_native_permission", "Kiro"],
+      ["qwen_native_permission", "Qwen Code"],
+      ["agy_native_permission", "Antigravity"],
+    ]) {
+      render(
+        <ApprovalCard
+          elicitationId="elic_vendor"
+          message="Agent wants approval to run a tool"
+          phase="pre_tool_use"
+          policyName={policyName}
+          contentPreview=""
+          requestedSchema={{}}
+          status="pending"
+          response={null}
+        />,
+      );
+      expect(screen.getByText(new RegExp(displayName))).toBeDefined();
+      expect(screen.queryByText(new RegExp(policyName))).toBeNull();
+      cleanup();
+    }
+
+    // The generic hook's vendor-less fallback: still provenance, so the tag
+    // slot stays empty rather than printing "native_permission".
+    render(
+      <ApprovalCard
+        elicitationId="elic_vendorless"
+        message="Agent wants approval to run a tool"
+        phase="pre_tool_use"
+        policyName="native_permission"
+        contentPreview=""
+        requestedSchema={{}}
+        status="pending"
+        response={null}
+      />,
+    );
+    expect(screen.queryByText(/native_permission/)).toBeNull();
+    expect(screen.queryByText(/pre_tool_use/)).toBeNull();
+  });
+
   it("keeps user-authored policy names and phase verbatim", () => {
     // Policy asks are gated by a policy the user wrote — its name and
     // phase tell them which rule fired, so no prettifying.
