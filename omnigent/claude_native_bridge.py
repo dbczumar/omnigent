@@ -4096,13 +4096,6 @@ def _handler_factory(
 _POLICY_PROXY_ERROR_DETAIL_MAX = 400
 
 
-# How long the relay may answer policy evaluations from cache after the
-# server declared the session wholly ungoverned ("governed": false). Bounds
-# the enforcement-attach delay for policies added outside the relay's view;
-# a sys_add_policy call through this relay clears the cache instantly.
-_UNGOVERNED_ALLOW_CACHE_TTL_S = 30.0
-
-
 def _tool_relay_handler_factory(
     token: str,
     tool_executor: ToolExecutor,
@@ -4124,12 +4117,6 @@ def _tool_relay_handler_factory(
     :param session_id: Session id for the ``/policies/evaluate`` path.
     :returns: A concrete :class:`BaseHTTPRequestHandler` subclass.
     """
-
-    # Ungoverned-session verdict cache, shared across handler threads. A
-    # ~0.5-1.3s server round trip twice per tool call is what made typing
-    # during agentic turns stutter on sessions with no policies at all.
-    ungoverned_state = {"until": 0.0}
-    ungoverned_lock = threading.Lock()
 
     class _ToolRelayHandler(BaseHTTPRequestHandler):
         """HTTP handler for active Omnigent tool relay calls."""
@@ -4176,11 +4163,6 @@ def _tool_relay_handler_factory(
             if not isinstance(name, str) or not name:
                 self._send_json(_mcp_error("tool relay request missing name"))
                 return
-            if name == "sys_add_policy":
-                # A policy is being installed: the ungoverned verdict is
-                # about to go stale, so stop serving cached ALLOWs now.
-                with ungoverned_lock:
-                    ungoverned_state["until"] = 0.0
             if not isinstance(arguments, dict):
                 arguments = {}
             self._send_json(_run_relay_tool(tool_executor, loop, name, arguments))
@@ -4203,10 +4185,11 @@ def _tool_relay_handler_factory(
             """Serve one Claude policy hook event end to end.
 
             The hook subprocess is a bare curl: this endpoint does the
-            payload→EvaluationRequest transform, the (cached) verdict, and
-            the EvaluationResponse→hook-output transform, so the blocking
-            hook path pays no interpreter spawn. Responses are always 200;
-            enforcement failures are expressed as fail-closed hook output.
+            payload→EvaluationRequest transform, the upstream evaluate
+            call, and the EvaluationResponse→hook-output transform, so the
+            blocking hook path pays no interpreter spawn. Responses are
+            always 200; enforcement failures are expressed as fail-closed
+            hook output.
             """
             # Heavy policy imports stay off this module's import path (hook
             # subprocesses import it); the relay runs inside the runner
@@ -4232,11 +4215,6 @@ def _tool_relay_handler_factory(
                 status_model = read_claude_status_model(bridge_dir)
                 if status_model:
                     context["model"] = status_model
-            with ungoverned_lock:
-                cached = time.monotonic() < ungoverned_state["until"]
-            if cached:
-                self._respond_hook_output(None)
-                return
             # Stable re-attach id: a retried long-poll reattaches to the
             # same parked ASK instead of raising a second approval card.
             request_body = {
@@ -4267,11 +4245,6 @@ def _tool_relay_handler_factory(
                 except (ValueError, TypeError):
                     last_error = "malformed EvaluationResponse body"
                 break
-            with ungoverned_lock:
-                if isinstance(verdict, dict) and verdict.get("governed") is False:
-                    ungoverned_state["until"] = time.monotonic() + _UNGOVERNED_ALLOW_CACHE_TTL_S
-                else:
-                    ungoverned_state["until"] = 0.0
             if not isinstance(verdict, dict) or not verdict.get("result"):
                 self._respond_hook_output(fail_closed_hook_output(hook_event, last_error))
                 return
@@ -4280,20 +4253,6 @@ def _tool_relay_handler_factory(
         def _handle_policy_evaluate(self, payload: _JsonObject) -> None:
             if policy_client is None or session_id is None:
                 self.send_error(HTTPStatus.SERVICE_UNAVAILABLE)
-                return
-            with ungoverned_lock:
-                cached = time.monotonic() < ungoverned_state["until"]
-            if cached:
-                # The server recently declared this session wholly
-                # ungoverned; answer the engine's default verdict without
-                # the round trip.
-                body = json.dumps({"result": "POLICY_ACTION_ALLOW", "governed": False})
-                raw = body.encode("utf-8")
-                self.send_response(HTTPStatus.OK)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Content-Length", str(len(raw)))
-                self.end_headers()
-                self.wfile.write(raw)
                 return
             import urllib.parse as _up
 
@@ -4306,20 +4265,6 @@ def _tool_relay_handler_factory(
                 self._send_policy_proxy_error(exc)
                 return
             raw = resp.content
-            if resp.status_code == HTTPStatus.OK:
-                try:
-                    verdict = json.loads(raw)
-                except (ValueError, TypeError):
-                    verdict = None
-                with ungoverned_lock:
-                    if isinstance(verdict, dict) and verdict.get("governed") is False:
-                        ungoverned_state["until"] = (
-                            time.monotonic() + _UNGOVERNED_ALLOW_CACHE_TTL_S
-                        )
-                    else:
-                        # Governed (or unrecognized) response: never serve
-                        # stale ungoverned ALLOWs past this point.
-                        ungoverned_state["until"] = 0.0
             self.send_response(resp.status_code)
             for header in ("Content-Type", "Content-Length"):
                 val = resp.headers.get(header)

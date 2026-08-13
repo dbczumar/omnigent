@@ -759,12 +759,8 @@ def register_hooks_routes(
             phase=phase,
             tool_name=data.get("name") if isinstance(data, dict) else None,
         ):
-            # "governed": false marks the session as having no policies at
-            # all — any_policies_apply's False is session-scoped (its only
-            # phase-scoped rule forces True) — so loopback relays may cache
-            # this ALLOW briefly instead of paying a round trip per event.
             return Response(
-                content=json.dumps({"result": "POLICY_ACTION_ALLOW", "governed": False}),
+                content=json.dumps({"result": "POLICY_ACTION_ALLOW"}),
                 media_type="application/json",
             )
 

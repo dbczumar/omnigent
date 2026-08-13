@@ -7428,202 +7428,6 @@ def test_claude_pane_ready_is_false_without_an_advertised_pane(tmp_path: Path) -
     assert claude_native_bridge.claude_pane_ready(tmp_path / "nope") is False
 
 
-class _CountingPolicyClient:
-    """Fake runner policy client: counts upstream evaluate POSTs.
-
-    :param body: JSON body every upstream response carries.
-    """
-
-    def __init__(self, body: dict[str, object]) -> None:
-        """Store the scripted response body.
-
-        :param body: JSON-serializable response payload.
-        """
-        self.body = body
-        self.calls = 0
-
-    async def post(self, url: str, json: dict[str, object] | None = None) -> SimpleNamespace:
-        """Record one upstream evaluate call and return the scripted verdict.
-
-        :param url: Evaluate path the relay targets (ignored).
-        :param json: Forwarded EvaluationRequest payload (ignored).
-        :returns: Minimal httpx-Response-shaped namespace.
-        """
-        import json as _json
-
-        del url, json
-        self.calls += 1
-        raw = _json.dumps(self.body).encode("utf-8")
-        return SimpleNamespace(
-            status_code=200,
-            content=raw,
-            headers={"Content-Type": "application/json"},
-        )
-
-
-def _relay_request(bridge_dir: Path, path: str, payload: dict[str, object]) -> dict[str, object]:
-    """POST one JSON payload to the live relay and return the parsed body.
-
-    :param bridge_dir: Bridge dir whose ``tool_relay.json`` names the relay.
-    :param path: Relay path, e.g. ``"/policies/evaluate"``.
-    :param payload: JSON body to send.
-    :returns: Parsed JSON response.
-    """
-    import urllib.request
-
-    info = json.loads((bridge_dir / claude_native_bridge._TOOL_RELAY_FILE).read_text("utf-8"))
-    req = urllib.request.Request(
-        info["url"].rstrip("/") + path,
-        data=json.dumps(payload).encode("utf-8"),
-        headers={
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {info['token']}",
-        },
-    )
-    with urllib.request.urlopen(req, timeout=10) as resp:
-        return json.loads(resp.read())
-
-
-_EVALUATE_PAYLOAD: dict[str, object] = {
-    "event": {
-        "type": "PHASE_TOOL_CALL",
-        "target": "",
-        "data": {"name": "Bash", "arguments": {"command": "true"}},
-        "context": {},
-    }
-}
-
-
-def _ungoverned_relay(tmp_path, monkeypatch, body):
-    """Boot a relay with a counting fake policy client.
-
-    :param tmp_path: Test temp dir for the bridge root.
-    :param monkeypatch: Pytest monkeypatch fixture.
-    :param body: Upstream evaluate response body to script.
-    :returns: ``(relay, bridge_dir, fake_client)``.
-    """
-    from omnigent import pi_native_bridge
-
-    monkeypatch.setattr("omnigent.pi_native_bridge._BRIDGE_ROOT", tmp_path / "pi-native")
-    bridge_dir = pi_native_bridge.prepare_bridge_dir("conv_policy_cache")
-
-    async def _executor(name: str, arguments: dict[str, object]) -> dict[str, object]:
-        """Accept any relayed tool call."""
-        del name, arguments
-        return {}
-
-    fake = _CountingPolicyClient(body)
-    relay = claude_native_bridge.start_tool_relay(
-        bridge_dir=bridge_dir,
-        tools=[],
-        tool_executor=_executor,
-        loop=asyncio.get_running_loop(),
-        policy_client=fake,  # type: ignore[arg-type]
-        session_id="conv_policy_cache",
-    )
-    return relay, bridge_dir, fake
-
-
-@pytest.mark.asyncio
-async def test_relay_caches_ungoverned_policy_verdict(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """An ungoverned verdict is served from cache — one upstream trip, not N.
-
-    The server round trip cost ~0.5-1.3s and fired twice per tool call
-    on sessions with no policies at all; the cached ALLOW is what makes
-    typing during agentic turns match vanilla Claude.
-    """
-    relay, bridge_dir, fake = _ungoverned_relay(
-        tmp_path, monkeypatch, {"result": "POLICY_ACTION_ALLOW", "governed": False}
-    )
-    try:
-        for _ in range(3):
-            body = await asyncio.to_thread(
-                _relay_request, bridge_dir, "/policies/evaluate", _EVALUATE_PAYLOAD
-            )
-            assert body["result"] == "POLICY_ACTION_ALLOW"
-        assert fake.calls == 1, f"expected one upstream evaluate, saw {fake.calls}"
-    finally:
-        relay.close()
-
-
-@pytest.mark.asyncio
-async def test_relay_never_caches_governed_allow(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A governed ALLOW (no ``governed: false``) hits the server every time.
-
-    Policies are content-dependent — caching a governed allow would skip
-    a DENY the next event deserves.
-    """
-    relay, bridge_dir, fake = _ungoverned_relay(
-        tmp_path, monkeypatch, {"result": "POLICY_ACTION_ALLOW"}
-    )
-    try:
-        for _ in range(3):
-            await asyncio.to_thread(
-                _relay_request, bridge_dir, "/policies/evaluate", _EVALUATE_PAYLOAD
-            )
-        assert fake.calls == 3, f"governed allows must not cache; saw {fake.calls} calls"
-    finally:
-        relay.close()
-
-
-@pytest.mark.asyncio
-async def test_sys_add_policy_call_clears_ungoverned_cache(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Installing a policy through the relay drops the cached verdict at once.
-
-    ``sys_add_policy`` rides this same relay's ``/tool`` path, so the
-    one mutation an agent can perform mid-session re-engages real
-    evaluation with zero staleness.
-    """
-    relay, bridge_dir, fake = _ungoverned_relay(
-        tmp_path, monkeypatch, {"result": "POLICY_ACTION_ALLOW", "governed": False}
-    )
-    try:
-        await asyncio.to_thread(
-            _relay_request, bridge_dir, "/policies/evaluate", _EVALUATE_PAYLOAD
-        )
-        await asyncio.to_thread(
-            _relay_request, bridge_dir, "/policies/evaluate", _EVALUATE_PAYLOAD
-        )
-        assert fake.calls == 1
-        await asyncio.to_thread(
-            _relay_request, bridge_dir, "/tool", {"name": "sys_add_policy", "arguments": {}}
-        )
-        await asyncio.to_thread(
-            _relay_request, bridge_dir, "/policies/evaluate", _EVALUATE_PAYLOAD
-        )
-        assert fake.calls == 2, "sys_add_policy must invalidate the cached verdict"
-    finally:
-        relay.close()
-
-
-@pytest.mark.asyncio
-async def test_ungoverned_cache_expires_after_ttl(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The cached verdict re-validates after the TTL, bounding staleness."""
-    monkeypatch.setattr("omnigent.claude_native_bridge._UNGOVERNED_ALLOW_CACHE_TTL_S", 0.05)
-    relay, bridge_dir, fake = _ungoverned_relay(
-        tmp_path, monkeypatch, {"result": "POLICY_ACTION_ALLOW", "governed": False}
-    )
-    try:
-        await asyncio.to_thread(
-            _relay_request, bridge_dir, "/policies/evaluate", _EVALUATE_PAYLOAD
-        )
-        time.sleep(0.15)
-        await asyncio.to_thread(
-            _relay_request, bridge_dir, "/policies/evaluate", _EVALUATE_PAYLOAD
-        )
-        assert fake.calls == 2, "expired cache must re-validate upstream"
-    finally:
-        relay.close()
-
-
 def test_message_display_shell_command_round_trips(tmp_path: Path) -> None:
     """The generated MessageDisplay shell appender feeds the deltas reader.
 
@@ -7781,16 +7585,16 @@ def _relay_request_raw(bridge_dir: Path, path: str, payload: dict[str, object]) 
 
 
 @pytest.mark.asyncio
-async def test_hook_evaluate_endpoint_allows_and_caches(
+async def test_hook_evaluate_endpoint_allows(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """An ungoverned verdict answers empty (no opinion) and caches.
+    """An ALLOW verdict answers empty (no opinion), evaluating every event.
 
     The endpoint owns the whole transform chain, so an ALLOW must reach
-    the curl hook as an empty body, and the second event must not pay
-    the upstream trip.
+    the curl hook as an empty body — and every event must consult the
+    server, since verdicts are content-dependent and nothing is cached.
     """
-    client = _ScriptedPolicyClient({"result": "POLICY_ACTION_ALLOW", "governed": False})
+    client = _ScriptedPolicyClient({"result": "POLICY_ACTION_ALLOW"})
     relay, bridge_dir = _hook_relay(tmp_path, monkeypatch, client)
     try:
         for _ in range(2):
@@ -7801,7 +7605,7 @@ async def test_hook_evaluate_endpoint_allows_and_caches(
                 _PRE_TOOL_USE_PAYLOAD,
             )
             assert body == "", f"allow must be empty hook output, got {body!r}"
-        assert client.calls == 1, f"second event must be cache-served, saw {client.calls}"
+        assert client.calls == 2, f"every event must evaluate upstream, saw {client.calls}"
         # The relay wrote the shell-sourceable env file the curl hooks use.
         env_text = (bridge_dir / claude_native_bridge._TOOL_RELAY_ENV_FILE).read_text("utf-8")
         assert "OMNIGENT_RELAY_URL=" in env_text and "OMNIGENT_RELAY_TOKEN=" in env_text
