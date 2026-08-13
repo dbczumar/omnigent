@@ -604,6 +604,35 @@ async def test_codex_native_model_options_query_model_list(
     codex_home.mkdir()
     if config_model is not None:
         (codex_home / "config.toml").write_text(f'model = "{config_model}"\n')
+
+    async def _fake_auto_create_codex(
+        session_id: str,
+        resource_registry: Any,
+        publish_event: Any,
+        **kwargs: Any,
+    ) -> SessionResourceView:
+        """Stand in for the codex launch, leaving the seeded bridge dir alone."""
+        del resource_registry, publish_event, kwargs
+        return SessionResourceView(
+            id="terminal_codex_main",
+            type="terminal",
+            session_id=session_id,
+            name="codex:main",
+            metadata={"terminal_name": "codex", "session_key": "main", "running": True},
+        )
+
+    # Session create launches Codex for real, and that launch owns the bridge
+    # dir: it calls clear_bridge_state, and its forwarder task rewrites both
+    # the state and CODEX_HOME/config.toml after the response is returned. On
+    # a machine where Codex and a Databricks profile resolve, that wipes the
+    # state seeded below no matter which side of create seeds it. The endpoint
+    # under test stays real: it still reads bridge state and CODEX_HOME off
+    # disk and still queries Codex through the fake app-server client.
+    monkeypatch.setattr(
+        "omnigent.runner.native.orchestration._auto_create_codex_terminal",
+        _fake_auto_create_codex,
+    )
+
     codex_native_bridge.write_bridge_state(
         bridge_dir,
         codex_native_bridge.CodexNativeBridgeState(
