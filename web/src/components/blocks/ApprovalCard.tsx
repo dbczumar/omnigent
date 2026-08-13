@@ -74,11 +74,13 @@ function extractOptionLabels(schema: Record<string, unknown>): string[] {
   return enumValues.filter((v): v is string => typeof v === "string" && v.length > 0);
 }
 
-// Native-harness bridges (Claude Code PermissionRequest, Codex /
-// Cursor / Antigravity elicitations) stamp a synthetic `policy_name`
-// such as "claude_native_permission" — provenance, not a user-authored
-// policy. Show the harness product name for those; real policy names
-// render verbatim so users can tell which of their policies asked.
+// Native-harness bridges stamp a synthetic `policy_name` such as
+// "claude_native_permission" — provenance, not a user-authored policy. Show
+// the harness product name for those; real policy names render verbatim so
+// users can tell which of their policies asked. The ids originate in
+// `omnigent/server/routes/sessions/routes_hooks.py` (Claude, Cursor) and
+// `routes/_codex_elicitation.py` / `_antigravity_elicitation.py`; a renamed
+// prefix degrades to rendering the raw id, never to a wrong product name.
 const NATIVE_POLICY_LABELS: readonly (readonly [prefix: string, label: string])[] = [
   ["claude_native_", "Claude Code"],
   ["codex_native_", "Codex"],
