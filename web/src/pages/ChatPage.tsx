@@ -192,6 +192,8 @@ import {
   MODEL_SELECT_DEFAULT,
   MODEL_SELECT_SMART,
   RoutingModelSelect,
+  defaultModelLabel,
+  nativeModelLabel,
 } from "@/components/HarnessConfigControls";
 import { useServerInfo } from "@/lib/CapabilitiesContext";
 import type { ServerInfo } from "@/lib/capabilities";
@@ -6277,7 +6279,7 @@ function SessionConfigModal({
 
   const modelSelectOptions = useMemo(() => {
     const catalog = usesServerModelOptions
-      ? modelOptions.map((m) => ({ id: m.id, label: m.displayName ?? m.id }))
+      ? modelOptions.map((m) => ({ id: m.id, label: nativeModelLabel(m) }))
       : modelOptions.map((m) => ({ id: m.id, label: m.label ?? m.id }));
     // Smart Routing pins the router's fully-qualified pick
     // (``databricks-claude-opus-4-8``), which the harness catalog carries only
@@ -6312,6 +6314,11 @@ function SessionConfigModal({
                 offerSmartRouting={costRoutingEligible}
                 testId="composer-config-model"
                 models={modelSelectOptions}
+                // Codex's Default resolves to a model the spellings don't make
+                // obvious, so name it here exactly as the landing dialog does.
+                defaultLabel={
+                  modelPickerKind === "codex" ? defaultModelLabel(modelOptions) : undefined
+                }
                 activeModelId={draftModelId}
               />
             </ConfigRow>
@@ -6596,8 +6603,12 @@ function useResolvedComposerModel(
     modelPickerKind === "kiro" ||
     modelPickerKind === "pi" ||
     modelPickerKind === "opencode";
-  const modelOptions: readonly { id: string; label?: string; displayName?: string }[] =
-    usesServerModelOptions ? codexModelOptions : [];
+  const modelOptions: readonly {
+    id: string;
+    label?: string;
+    displayName?: string;
+    isDefault?: boolean;
+  }[] = usesServerModelOptions ? codexModelOptions : [];
   const isNativeModelPicker = modelPickerKind !== null;
 
   // qwen/goose/cursor/pi/opencode native wrappers pick their model inside
