@@ -1158,7 +1158,7 @@ def create_app(
         the app builds its own.
     :returns: A runner FastAPI app exposing the harness-contract subset.
     """
-    from omnigent.cli_auth import databricks_request_headers
+    from omnigent.cli_auth import open_server_client
     from omnigent.runner.app import create_runner_app
     from omnigent.runner.identity import (
         OMNIGENT_INTERNAL_WS_ORIGIN,
@@ -1198,7 +1198,6 @@ def create_app(
     # tunnel the runner opened to the Omnigent server at startup).
     # stdio_cwd=runner_workspace ensures relative command paths like
     # ".venv/bin/python" resolve against the user's project root.
-    from omnigent_client._http import is_loopback_url
 
     from omnigent.runner.mcp_manager import RunnerMcpManager
 
@@ -1207,24 +1206,20 @@ def create_app(
     if auth_token_factory is None:
         auth_token_factory = _make_auth_token_factory()
     binding_token = _runner_tunnel_binding_token_from_env()
-    server_client = httpx.AsyncClient(
-        base_url=server_url,
-        # A proxy cannot reach a loopback server, so local targets bypass it.
-        trust_env=not is_loopback_url(server_url),
+    server_client = open_server_client(
+        server_url,
         auth=_RunnerDatabricksAuth(auth_token_factory),
         # Announce the runner as a first-party non-browser client via the
         # sentinel Origin. The server's require_trusted_origin CSRF guard on
         # the multipart routes (POST /v1/sessions bundle create, file upload
         # — both reached from tool_dispatch over this client) requires a
         # trusted Origin; the runner sends none otherwise, so the sentinel is
-        # what lets sys_session_create / sys_upload_file through.
-        #
-        # The workspace-routing header (empty unless a ?o= selector was
-        # recorded for this server) routes these callbacks to the workspace.
+        # what lets sys_session_create / sys_upload_file through. The factory
+        # folds the routing/slice-key headers in on top; we pass only the
+        # runner's tunnel-binding token (when present) alongside the Origin.
         headers={
             "Origin": OMNIGENT_INTERNAL_WS_ORIGIN,
             **({RUNNER_TUNNEL_TOKEN_HEADER: binding_token} if binding_token is not None else {}),
-            **databricks_request_headers(server_url),
         },
         timeout=httpx.Timeout(5.0, read=None),
         # NOTE: ``follow_redirects`` deliberately stays False.
@@ -1235,6 +1230,7 @@ def create_app(
         # httpx walks the redirect chain inside the auth loop and
         # hands the auth flow only the terminal HTML login page,
         # defeating the retry. See ``_is_login_redirect_or_unauthorized``.
+        follow_redirects=False,
     )
 
     mcp_manager = RunnerMcpManager(
@@ -1735,6 +1731,29 @@ def _install_crash_logging() -> None:
     sys.excepthook = _log_uncaught
 
 
+def _maybe_prewarm_ambient_detection() -> None:
+    """Prewarm ambient provider detection for claude-native launches.
+
+    Terminal auto-create resolves the session's provider config, and on a
+    machine with no explicit provider that runs ambient detection — on macOS
+    a ``claude auth status`` subprocess (~0.6-0.9s) — inside the
+    user-visible "Starting up…" window. Starting the sweep at boot overlaps
+    it with tunnel connect and session init instead.
+
+    Gated on the launch-harness stamp the host injects (absent for CLI-local
+    runners and hosts that predate it), so other harnesses don't pay a
+    speculative subprocess on every launch.
+    """
+    from omnigent.harness_plugins import CLAUDE_NATIVE_CODING_AGENT
+    from omnigent.runner.identity import RUNNER_LAUNCH_HARNESS_ENV_VAR
+
+    if os.environ.get(RUNNER_LAUNCH_HARNESS_ENV_VAR) != CLAUDE_NATIVE_CODING_AGENT.harness:
+        return
+    from omnigent.onboarding.ambient import prewarm_detect_providers
+
+    prewarm_detect_providers()
+
+
 def main() -> None:
     """Console entry point for the runner tunnel process.
 
@@ -1742,8 +1761,16 @@ def main() -> None:
     """
     from omnigent.process_logging import configure_process_logging
 
+    # Spawned with -P, so the workspace is not on sys.path. Re-add it now that
+    # the real omnigent is imported (it can no longer be shadowed) so
+    # spec-declared local tools living in the workspace still import.
+    cwd = os.getcwd()
+    if cwd not in sys.path:
+        sys.path.insert(0, cwd)
+
     configure_process_logging("runner", force=True)
     _install_crash_logging()
+    _maybe_prewarm_ambient_detection()
     try:
         asyncio.run(_run_tunnel_from_env())
     except RuntimeError as exc:
