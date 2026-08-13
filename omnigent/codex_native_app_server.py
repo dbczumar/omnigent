@@ -31,6 +31,7 @@ if TYPE_CHECKING:
     from omnigent.onboarding.provider_config import ProviderEntry
     from omnigent.spec.types import AgentSpec
 
+from omnigent.codex_model_vocabulary import codex_spawn_model
 from omnigent.codex_native_bridge import write_policy_hook_config
 from omnigent.codex_native_process_registry import (
     CodexNativeProcessOwnerLock,
@@ -813,15 +814,19 @@ def _probe_codex_home(config_overrides: Sequence[str]) -> Path:
     return home
 
 
-def _mark_probe_default(rows: list[_JsonObject], pinned_model: str | None) -> list[_JsonObject]:
+def mark_launch_default(rows: list[_JsonObject], pinned_model: str | None) -> list[_JsonObject]:
     """
-    Reduce a probe's rows to exactly one ``isDefault`` marker.
+    Reduce ``model/list`` rows to exactly one ``isDefault`` marker.
 
     The launch-pinned model wins when a row names it (either spelling);
     otherwise Codex's own first default stands. Rows are otherwise verbatim.
 
+    Codex's own ``isDefault`` is its built-in preference, which says nothing
+    about the model this session launched on, so a picker that trusted it
+    would name a model the pane is not running.
+
     :param rows: Raw ``model/list`` rows.
-    :param pinned_model: The model the launch would pin, or ``None``.
+    :param pinned_model: The model the session runs, or ``None``.
     :returns: The rows with a single default marked.
     """
     from omnigent.codex_model_vocabulary import comparable_model_id
@@ -912,7 +917,7 @@ async def probe_codex_model_options(*, codex_path: str | None = None) -> list[_J
         except TimeoutError:
             _proc.kill_tree(process)
             await process.wait()
-    return _mark_probe_default(rows, pinned_model)
+    return mark_launch_default(rows, pinned_model)
 
 
 def _build_native_codex_app_server_argv(
@@ -1971,10 +1976,18 @@ def build_codex_native_server(
         )
     env = _clean_codex_env()
     config_overrides: list[str] = []
+    pinned_model = model
     if profile is not None:
         databricks = _databricks_launch_materialization(model=model, profile=profile)
         config_overrides.extend(databricks.config_overrides)
         env["DATABRICKS_HOST"] = databricks.host
+        # A launch that names no model still routes through the profile's
+        # resolved model via ``-c model=``, which outranks the config.toml
+        # copied from the user's shared home. Pin that model in codex's own
+        # spelling — the vocabulary config.toml and its readers use — so the
+        # forwarder mirror and cost gate report the model this session runs
+        # instead of whatever the shared file was last left on.
+        pinned_model = codex_spawn_model(databricks.model) or databricks.model
     if extra_config_overrides:
         config_overrides.extend(extra_config_overrides)
     if bypass_sandbox:
@@ -2000,7 +2013,7 @@ def build_codex_native_server(
         ap_server_url=ap_server_url,
         ap_auth_headers=ap_auth_headers,
         python_executable=python_executable,
-        pinned_model=model,
+        pinned_model=pinned_model,
         trust_project=trust_project,
     )
 

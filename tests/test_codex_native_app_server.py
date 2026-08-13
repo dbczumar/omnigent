@@ -532,6 +532,62 @@ def test_build_codex_native_server_bypass_emits_full_access_config(
     assert 'sandbox_mode="danger-full-access"' in app_server.config_overrides
 
 
+@pytest.mark.parametrize(
+    ("model", "expected_pin"),
+    [
+        pytest.param(None, "gpt-5.4-mini", id="default-launch"),
+        pytest.param("gpt-5.5", "gpt-5.5", id="explicit-pick"),
+    ],
+)
+def test_build_codex_native_server_pins_profile_resolved_model(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    model: str | None,
+    expected_pin: str,
+) -> None:
+    """
+    A profile launch pins the model it routes to, in codex's own spelling.
+
+    A launch naming no model still gets a concrete model from the profile's
+    catalog via ``-c model=``, which outranks the ``config.toml`` copied from
+    the user's shared home. Leaving ``pinned_model`` unset there let the
+    forwarder mirror the shared file's stale model back as this session's
+    ``model_override`` (live-caught: a session running
+    ``databricks-gpt-5-6-luna`` reported the shared file's ``gpt-5.4``).
+    The pin uses codex's spelling because that is the vocabulary
+    ``config.toml`` and every reader of it — including the web catalog's
+    row ids — compare in.
+    """
+    from omnigent import codex_native_app_server
+
+    monkeypatch.setattr(
+        "omnigent.codex_native_app_server._find_codex_cli",
+        lambda: sys.executable,
+    )
+    monkeypatch.setattr(
+        codex_native_app_server,
+        "_databricks_launch_materialization",
+        lambda *, model, profile: codex_native_app_server._DatabricksLaunchMaterialization(
+            config_overrides=[f'model="{model or "databricks-gpt-5-4-mini"}"'],
+            model=model or "databricks-gpt-5-4-mini",
+            host="https://ws.example",
+        ),
+    )
+
+    app_server = build_codex_native_server(
+        socket_path=tmp_path / "codex.sock",
+        codex_home=tmp_path / "codex-home",
+        cwd=tmp_path,
+        model=model,
+        profile="oss",
+        bridge_dir=tmp_path / "bridge",
+        ap_server_url=None,
+        ap_auth_headers={},
+    )
+
+    assert app_server.pinned_model == expected_pin
+
+
 def _test_app_server(
     tmp_path: Path,
     codex_home: Path,

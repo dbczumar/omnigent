@@ -4040,7 +4040,9 @@ def create_runner_app(
         from omnigent.codex_native_app_server import (
             client_for_transport,
             list_codex_model_options,
+            mark_launch_default,
         )
+        from omnigent.codex_native_bridge import read_codex_home_config_model
 
         state = await _codex_native_bridge_state_for_session(
             conv_id,
@@ -4056,10 +4058,15 @@ def create_runner_app(
         )
         try:
             await codex_client.connect()
-            return await list_codex_model_options(codex_client)
+            rows = await list_codex_model_options(codex_client)
         finally:
             with contextlib.suppress(Exception):
                 await codex_client.close()
+        active_model = await asyncio.to_thread(
+            read_codex_home_config_model,
+            Path(state.codex_home),
+        )
+        return mark_launch_default(rows, active_model)
 
     async def _handle_pi_native_model_change(
         conv_id: str,

@@ -570,9 +570,18 @@ async def test_codex_native_model_options_returns_503_until_bridge_state_exists(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("config_model", "expected_default"),
+    [
+        pytest.param(None, "gpt-5.5", id="unset-keeps-codex-default"),
+        pytest.param("gpt-5.4-mini", "gpt-5.4-mini", id="launch-model-wins"),
+    ],
+)
 async def test_codex_native_model_options_query_model_list(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    config_model: str | None,
+    expected_default: str,
 ) -> None:
     """
     Runner model-options endpoint queries Codex ``model/list``.
@@ -580,7 +589,10 @@ async def test_codex_native_model_options_query_model_list(
     The Web UI must not carry its own Codex model / effort catalog. The
     runner is the process that can reach the session's Codex app-server, so
     this endpoint should ask Codex for models and return those model objects
-    unchanged for the AP snapshot.
+    for the AP snapshot, changing only which one is marked default. Codex's
+    own ``isDefault`` is its built-in preference and says nothing about this
+    session, so the model named by the session's ``config.toml`` — the one
+    the pane launched on — wins when the list offers it.
     """
     from omnigent import codex_native_app_server
     from omnigent.spec.types import ExecutorSpec
@@ -588,13 +600,17 @@ async def test_codex_native_model_options_query_model_list(
     conv_id = "68ba0a62ebe928d26adf37c8974ce1eb"
     monkeypatch.setattr(codex_native_bridge, "_BRIDGE_ROOT", tmp_path / "codex-bridge")
     bridge_dir = codex_native_bridge.bridge_dir_for_bridge_id(conv_id)
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir()
+    if config_model is not None:
+        (codex_home / "config.toml").write_text(f'model = "{config_model}"\n')
     codex_native_bridge.write_bridge_state(
         bridge_dir,
         codex_native_bridge.CodexNativeBridgeState(
             session_id=conv_id,
             socket_path="ws://127.0.0.1:43210",
             thread_id="thread_codex",
-            codex_home=str(tmp_path / "codex-home"),
+            codex_home=str(codex_home),
             active_turn_id=None,
         ),
     )
@@ -692,31 +708,31 @@ async def test_codex_native_model_options_query_model_list(
         resp = await client.get(f"/v1/sessions/{conv_id}/codex-model-options")
 
     assert resp.status_code == 200, resp.text
-    assert resp.json() == {
-        "models": [
-            {
-                "id": "gpt-5.5",
-                "model": "databricks-gpt-5-5",
-                "displayName": "GPT-5.5",
-                "defaultReasoningEffort": "high",
-                "supportedReasoningEfforts": [
-                    {"reasoningEffort": "low", "description": "Low"},
-                    {"reasoningEffort": "medium", "description": "Medium"},
-                ],
-                "isDefault": True,
-            },
-            {
-                "id": "gpt-5.4-mini",
-                "model": "databricks-gpt-5-4-mini",
-                "displayName": "GPT-5.4 mini",
-                "defaultReasoningEffort": "medium",
-                "supportedReasoningEfforts": [
-                    {"reasoningEffort": "minimal", "description": "Minimal"}
-                ],
-                "isDefault": False,
-            },
-        ]
-    }
+    expected_models: list[dict[str, object]] = [
+        {
+            "id": "gpt-5.5",
+            "model": "databricks-gpt-5-5",
+            "displayName": "GPT-5.5",
+            "defaultReasoningEffort": "high",
+            "supportedReasoningEfforts": [
+                {"reasoningEffort": "low", "description": "Low"},
+                {"reasoningEffort": "medium", "description": "Medium"},
+            ],
+        },
+        {
+            "id": "gpt-5.4-mini",
+            "model": "databricks-gpt-5-4-mini",
+            "displayName": "GPT-5.4 mini",
+            "defaultReasoningEffort": "medium",
+            "supportedReasoningEfforts": [
+                {"reasoningEffort": "minimal", "description": "Minimal"}
+            ],
+        },
+    ]
+    for model_row in expected_models:
+        if model_row["id"] == expected_default:
+            model_row["isDefault"] = True
+    assert resp.json() == {"models": expected_models}
     assert fake_client.requests == [
         ("model/list", {"includeHidden": False}),
         ("model/list", {"includeHidden": False, "cursor": "next-page"}),
