@@ -60,6 +60,7 @@ import { CompactionMarker, RoutingDecisionCard } from "@/components/blocks/Statu
 import { SystemMessageView } from "@/components/blocks/SystemMessage";
 import { isSystemUserContent, parseSystemMessage } from "@/lib/systemMessage";
 import { Button } from "@/components/ui/button";
+import { StreamBudgetBanner } from "@/components/StreamBudgetBanner";
 import { OttoIcon } from "@/components/icons/OttoIcon";
 import { cn } from "@/lib/utils";
 import { QueuedMessagesStrip } from "@/pages/QueuedMessagesStrip";
@@ -405,6 +406,9 @@ export function buildPendingBubbles(
       itemId: p.tempId,
       content: p.content,
       ...(author !== null ? { createdBy: author } : {}),
+      // Stamped once at send time; absent for snapshot-replayed entries,
+      // which show no timestamp rather than a re-stamped render time.
+      ...(p.createdAtS !== undefined ? { createdAtS: p.createdAtS } : {}),
     };
   });
 }
@@ -797,6 +801,9 @@ export function ChatPage() {
   // handling). Overrides the liveness-derived unreachable affordances
   // below, which misread the not-yet-host-bound session as stranded.
   const sandboxLaunching = sandboxStatus !== null && sandboxStatus.stage !== "failed";
+  // Terminal-first spin-up state, read here (not just in the child surfaces) so
+  // the working-indicator gate below can defer to the "Starting up…" cue.
+  const chatTerminalFirst = useTerminalFirst();
   // Read runner liveness from the app-level batch poller (see
   // RunnerHealthProvider). `undefined` = not yet polled — the indicator
   // stays hidden until the first poll for this session resolves.
@@ -839,7 +846,16 @@ export function ChatPage() {
     // Both keep the prompt on top across the pending → approved flip.
     const committed = stripGatedSubagentRoutingChips(
       reorderCommittedRequestElicitations(
-        buildBubbles(blocks, activeResponse, bubbleCacheRef.current, interruptedResponseIds),
+        buildBubbles(
+          blocks,
+          activeResponse,
+          bubbleCacheRef.current,
+          interruptedResponseIds,
+          // Spin the newest turn's in-flight tools while the session runs —
+          // for claude-native, whose running/idle lives in `sessionStatus`
+          // and never opens a streaming `activeResponse`.
+          computeIsWorking(sessionStatus),
+        ),
       ),
       subagentRoutingOverride,
     );
@@ -859,6 +875,7 @@ export function ChatPage() {
     interruptedResponseIds,
     pendingUserMessages,
     subagentRoutingOverride,
+    sessionStatus,
   ]);
 
   // Picker selection. ChatPage stays mounted across `/` to `/c/:id`,
@@ -1006,10 +1023,25 @@ export function ChatPage() {
   // + shimmer/pill) for the main chat and is suppressed mid-elicitation or
   // when the runner is known offline.
   const isWorking = !hasPendingElicitation && computeIsWorking(sessionStatus);
+  // A spin-up in flight owns the in-progress slot with more specific copy
+  // ("Starting up…" / "Cloning repository…") than the generic shimmer, and
+  // `RunnerStartingIndicator` only renders when the shimmer is absent. So the
+  // OPTIMISTIC path must stand down here: a send that has to boot a runner is
+  // exactly when the user needs to know it's booting, not just that we asked.
+  // A server-confirmed `running`/`waiting` still wins — by then the harness is
+  // up and the spin-up cue has self-gated to null.
+  const spinUpInFlight =
+    sandboxLaunching ||
+    Boolean(chatTerminalFirst?.isTerminalFirst && chatTerminalFirst.terminalStartingUp);
   const showsWorking = computeShowsWorking(sessionStatus, {
     hasPendingElicitation,
     runnerOnline,
     backgroundTaskCount,
+    // Optimistic: light up the moment this client dispatches, without waiting
+    // for the server's ``running``. The sidebar row already reads this same
+    // flag (``isStartingUp`` in Sidebar.tsx), so the two agreed only once the
+    // server confirmed; now they agree immediately.
+    localSendInFlight: status === "streaming" && !spinUpInFlight,
   });
 
   // A fork of a coding session carries the source id in this label (set by
@@ -2111,6 +2143,10 @@ function MainAgentSurface({
               scroller={scroller}
               hasMoreHistory={hasMoreHistory}
             />
+            {/* Too-many-tabs warning: floats as a rounded card just below the
+            header, a sibling of Conversation for the same reason as
+            JumpToTopButton — outside the chat-scroll-fade mask. */}
+            <StreamBudgetBanner />
             {/* Left-edge minimap: one tick per turn, scrolls independently, pages
             in older history on scroll-up. Sibling of Conversation for the same
             reason as JumpToTopButton — it escapes the chat-scroll-fade mask.
@@ -3471,6 +3507,25 @@ function CompactionLoadingIndicator() {
 // re-renders the bubble that actually changed, not every prior message's
 // markdown/syntax-highlighting subtree. See `bubblesEqual`. Exported for
 // the user-bubble markdown render tests.
+function formatBubbleTimestamp(epochSeconds: number | undefined): string | null {
+  if (epochSeconds === undefined || epochSeconds === 0) return null;
+  const d = new Date(epochSeconds * 1000);
+  const now = new Date();
+  const time = d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+  if (
+    d.getFullYear() === now.getFullYear() &&
+    d.getMonth() === now.getMonth() &&
+    d.getDate() === now.getDate()
+  ) {
+    return time;
+  }
+  const date = d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  if (d.getFullYear() !== now.getFullYear()) {
+    return `${d.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" })}, ${time}`;
+  }
+  return `${date}, ${time}`;
+}
+
 export const BubbleView = memo(
   function BubbleView({
     bubble,
@@ -3581,6 +3636,7 @@ function UserBubble({ bubble }: { bubble: Extract<Bubble, { kind: "user" }> }) {
   // Equality selector so Zustand only re-renders the matching bubble.
   const flashing = useChatStore((s) => s.flashItemId === bubble.itemId);
   const { isCopied, handleCopy } = useCopyMessage(() => text);
+  const ts = formatBubbleTimestamp(bubble.createdAtS);
   // Runtime-injected `[System: ...]` notifications (task completion,
   // timer firings, terminal idle) ride in on role=user. When the content
   // is a pure system marker — no attached images or files — swap the
@@ -3602,129 +3658,149 @@ function UserBubble({ bubble }: { bubble: Extract<Bubble, { kind: "user" }> }) {
       data-user-message-id={bubble.itemId}
       className="max-w-[640px]"
     >
-      {/* w-fit + ml-auto shrink-wrap the row so the author avatar sits
-          immediately left of the right-aligned bubble (the bubble's own
-          ml-auto has no free space to absorb inside a fit-width row). */}
-      <div className="ml-auto flex w-fit max-w-full items-center gap-1.5">
-        {showAuthorBadge && author && (
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Avatar
-                size="sm"
-                data-testid="message-author"
-                aria-label={author}
-                className="shrink-0"
-              >
-                <AvatarFallback
-                  className="font-medium text-white"
-                  style={{ backgroundColor: userColor(author) }}
+      <div className="ml-auto flex w-fit max-w-full flex-col items-end">
+        {/* w-fit + ml-auto shrink-wrap the row so the author avatar sits
+            immediately left of the right-aligned bubble (the bubble's own
+            ml-auto has no free space to absorb inside a fit-width row). */}
+        <div className="flex w-fit max-w-full items-center gap-1.5">
+          {showAuthorBadge && author && (
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Avatar
+                  size="sm"
+                  data-testid="message-author"
+                  aria-label={author}
+                  className="shrink-0"
                 >
-                  {userInitials(author)}
-                </AvatarFallback>
-              </Avatar>
-            </TooltipTrigger>
-            <TooltipContent>{author}</TooltipContent>
-          </Tooltip>
-        )}
-        <MessageContent
-          className={cn(flashing && "animate-user-msg-flash")}
-          // Another contributor's bubble takes their avatar color at low
-          // alpha instead of the default bg-muted, so authorship reads at
-          // a glance without any email text.
-          style={showAuthorBadge && author ? { backgroundColor: userColorTint(author) } : undefined}
-        >
-          {/* Inline image previews — one non-wrapping strip. Wrapping would
-              re-flow the row as each image's width resolves on load, changing
-              the bubble's height and shoving the transcript; scrolling keeps
-              the row exactly one preview tall no matter what lands. */}
-          {images.length > 0 && (
-            <div className="mb-1.5 flex gap-2 overflow-x-auto">
-              {images.map((img) =>
-                img.file_id.startsWith("pending:") ? (
-                  // Upload in-flight — show a chip placeholder
+                  <AvatarFallback
+                    className="font-medium text-white"
+                    style={{ backgroundColor: userColor(author) }}
+                  >
+                    {userInitials(author)}
+                  </AvatarFallback>
+                </Avatar>
+              </TooltipTrigger>
+              <TooltipContent>{author}</TooltipContent>
+            </Tooltip>
+          )}
+          <MessageContent
+            className={cn(flashing && "animate-user-msg-flash")}
+            // Another contributor's bubble takes their avatar color at low
+            // alpha instead of the default bg-muted, so authorship reads at
+            // a glance without any email text.
+            style={
+              showAuthorBadge && author ? { backgroundColor: userColorTint(author) } : undefined
+            }
+          >
+            {/* Inline image previews — one non-wrapping strip. Wrapping would
+                re-flow the row as each image's width resolves on load, changing
+                the bubble's height and shoving the transcript; scrolling keeps
+                the row exactly one preview tall no matter what lands. */}
+            {images.length > 0 && (
+              <div className="mb-1.5 flex gap-2 overflow-x-auto">
+                {images.map((img) =>
+                  img.file_id.startsWith("pending:") ? (
+                    // Upload in-flight — show a chip placeholder
+                    <span
+                      key={img.file_id}
+                      className="flex items-center gap-1 rounded-full border border-border bg-muted px-2 py-0.5 text-sm text-muted-foreground"
+                    >
+                      <ImageIcon className="size-3 shrink-0" />
+                      <span className="max-w-[180px] truncate">
+                        {img.filename ?? img.file_id.replace("pending:", "")}
+                      </span>
+                    </span>
+                  ) : (
+                    // Uploaded — render the actual image
+                    <SessionImage
+                      key={img.file_id}
+                      path={
+                        sessionId
+                          ? `/v1/sessions/${encodeURIComponent(sessionId)}/resources/files/${encodeURIComponent(img.file_id)}/content`
+                          : undefined
+                      }
+                      alt={img.filename ?? img.file_id}
+                      // Sizing lives in SessionImage, which reserves a matching
+                      // box so the bubble's height is settled before bytes land.
+                      className="rounded-md object-contain"
+                    />
+                  ),
+                )}
+              </div>
+            )}
+            {/* Non-image file chips */}
+            {fileChips.length > 0 && (
+              <div className="mb-1.5 flex flex-wrap gap-1.5">
+                {fileChips.map((att) => (
                   <span
-                    key={img.file_id}
+                    key={att.file_id}
                     className="flex items-center gap-1 rounded-full border border-border bg-muted px-2 py-0.5 text-sm text-muted-foreground"
                   >
-                    <ImageIcon className="size-3 shrink-0" />
-                    <span className="max-w-[180px] truncate">
-                      {img.filename ?? img.file_id.replace("pending:", "")}
-                    </span>
-                  </span>
-                ) : (
-                  // Uploaded — render the actual image
-                  <SessionImage
-                    key={img.file_id}
-                    path={
-                      sessionId
-                        ? `/v1/sessions/${encodeURIComponent(sessionId)}/resources/files/${encodeURIComponent(img.file_id)}/content`
-                        : undefined
-                    }
-                    alt={img.filename ?? img.file_id}
-                    // Sizing lives in SessionImage, which reserves a matching
-                    // box so the bubble's height is settled before bytes land.
-                    className="rounded-md object-contain"
-                  />
-                ),
-              )}
-            </div>
-          )}
-          {/* Non-image file chips */}
-          {fileChips.length > 0 && (
-            <div className="mb-1.5 flex flex-wrap gap-1.5">
-              {fileChips.map((att) => (
-                <span
-                  key={att.file_id}
-                  className="flex items-center gap-1 rounded-full border border-border bg-muted px-2 py-0.5 text-sm text-muted-foreground"
-                >
-                  <FileTextIcon className="size-3 shrink-0" />
-                  <span className="max-w-[180px] truncate">{att.filename ?? att.file_id}</span>
-                </span>
-              ))}
-            </div>
-          )}
-          {/* "@"-mentioned workspace files/folders (delivered as text markers) */}
-          {mentionedChips.length > 0 && (
-            <div className="mb-1.5 flex flex-wrap gap-1.5">
-              {mentionedChips.map((item) => (
-                <span
-                  key={mentionItemPath(item)}
-                  className="flex items-center gap-1 rounded-full border border-border bg-muted px-2 py-0.5 text-sm text-muted-foreground"
-                >
-                  {item.isDir ? (
-                    <FolderIcon className="size-3 shrink-0" />
-                  ) : (
                     <FileTextIcon className="size-3 shrink-0" />
-                  )}
-                  <span className="max-w-[180px] truncate" title={mentionItemPath(item)}>
-                    @{item.path}
-                    {item.isDir ? "/" : ""}
+                    <span className="max-w-[180px] truncate">{att.filename ?? att.file_id}</span>
                   </span>
-                  {item.lineRange && (
-                    <span className="shrink-0">
-                      :{item.lineRange.start}-{item.lineRange.end}
+                ))}
+              </div>
+            )}
+            {/* "@"-mentioned workspace files/folders (delivered as text markers) */}
+            {mentionedChips.length > 0 && (
+              <div className="mb-1.5 flex flex-wrap gap-1.5">
+                {mentionedChips.map((item) => (
+                  <span
+                    key={mentionItemPath(item)}
+                    className="flex items-center gap-1 rounded-full border border-border bg-muted px-2 py-0.5 text-sm text-muted-foreground"
+                  >
+                    {item.isDir ? (
+                      <FolderIcon className="size-3 shrink-0" />
+                    ) : (
+                      <FileTextIcon className="size-3 shrink-0" />
+                    )}
+                    <span className="max-w-[180px] truncate" title={mentionItemPath(item)}>
+                      @{item.path}
+                      {item.isDir ? "/" : ""}
                     </span>
-                  )}
-                </span>
-              ))}
-            </div>
-          )}
-          {/* Render user text as markdown, matching the assistant bubble
-            (headings, lists, code fences, file-path links). `breaks` keeps
-            single newlines as line breaks — users type multi-line messages
-            without blank-line paragraph separators and expect their line
-            breaks preserved. Empty text — e.g. an attachments-only message —
-            renders nothing rather than an empty markdown block. */}
-          {text && <FilePathAwareMessageResponse breaks>{text}</FilePathAwareMessageResponse>}
-        </MessageContent>
+                    {item.lineRange && (
+                      <span className="shrink-0">
+                        :{item.lineRange.start}-{item.lineRange.end}
+                      </span>
+                    )}
+                  </span>
+                ))}
+              </div>
+            )}
+            {/* Render user text as markdown, matching the assistant bubble
+              (headings, lists, code fences, file-path links). `breaks` keeps
+              single newlines as line breaks — users type multi-line messages
+              without blank-line paragraph separators and expect their line
+              breaks preserved. Empty text — e.g. an attachments-only message —
+              renders nothing rather than an empty markdown block. */}
+            {text && <FilePathAwareMessageResponse breaks>{text}</FilePathAwareMessageResponse>}
+          </MessageContent>
+        </div>
+        {/* Skip an empty row when there is neither a timestamp nor a copy
+            action. 40%-visible on touch (no hover), hover/focus-reveal on
+            desktop. py-1 matches the design prototype's 24px action row;
+            the timestamp rides inside it instead of adding a new row. */}
+        {(ts || text) && (
+          <div className="flex items-center justify-end gap-3 py-1 opacity-40 transition-opacity md:opacity-0 md:group-hover:opacity-100 md:group-focus-within:opacity-100">
+            {ts && (
+              <span
+                className="select-none text-[11px] leading-4 text-foreground/56"
+                data-testid="message-timestamp"
+              >
+                {ts}
+              </span>
+            )}
+            {text && (
+              <MessageActions>
+                <MessageAction tooltip="Copy" size="icon-xxs" onClick={handleCopy}>
+                  {isCopied ? <CheckIcon size={14} /> : <CopyIcon size={14} />}
+                </MessageAction>
+              </MessageActions>
+            )}
+          </div>
+        )}
       </div>
-      {text && (
-        <MessageActions className="ml-auto opacity-40 transition-opacity md:opacity-0 md:group-hover:opacity-100 md:group-focus-within:opacity-100">
-          <MessageAction tooltip="Copy" size="icon-xxs" onClick={handleCopy}>
-            {isCopied ? <CheckIcon size={14} /> : <CopyIcon size={14} />}
-          </MessageAction>
-        </MessageActions>
-      )}
     </Message>
   );
 }
@@ -3759,6 +3835,7 @@ function AssistantBubble({
   if (bubble.items.length === 0) return null;
 
   const markdownText = collectBubbleMarkdown(bubble.items);
+  const ts = formatBubbleTimestamp(bubble.createdAtS);
 
   // The bubble collapses to nothing but the "Worked for" row — its text
   // all sits inside the fold, and its answer lands in a later bubble.
@@ -3815,27 +3892,42 @@ function AssistantBubble({
         )}
         {/* Skipped on a fold-only bubble: the actions belong to content
             the user can see, and hanging them off a collapsed row spaced
-            consecutive rows unevenly depending on hidden narration. */}
-        {markdownText && !foldOnly && (
-          <MessageActions className="opacity-40 transition-opacity md:opacity-0 group-hover:opacity-100 group-focus-within:opacity-100">
-            <MessageAction tooltip="Copy" size="icon-xxs" onClick={handleCopy}>
-              {isCopied ? <CheckIcon size={14} /> : <CopyIcon size={14} />}
-            </MessageAction>
-            {/* Fork from this response: clone the session with history
-                truncated after this turn. Hidden while the response is
-                still streaming (its items aren't committed yet) and when
-                the session can't be forked (sub-agent / isolated mount). */}
-            {forkDialog?.canFork && bubble.lifecycle !== "streaming" && (
-              <MessageAction
-                tooltip="Fork from here"
-                size="icon-xxs"
-                data-testid="fork-from-response"
-                onClick={() => forkDialog.openForkDialog({ upToResponseId: bubble.responseId })}
-              >
-                <GitForkIcon size={14} />
-              </MessageAction>
+            consecutive rows unevenly depending on hidden narration. Also
+            skipped when there is neither a timestamp nor actions to show.
+            40%-visible on touch (no hover), hover/focus-reveal on desktop.
+            Order matches the design target: actions, then timestamp. */}
+        {!foldOnly && (ts || markdownText) && (
+          <div className="flex items-center gap-3 py-1 opacity-40 transition-opacity md:opacity-0 md:group-hover:opacity-100 md:group-focus-within:opacity-100">
+            {markdownText && (
+              <MessageActions>
+                <MessageAction tooltip="Copy" size="icon-xxs" onClick={handleCopy}>
+                  {isCopied ? <CheckIcon size={14} /> : <CopyIcon size={14} />}
+                </MessageAction>
+                {/* Fork from this response: clone the session with history
+                    truncated after this turn. Hidden while the response is
+                    still streaming (its items aren't committed yet) and when
+                    the session can't be forked (sub-agent / isolated mount). */}
+                {forkDialog?.canFork && bubble.lifecycle !== "streaming" && (
+                  <MessageAction
+                    tooltip="Fork from here"
+                    size="icon-xxs"
+                    data-testid="fork-from-response"
+                    onClick={() => forkDialog.openForkDialog({ upToResponseId: bubble.responseId })}
+                  >
+                    <GitForkIcon size={14} />
+                  </MessageAction>
+                )}
+              </MessageActions>
             )}
-          </MessageActions>
+            {ts && (
+              <span
+                className="select-none text-[11px] leading-4 text-foreground/56"
+                data-testid="message-timestamp"
+              >
+                {ts}
+              </span>
+            )}
+          </div>
         )}
       </Message>
 
@@ -5704,10 +5796,17 @@ export function computeIsWorking(sessionStatus: SessionStatus): boolean {
  *   10s cadence and reads stale-offline during the runner's connect window on a
  *   fresh session's first turn (it would otherwise hide "Working…" for seconds).
  * @param options.backgroundTaskCount - Background shells still running after
- *   the turn ended. A claude-native turn settles to ``idle`` (the PTY-activity
- *   watcher's edge) even while shells run, so the bare status alone would hide
- *   the indicator; a positive count keeps it lit so "N background tasks still running"
+ *   the turn ended. A claude-native turn settles to ``idle`` (the status file's
+ *   edge) even while shells run, so the bare status alone would hide the
+ *   indicator; a positive count keeps it lit so "N background tasks still running"
  *   stays visible.
+ * @param options.localSendInFlight - This client's own send is in flight
+ *   (``chatStore.status === "streaming"``). Lights the indicator optimistically
+ *   the moment the user presses Enter, before any server edge confirms the turn
+ *   — the sidebar row already does this (see ``isStartingUp`` in Sidebar.tsx),
+ *   so without it the two disagree for the dispatch round-trip. Distinct from
+ *   ``sessionStatus``, which mirrors the server: this one means "we asked", not
+ *   "the agent is working".
  * @returns ``true`` when the main session's own status should render Working.
  */
 export function computeShowsWorking(
@@ -5716,6 +5815,7 @@ export function computeShowsWorking(
     hasPendingElicitation: boolean;
     runnerOnline: boolean | undefined;
     backgroundTaskCount?: number;
+    localSendInFlight?: boolean;
   },
 ): boolean {
   if (options.hasPendingElicitation) return false;
@@ -5723,9 +5823,10 @@ export function computeShowsWorking(
   // A running/waiting session is proof the runner is up, so a stale
   // poll-derived ``runnerOnline === false`` must not suppress it. Only gate on
   // known-offline for the not-actively-working case (e.g. a background-shell
-  // tally on an idle session).
-  if (options.runnerOnline === false && !isWorking) return false;
-  return isWorking || (options.backgroundTaskCount ?? 0) > 0;
+  // tally on an idle session). An in-flight local send is the same kind of
+  // proof — the user just dispatched — so it also survives the gate.
+  if (options.runnerOnline === false && !isWorking && !options.localSendInFlight) return false;
+  return isWorking || options.localSendInFlight === true || (options.backgroundTaskCount ?? 0) > 0;
 }
 
 /**
@@ -6071,7 +6172,7 @@ function SessionConfigModal({
   costRoutingEligible: boolean;
   subagentRoutingEligible: boolean;
 }) {
-  const selectedEffort = useChatStore((s) => s.selectedEffort);
+  const selectedEffort = useSessionEffort();
   const costControlModeOverride = useChatStore((s) => s.costControlModeOverride);
   const subagentRoutingOverride = useChatStore((s) => s.subagentRoutingOverride);
   const conversationId = useChatStore((s) => s.conversationId);
@@ -6478,7 +6579,7 @@ function useSessionConfigSummary({
   codexModelOptions: readonly NativeModelOption[];
   costRoutingEligible: boolean;
 }): { label: string; value: string }[] {
-  const selectedEffort = useChatStore((s) => s.selectedEffort);
+  const selectedEffort = useSessionEffort();
   const costControlModeOverride = useChatStore((s) => s.costControlModeOverride);
   const { modelLabel } = useResolvedComposerModel(modelPickerKind, codexModelOptions);
   const routingOn = costRoutingEligible && costControlModeOverride === "on";
@@ -6498,6 +6599,21 @@ function useSessionConfigSummary({
     rows.push({ label: "Effort", value: effortValue ?? "Default" });
   }
   return rows;
+}
+
+/**
+ * The effort this conversation is actually at.
+ *
+ * `sessionReasoningEffort` is conversation-scoped, so two live conversations at
+ * different efforts each read their own; `selectedEffort` is the single
+ * app-global sticky pick, used only as the pre-hydration fallback. Reading the
+ * sticky pick alone would show a warm-switched conversation the last effort
+ * picked anywhere.
+ */
+function useSessionEffort(): string | null {
+  const sessionReasoningEffort = useChatStore((s) => s.sessionReasoningEffort);
+  const stickyEffort = useChatStore((s) => s.selectedEffort);
+  return sessionReasoningEffort ?? stickyEffort;
 }
 
 /**
@@ -6638,7 +6754,7 @@ function ComposerModelEffortLabel({
   costRoutingEligible: boolean;
   harnessLabel: string | null;
 }) {
-  const selectedEffort = useChatStore((s) => s.selectedEffort);
+  const selectedEffort = useSessionEffort();
   const costControlModeOverride = useChatStore((s) => s.costControlModeOverride);
   const { modelLabel } = useResolvedComposerModel(modelPickerKind, codexModelOptions);
   const routingOn = costRoutingEligible && costControlModeOverride === "on";

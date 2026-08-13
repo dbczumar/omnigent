@@ -44,6 +44,7 @@ import {
 } from "@/hooks/useChildSessions";
 import { useDebugMode } from "@/hooks/useDebugMode";
 import { useBrowserAgentRelay } from "@/hooks/useBrowserAgentRelay";
+import { resyncBrowserSuppression } from "@/hooks/useSuppressBrowserView";
 import {
   AGENT_TERMINAL_IDS,
   inventoryTerminals,
@@ -430,6 +431,15 @@ export function AppShell() {
   // it lists the root's children plus a "main" entry, so the user
   // can move between siblings and back to the parent from one place.
   const isChildSession = activeSession?.parentSessionId != null;
+  // A sub-agent runs in its parent's working directory but records no
+  // host/workspace of its own (the parent owns the tmux pane), which would drop
+  // the fork dialog into its no-directory mode. The parent's sidebar row backs
+  // the child's missing values so promoting a child offers the same host +
+  // directory choices as forking any other session.
+  const parentConv = useMemo(
+    () => allConversations?.find((c) => c.id === activeSession?.parentSessionId) ?? null,
+    [allConversations, activeSession?.parentSessionId],
+  );
   // Positive "this is a top-level session" signal for the top-level-only
   // actions (Share/Clone). Gating those on ``!isChildSession`` flickered:
   // while the snapshot loads ``activeSession`` is null, so ``isChildSession``
@@ -469,11 +479,16 @@ export function AppShell() {
     : isCurrentServerLocal()
       ? "Sharing is unavailable from a local server."
       : "Sharing has been disabled for this Omnigent server.";
-  // Any viewer can fork a shared session; top-level only (the server
-  // rejects forking a sub-agent). Surfaced as ForkDialogContext.canFork —
-  // the per-message "Fork from here" action is the only fork entry point.
+  // Any viewer can fork a shared session, sub-agents included — forking a
+  // child is how it gets promoted to a top-level session of its own. Gated on
+  // knowing which the session is (sidebar row or loaded snapshot) so the
+  // affordance doesn't flicker in before that resolves. Surfaced as
+  // ForkDialogContext.canFork — the per-message "Fork from here" action is
+  // the only fork entry point.
   const canClone =
-    !!conversationId && isKnownTopLevel && (permissionLevel === null || permissionLevel >= 1);
+    !!conversationId &&
+    (isKnownTopLevel || isChildSession) &&
+    (permissionLevel === null || permissionLevel >= 1);
   // Agent tools/policies exist to show.
   const hasAgentInfo = !!conversationId && agentHasInfo(boundAgent, conversationId);
   // Whether the mobile three-dot menu has any entry to offer.
@@ -618,6 +633,14 @@ export function AppShell() {
   // only mounts while its tab is selected) so it's listening before the first
   // browser_navigate. No-op outside Electron / with no conversation.
   useBrowserAgentRelay(conversationId);
+
+  // Clear a stale browser-view suppression left by a renderer reload/crash: the
+  // main-process flag persists but this renderer's overlay count reset to 0, so
+  // a dialog open across the reload would strand the pane hidden. Re-assert our
+  // real state once on mount. No-op outside a browser-capable shell.
+  useEffect(() => {
+    resyncBrowserSuppression();
+  }, []);
 
   // Auto-surface the Browser tab on a `navigate` action, so a browser_navigate
   // fired while another tab is selected doesn't load into a hidden pane.
@@ -1818,8 +1841,8 @@ export function AppShell() {
               key={`fork-session-dialog-${conversationId}`}
               sourceSessionId={conversationId}
               sourceTitle={activeSession?.title}
-              sourceWorkspace={activeSession?.workspace}
-              sourceHostId={activeSession?.hostId}
+              sourceWorkspace={activeSession?.workspace ?? parentConv?.workspace}
+              sourceHostId={activeSession?.hostId ?? parentConv?.host_id}
               sourceGitBranch={activeSession?.gitBranch}
               upToResponseId={forkUpToResponseId}
               open={forkOpen}

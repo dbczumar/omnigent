@@ -1059,11 +1059,12 @@ def test_build_hook_settings_registers_message_display_hook(
 
     Without this entry, Claude never invokes the deltas-appender and live
     token streaming silently does nothing (the web UI falls back to the
-    whole-message-on-completion behavior). It must route to the dedicated
-    stdlib-only module — NOT the heavier observer hook — so the per-chunk
-    hot path stays cheap, and it must NOT depend on ``ap_server_url``
-    (streaming works for local servers too). Fails if the registration
-    is dropped or pointed at the wrong module.
+    whole-message-on-completion behavior). It must be the /bin/sh
+    one-liner appending to ``message_deltas.jsonl`` — never an
+    interpreter spawn, since Claude blocks on it once per streamed
+    chunk — and it must NOT depend on ``ap_server_url`` (streaming
+    works for local servers too). Fails if the registration is dropped
+    or pointed at something heavier.
     """
     monkeypatch.setattr("omnigent.claude_native_bridge._TRUSTED_PARENT", tmp_path)
     monkeypatch.setattr("omnigent.claude_native_bridge._BRIDGE_ROOT", tmp_path / "root")
@@ -1076,11 +1077,11 @@ def test_build_hook_settings_registers_message_display_hook(
         "MessageDisplay hook not registered — live token streaming is dead"
     )
     command = hooks["MessageDisplay"][0]["hooks"][0]["command"]
-    # Routes to the dedicated lightweight module with this bridge dir...
-    assert "omnigent.claude_native_message_display_hook" in command
+    # Appends straight to this bridge dir's deltas file from shell...
+    assert "message_deltas.jsonl" in command
     assert str(bridge_dir) in command
-    # ...and NOT through the heavier observer/policy subcommands (which
-    # would import claude_native_bridge on every streamed chunk).
+    # ...with no interpreter or server dependency on the per-chunk path.
+    assert "python" not in command
     assert "evaluate-policy" not in command
     assert "permission-request" not in command
 
