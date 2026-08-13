@@ -74,6 +74,18 @@ function extractOptionLabels(schema: Record<string, unknown>): string[] {
   return enumValues.filter((v): v is string => typeof v === "string" && v.length > 0);
 }
 
+// Native-harness bridges (Claude Code PermissionRequest, Codex /
+// Cursor / Antigravity elicitations) stamp a synthetic `policy_name`
+// such as "claude_native_permission" — provenance, not a user-authored
+// policy. Show the harness product name for those; real policy names
+// render verbatim so users can tell which of their policies asked.
+const NATIVE_POLICY_LABELS: readonly (readonly [prefix: string, label: string])[] = [
+  ["claude_native_", "Claude Code"],
+  ["codex_native_", "Codex"],
+  ["cursor_native_", "Cursor"],
+  ["agy_native_", "Antigravity"],
+];
+
 /**
  * Verdict submitter — same signature as `chatStore.submitApproval`.
  * Injectable so surfaces outside the active chat (the Inbox page)
@@ -245,6 +257,15 @@ export function ApprovalCard({
   // external MCP server, etc.) — show a link. Our own /approve/...
   // paths are handled inline with approve/reject buttons.
   const isExternalUrl = typeof url === "string" && url.length > 0 && !url.startsWith("/approve/");
+  const nativeHarnessLabel =
+    NATIVE_POLICY_LABELS.find(([prefix]) => policyName.startsWith(prefix))?.[1] ?? null;
+  // What the header's "· <tag>" slot shows: the friendly harness name
+  // for native prompts, the policy's own name for policy asks.
+  const policyLabel = nativeHarnessLabel ?? policyName;
+  // Native prompts also stamp a constant, internal-sounding phase
+  // ("pre_tool_use", "codex_command_approval", ...). It carries no
+  // information the card doesn't already show, so hide it for them.
+  const showPhase = phase !== "" && nativeHarnessLabel === null;
   const askUserQuestionTitle =
     policyName.startsWith("agy_") || phase.startsWith("agy_")
       ? "Antigravity needs your input"
@@ -410,7 +431,7 @@ export function ApprovalCard({
         <AlertTitle className="flex items-center gap-2 text-ui">
           {icon}
           {label}
-          {policyName && <span className="text-muted-foreground text-sm">· {policyName}</span>}
+          {policyLabel && <span className="text-muted-foreground text-sm">· {policyLabel}</span>}
         </AlertTitle>
         <AlertDescription className="flex flex-col gap-1 text-sm">
           {isCodexCommandApproval ? (
@@ -475,10 +496,10 @@ export function ApprovalCard({
               : isMultiChoice
                 ? "Choose an option"
                 : "Approval required"}
-        {policyName && !isAskUserQuestion && !isExitPlanMode && (
-          <span className="text-muted-foreground text-sm">· {policyName}</span>
+        {policyLabel && !isAskUserQuestion && !isExitPlanMode && (
+          <span className="text-muted-foreground text-sm">· {policyLabel}</span>
         )}
-        {phase && !isMultiChoice && !isAskUserQuestion && !isExitPlanMode && (
+        {showPhase && !isMultiChoice && !isAskUserQuestion && !isExitPlanMode && (
           <span className="text-muted-foreground text-sm">({phase})</span>
         )}
       </AlertTitle>
