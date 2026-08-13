@@ -2049,6 +2049,77 @@ def tool_fold_session(
             respawned.wait(timeout=5)
 
 
+@pytest.fixture
+def paused_mid_turn_session(
+    live_server: str,
+    mock_llm_server_url: str,
+    tmp_path_factory: pytest.TempPathFactory,
+) -> Iterator[tuple[str, str, str]]:
+    """A runner-bound session whose turn PAUSES between two tool calls.
+
+    Same agent and bind contract as :func:`tool_fold_session`, except the
+    second LLM call blocks on the mock server's gate. That holds the turn
+    open — running, with its first tool already rendered — for as long as
+    the test needs, so a test can inject a mid-turn event (an elicitation,
+    say), act on it, then release the gate and let the same turn finish
+    with a second tool call and its wrap-up text. Without the gate the
+    ordering is a race against a turn that takes well under a second.
+
+    :param live_server: Spawned server fixture.
+    :param mock_llm_server_url: Session-scoped mock LLM server URL.
+    :param tmp_path_factory: Pytest temp path factory (for a respawn log).
+    :returns: ``(base_url, session_id, mock_llm_url)``. Send any turn, wait
+        for ``GET {mock_llm_url}/gate/pending``, then ``POST
+        {mock_llm_url}/gate/release`` to resume it.
+    """
+    import json as _json
+    import uuid as _uuid
+
+    model = f"paused-turn-probe-{_uuid.uuid4().hex[:8]}"
+    configure_mock_llm(
+        mock_llm_server_url,
+        [
+            {
+                "tool_calls": [
+                    {
+                        "call_id": "call_ls",
+                        "name": "sys_os_shell",
+                        "arguments": _json.dumps({"command": "ls"}),
+                    }
+                ]
+            },
+            {
+                "block": True,
+                "tool_calls": [
+                    {
+                        "call_id": "call_read",
+                        "name": "sys_os_read",
+                        "arguments": _json.dumps({"path": "README.md"}),
+                    }
+                ],
+            },
+        ],
+        key=model,
+    )
+    set_fallback_mock_llm(mock_llm_server_url, model, "Workspace inspected.")
+
+    respawned = _ensure_runner_online(live_server, tmp_path_factory)
+    runner_id = str(_server_state["runner_id"])
+    yaml_text = _TOOL_FOLD_AGENT_YAML.format(name=_TOOL_FOLD_AGENT_NAME, model=model)
+    session_id = _create_bundled_session(live_server, runner_id, yaml_text)
+    try:
+        yield (live_server, session_id, mock_llm_server_url)
+    finally:
+        # Never leave a runner blocked on the gate — a stuck turn outlives
+        # the test and wedges the shared runner for the next one.
+        with contextlib.suppress(httpx.HTTPError):
+            httpx.post(f"{mock_llm_server_url}/gate/release", timeout=5.0)
+        httpx.delete(f"{live_server}/v1/sessions/{session_id}", timeout=10.0)
+        if respawned is not None:
+            respawned.terminate()
+            respawned.wait(timeout=5)
+
+
 @pytest.fixture(autouse=True)
 def _ui_defaults() -> None:
     """

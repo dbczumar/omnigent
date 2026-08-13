@@ -46,6 +46,7 @@ import { Button } from "@/components/ui/button";
 import {
   type AskUserQuestionPayload,
   castAskUserQuestionPayload,
+  exitPlanModePlan,
   parseAskUserQuestionPreview,
 } from "@/lib/askUserQuestion";
 import { isNativePolicyName, nativeCodingAgentForPolicyName } from "@/lib/nativeCodingAgents";
@@ -233,11 +234,8 @@ export function ApprovalCard({
   // ExitPlanMode plan review: the server stamps the full tool_input
   // as `exit_plan_mode`; a usable plan card needs the `plan` markdown
   // string. Anything else falls back to the binary card.
-  const exitPlanModePlan =
-    exitPlanMode && typeof exitPlanMode.plan === "string" && exitPlanMode.plan
-      ? exitPlanMode.plan
-      : null;
-  const isExitPlanMode = exitPlanModePlan !== null;
+  const planMarkdown = exitPlanModePlan(exitPlanMode);
+  const isExitPlanMode = planMarkdown !== null;
   const optionLabels = askPayload === null ? extractOptionLabels(requestedSchema) : [];
   const isAskUserQuestion = askPayload !== null;
   const isMultiChoice = optionLabels.length > 0;
@@ -500,7 +498,7 @@ export function ApprovalCard({
           <>
             <span>Claude finished planning and wants to proceed.</span>
             <ExitPlanModeReview
-              plan={exitPlanModePlan}
+              plan={planMarkdown}
               onAcceptAuto={submitAllowAllEdits}
               onAccept={() => submitBinary("accept")}
               onReject={submitPlanRejection}

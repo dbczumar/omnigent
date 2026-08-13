@@ -529,3 +529,12 @@ export type AnyBlock =
  * `text_done` replaces it. Never a real server item id.
  */
 export const LIVE_ITEM_PREFIX = "live:";
+
+/**
+ * Response-id prefix the block stream stamps on an elicitation that has
+ * no turn to anchor to — a REQUEST-phase gate on the user's prompt, or a
+ * terminal-driven harness that never opened a response. Such a card is
+ * its own bubble and sits BELOW the message it gated; a card carrying a
+ * real turn id belongs to that turn instead.
+ */
+export const ELICITATION_RESPONSE_PREFIX = "elicit_";
