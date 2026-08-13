@@ -570,6 +570,36 @@ def reset_mock_llm(mock_url: str) -> None:
     resp.raise_for_status()
 
 
+def seed_committed_items(session_id: str, items: list[Any]) -> None:
+    """Append committed ``NewConversationItem``s straight into the store.
+
+    For tests that need a settled transcript to act on but not the model's
+    behaviour. Skips the runner and the LLM entirely, so the test neither
+    waits on a turn nor inherits the mock-LLM harness's flakiness. Seed
+    BEFORE navigating — the chat hydrates its history on load.
+
+    Items go through the same store the server writes with, so they are
+    indistinguishable from a real turn's (same shape, ids, FTS rows).
+
+    :param session_id: Session to append to, e.g. ``"conv_abc123"``.
+    :param items: ``omnigent.entities.NewConversationItem`` values, in
+        transcript order.
+    :raises RuntimeError: If the server under test isn't one we spawned
+        (``--ui-base-url``), so its database isn't reachable from here.
+    """
+    from omnigent.stores.conversation_store.sqlalchemy_store import (
+        SqlAlchemyConversationStore,
+    )
+
+    database_uri = _server_state.get("database_uri")
+    if not database_uri:
+        raise RuntimeError(
+            "seeding needs the spawned server's database; it is "
+            "unavailable when running against --ui-base-url."
+        )
+    SqlAlchemyConversationStore(str(database_uri)).append(session_id, items)
+
+
 def seed_committed_turn(
     session_id: str,
     *,
@@ -579,35 +609,19 @@ def seed_committed_turn(
 ) -> None:
     """Write one committed user+assistant exchange straight into the store.
 
-    For tests that need a settled transcript to act on (per-message actions
-    anchor on a committed assistant response) but not the model's behaviour.
-    Skips the runner and the LLM entirely, so the test neither waits on a turn
-    nor inherits the mock-LLM harness's flakiness. Seed BEFORE navigating —
-    the chat hydrates its history on load.
-
-    Items are appended through the same store the server writes with, so they
-    are indistinguishable from a real turn's (same shape, ids, FTS rows).
+    Thin wrapper over :func:`seed_committed_items` for the common case: a
+    settled exchange per-message actions can anchor on (a fork's truncation
+    point, say).
 
     :param session_id: Session to append to, e.g. ``"conv_abc123"``.
     :param prompt: User message text, e.g. ``"ping"``.
     :param reply: Assistant message text, e.g. ``"pong"``.
     :param response_id: Response id shared by both items — per-message
         actions pass it as the turn anchor (e.g. a fork's truncation point).
-    :raises RuntimeError: If the server under test isn't one we spawned
-        (``--ui-base-url``), so its database isn't reachable from here.
     """
     from omnigent.entities import MessageData, NewConversationItem
-    from omnigent.stores.conversation_store.sqlalchemy_store import (
-        SqlAlchemyConversationStore,
-    )
 
-    database_uri = _server_state.get("database_uri")
-    if not database_uri:
-        raise RuntimeError(
-            "seed_committed_turn needs the spawned server's database; it is "
-            "unavailable when running against --ui-base-url."
-        )
-    SqlAlchemyConversationStore(str(database_uri)).append(
+    seed_committed_items(
         session_id,
         [
             NewConversationItem(

@@ -193,9 +193,29 @@ export function isUserInputElicitation(elicitation: {
   exitPlanMode?: Record<string, unknown> | null;
   contentPreview: string;
 }): boolean {
-  return (
-    castAskUserQuestionPayload(elicitation.askUserQuestion) !== null ||
-    parseAskUserQuestionPreview(elicitation.contentPreview) !== null ||
-    exitPlanModePlan(elicitation.exitPlanMode) !== null
-  );
+  return userInputElicitationKey(elicitation) !== null;
+}
+
+/**
+ * Stable identity of what a question / plan card asked, or ``null`` when
+ * the elicitation asks for approval instead.
+ *
+ * A card that arrived live and the one history rebuilds from the same
+ * persisted tool call carry different elicitation ids — the live id is
+ * minted per prompt and never persisted — so a merge that sees both
+ * copies pairs them on the questions (or the plan) instead.
+ */
+export function userInputElicitationKey(elicitation: {
+  askUserQuestion?: Record<string, unknown> | null;
+  exitPlanMode?: Record<string, unknown> | null;
+  contentPreview: string;
+}): string | null {
+  const questions =
+    castAskUserQuestionPayload(elicitation.askUserQuestion) ??
+    parseAskUserQuestionPreview(elicitation.contentPreview);
+  if (questions !== null) {
+    return `questions:${JSON.stringify(questions.questions.map((q) => q.question))}`;
+  }
+  const plan = exitPlanModePlan(elicitation.exitPlanMode);
+  return plan === null ? null : `plan:${plan}`;
 }

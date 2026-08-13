@@ -538,3 +538,13 @@ export const LIVE_ITEM_PREFIX = "live:";
  * real turn id belongs to that turn instead.
  */
 export const ELICITATION_RESPONSE_PREFIX = "elicit_";
+
+/**
+ * Item id for the answered question / plan card history rebuilds from a
+ * gated tool call. Derived from the call's own item id so the card keys
+ * stably across re-hydrations without colliding with the tool row for
+ * the same call.
+ */
+export function answeredElicitationItemId(callItemId: string): string {
+  return `${callItemId}:answer`;
+}
