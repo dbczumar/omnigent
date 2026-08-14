@@ -810,8 +810,8 @@ def _claude_model_probe_invocation(
         }
     )
     # Mirrors the native terminal's env-unset list, plus the nonessential-
-    # traffic kill-switch, which Claude Code treats as covering gateway
-    # discovery — leaving it set would silently return no rows.
+    # traffic kill-switch that also gates gateway discovery — though gateway
+    # mode suppresses that fetch anyway, so the rows stay empty either way.
     env.pop("DATABRICKS_CONFIG_PROFILE", None)
     env.pop(_CLAUDE_CODE_NESTED_SESSION_ENV, None)
     env.pop(_CLAUDE_NONESSENTIAL_TRAFFIC_ENV, None)
@@ -1010,6 +1010,8 @@ async def probe_claude_model_options(
         alias_rows.append(row)
     gateway_rows: list[dict[str, object]] = []
     if base_url and env_overrides.get(_CLAUDE_GATEWAY_DISCOVERY_ENV) == "1":
+        # Reads empty on a launch that also sets CLAUDE_CODE_USE_GATEWAY: that
+        # mode suppresses the harness's fetch, so no artifact is ever written.
         gateway_rows = await asyncio.to_thread(_claude_gateway_artifact_rows, base_url)
     return alias_rows, gateway_rows
 
@@ -2294,10 +2296,10 @@ def _ucode_config_for_profile(
         # 400 "invalid beta flag" is no longer needed on this path.
         _CLAUDE_CODE_USE_GATEWAY_ENV: "1",
         _CLAUDE_CODE_CUSTOM_HEADERS_ENV: _DATABRICKS_CODING_AGENT_HEADER,
-        # Let Claude Code discover the gateway's own model inventory at
-        # startup (GET /v1/models). Harmless until the gateway serves that
-        # endpoint (the fetch 404s instantly); once it does, sessions and the
-        # pre-launch model probe light up together.
+        # Ask Claude Code to discover the gateway's own model inventory at
+        # startup (GET /v1/models, which the gateway now serves). Inert while
+        # CLAUDE_CODE_USE_GATEWAY is set above: the CLI fires that fetch only
+        # on its first-party provider path, so no session discovers anything.
         _CLAUDE_GATEWAY_DISCOVERY_ENV: "1",
     }
     # Pin each Claude Code model-tier alias to the corresponding Databricks
