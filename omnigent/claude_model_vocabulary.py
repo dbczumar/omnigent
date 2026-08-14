@@ -55,6 +55,21 @@ CUSTOM_MODEL_OPTION_ENV_VAR = "ANTHROPIC_CUSTOM_MODEL_OPTION"
 #: takes — so it is not part of the vocabulary below.
 CUSTOM_MODEL_OPTION_NAME_ENV_VAR = "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME"
 
+#: BACK-COMPAT. Omnigent's picker-row id for the custom slot. Named for the
+#: model the slot first carried (Sonnet 5, which had no family alias of its
+#: own), but a Smart Routing launch pins ITS model there, so the id does not
+#: describe the contents — read the slot, never this name. Sessions persist
+#: it as a model override, so retiring it needs a migration; slated for
+#: removal in 0.10.0 along with the row, once the ``sonnet`` pin is Sonnet 5.
+LEGACY_CUSTOM_SLOT_ROW_ID = "sonnet_5"
+
+#: BACK-COMPAT. Spellings the pre-0.10 substring test read as "this is the
+#: custom slot's model", kept because :func:`normalized_model_id` does not
+#: fold a vendor-prefixed ``anthropic/claude-sonnet-5`` onto the catalog id
+#: the slot holds. Consulted only after an exact match misses; retired with
+#: :data:`LEGACY_CUSTOM_SLOT_ROW_ID` in 0.10.0.
+LEGACY_CUSTOM_SLOT_SPELLINGS: tuple[str, ...] = ("sonnet-5", "sonnet_5")
+
 #: Launch-env keys that define this session's model vocabulary.
 MODEL_VOCABULARY_ENV_VARS: tuple[str, ...] = (
     *ALIAS_MODEL_ENV_VARS.values(),

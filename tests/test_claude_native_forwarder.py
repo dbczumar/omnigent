@@ -3569,6 +3569,40 @@ def test_model_alias_for_uses_the_custom_slot_row_only_where_it_exists() -> None
     assert forwarder._model_alias_for("databricks-claude-sonnet-4-6", pinned) == "sonnet"
 
 
+def test_model_alias_for_names_the_custom_slot_row_for_a_routed_launch() -> None:
+    """A routed launch model mirrors onto the slot row that actually holds it.
+
+    Smart Routing pins its launch model into Claude Code's one custom slot,
+    so that slot can hold a second generation of a family whose own row
+    holds the first. Reading the family name out of the id mirrored the
+    session onto that other row — the wrong model in the web, and a
+    round-trip that stepped the session off its pin. Asserted against the
+    real picker rows, so it holds after the legacy row id is retired.
+    """
+    from omnigent.claude_native import ClaudeNativeUcodeConfig, claude_native_model_options
+
+    routed = "databricks-claude-opus-4-9"
+    env = {
+        "ANTHROPIC_DEFAULT_OPUS_MODEL": "databricks-claude-opus-4-8",
+        "ANTHROPIC_DEFAULT_SONNET_MODEL": "databricks-claude-sonnet-4-6",
+        "ANTHROPIC_CUSTOM_MODEL_OPTION": routed,
+    }
+    rows = {
+        str(row["id"]): row["model"]
+        for row in claude_native_model_options(ClaudeNativeUcodeConfig(env=env, model=routed))
+    }
+    alias = forwarder._model_alias_for(routed, env)
+    assert alias is not None
+    assert rows[alias] == routed
+    assert forwarder._model_alias_for("databricks-claude-opus-4-8", env) == "opus"
+    assert forwarder._model_alias_for("databricks-claude-sonnet-4-6", env) == "sonnet"
+    # A 1M-context routed launch pins the marked id, so the slot answers for
+    # it too — but only for the variant it holds.
+    marked = {**env, "ANTHROPIC_CUSTOM_MODEL_OPTION": f"{routed}[1m]"}
+    assert forwarder._model_alias_for(f"{routed}[1m]", marked) == alias
+    assert forwarder._model_alias_for(routed, marked) is None
+
+
 @pytest.mark.asyncio
 async def test_forwarder_mirrors_tui_model_switch_after_baseline(tmp_path: Path) -> None:
     """

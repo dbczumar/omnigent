@@ -21,7 +21,13 @@ from omnigent._native_post_delivery import (
     post_external_session_status,
     post_may_have_been_delivered,
 )
-from omnigent.claude_model_vocabulary import CUSTOM_MODEL_OPTION_ENV_VAR
+from omnigent.claude_model_vocabulary import (
+    CUSTOM_MODEL_OPTION_ENV_VAR,
+    LEGACY_CUSTOM_SLOT_ROW_ID,
+    LEGACY_CUSTOM_SLOT_SPELLINGS,
+    claude_model_alias,
+    normalized_model_id,
+)
 from omnigent.claude_native_bridge import (
     BRIDGE_ID_LABEL_KEY,
     ClaudeHookRecord,
@@ -4387,45 +4393,79 @@ def _gen_ai_usage_tokens(usage: Mapping[str, float | str] | None) -> dict[str, i
     return tokens
 
 
+def _custom_slot_row_id(lowered: str, pins: Mapping[str, str]) -> str | None:
+    """
+    Return the custom-slot picker row id when that slot holds ``lowered``.
+
+    Claude Code exposes one provider-configured model slot beyond the
+    family aliases, so a model with no alias of its own and every Smart
+    Routing launch model land there. The row's id is fixed whatever the
+    slot holds, so the slot is read rather than the model name inspected.
+
+    :param lowered: Lower-cased concrete model id, ``[1m]`` included.
+    :param pins: The session's launch pins (``read_model_env``).
+    :returns: The custom row id, or ``None`` when the slot is unset or
+        holds a different model.
+    """
+    custom = str(pins.get(CUSTOM_MODEL_OPTION_ENV_VAR, "")).strip().lower()
+    if not custom:
+        return None
+    # A 1M-context resolution is its own picker row, so the slot answers
+    # only for the context variant it actually holds.
+    if custom.endswith("[1m]") != lowered.endswith("[1m]"):
+        return None
+    base = lowered.removesuffix("[1m]")
+    if normalized_model_id(custom) == normalized_model_id(base):
+        return LEGACY_CUSTOM_SLOT_ROW_ID
+    # Back-compat leg, reached only when the exact comparison above misses:
+    # a vendor-prefixed id does not normalize onto the catalog spelling.
+    if any(spelling in custom for spelling in LEGACY_CUSTOM_SLOT_SPELLINGS) and any(
+        spelling in base for spelling in LEGACY_CUSTOM_SLOT_SPELLINGS
+    ):
+        return LEGACY_CUSTOM_SLOT_ROW_ID
+    return None
+
+
 def _model_alias_for(
     model: str | None,
     env: Mapping[str, str] | None = None,
 ) -> str | None:
     """
-    Collapse a concrete Claude model id to the session's picker alias.
+    Collapse a concrete Claude model id to the session's picker row id.
 
     The picker's vocabulary is the session catalog's row ids: the family
     aliases (``"fable"`` / ``"opus"`` / ``"sonnet"`` / ``"haiku"``), their
-    bracket variants (``"sonnet[1m]"``) — and, only on a config whose
-    custom slot pins it, the legacy ``"sonnet_5"`` opt-in row (see
-    :data:`omnigent.claude_native._UCODE_CLAUDE_CUSTOM_TIER`). The
+    bracket variants (``"sonnet[1m]"``), and — on a config that pins
+    Claude Code's one custom model slot — that slot's row. The
     transcript/statusLine record the resolved concrete id
-    (``"databricks-claude-sonnet-5[1m]"``); mapping back to the alias
+    (``"databricks-claude-sonnet-5[1m]"``); mapping back to the row id
     keeps the mirrored value renderable and makes a web→TUI round-trip a
     no-op against the persisted override.
 
+    Rows resolve by exact comparison against the session's launch pins, so
+    two generations of one family stay distinct. Reading the family name
+    out of the id instead would mirror a routed Opus 4.9 onto the ``opus``
+    row, which holds 4.8: the web would show the wrong model, and posting
+    that row back would step the session off its launch pin.
+
     :param model: Concrete model id from the transcript or statusLine,
         e.g. ``"claude-opus-4-8"``; ``None`` when none observed yet.
-    :param env: The session's launch pins (``read_model_env``), consulted
-        only to decide whether the legacy custom-slot row exists.
-    :returns: The picker alias, else ``None`` (the caller skips the post
+    :param env: The session's launch pins (``read_model_env``). Absent
+        pins mean an unpinned config, never the ambient environment.
+    :returns: The picker row id, else ``None`` (the caller skips the post
         rather than surface an id the picker can't render).
     """
     if not model:
         return None
+    pins: Mapping[str, str] = env or {}
     lowered = model.lower()
     marker = "[1m]" if lowered.endswith("[1m]") else ""
     base = lowered.removesuffix("[1m]")
-    if not marker and ("sonnet-5" in base or "sonnet_5" in base):
-        custom = str((env or {}).get(CUSTOM_MODEL_OPTION_ENV_VAR, "")).lower()
-        if "sonnet-5" in custom or "sonnet_5" in custom:
-            # Only this config's picker has the opt-in row; everywhere else
-            # the generic sonnet row IS this model, so the family alias wins.
-            return "sonnet_5"
-    for tier in ("fable", "opus", "sonnet", "haiku"):
-        if tier in base:
-            return tier + marker
-    return None
+    custom_row = _custom_slot_row_id(lowered, pins)
+    if custom_row is not None:
+        return custom_row
+    alias = claude_model_alias(base, pins)
+    return None if alias is None else alias + marker
 
 
 async def _post_external_model_change(

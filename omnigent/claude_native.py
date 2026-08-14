@@ -76,6 +76,7 @@ from omnigent.claude_launcher import resolve_claude_launch
 from omnigent.claude_model_vocabulary import (
     CUSTOM_MODEL_OPTION_ENV_VAR,
     CUSTOM_MODEL_OPTION_NAME_ENV_VAR,
+    LEGACY_CUSTOM_SLOT_ROW_ID,
 )
 from omnigent.claude_native_bridge import (
     BRIDGE_ID_LABEL_KEY,
@@ -237,7 +238,7 @@ _UCODE_CLAUDE_TIER_TO_ENV: dict[str, str] = {
 # See https://code.claude.com/docs/en/model-config#custom-model-options
 _ANTHROPIC_CUSTOM_MODEL_OPTION_ENV = CUSTOM_MODEL_OPTION_ENV_VAR
 _ANTHROPIC_CUSTOM_MODEL_OPTION_NAME_ENV = CUSTOM_MODEL_OPTION_NAME_ENV_VAR
-_UCODE_CLAUDE_CUSTOM_TIER = "sonnet_5"
+_UCODE_CLAUDE_CUSTOM_TIER = LEGACY_CUSTOM_SLOT_ROW_ID
 _UCODE_CLAUDE_CUSTOM_TIER_LABEL = "Sonnet 5"
 _CLAUDE_NATIVE_STATIC_MODEL_OPTIONS: tuple[tuple[str, str], ...] = (
     ("fable", "Fable"),
