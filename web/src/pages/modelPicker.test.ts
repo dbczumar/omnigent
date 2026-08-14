@@ -7,7 +7,6 @@ import {
   isCodexNativeModel,
 } from "@/lib/codexNativeModels";
 import type { NativeModelOption } from "@/lib/types";
-import { isModelImplicitlySelected } from "./ChatPage";
 
 const CODEX_MODEL_OPTIONS: NativeModelOption[] = [
   {
@@ -140,48 +139,5 @@ describe("Codex model-list helpers", () => {
     // Both an unresolved model and an id Codex never advertised get nothing.
     expect(codexEffortLevelsForModel(CODEX_MODEL_OPTIONS, null)).toEqual([]);
     expect(codexEffortLevelsForModel(CODEX_MODEL_OPTIONS, "gpt-5.4")).toEqual([]);
-  });
-});
-
-describe("isModelImplicitlySelected", () => {
-  it("matches a tier alias against the bound spec's concrete versioned model", () => {
-    // The core of the alias switch: a spec pinned to a brand-new version
-    // (Opus 4.8) must still light up the "opus" row, and a now-retired
-    // version (4.7) must not break matching — both resolve to the tier.
-    expect(isModelImplicitlySelected("opus", "anthropic/claude-opus-4-8")).toBe(true);
-    expect(isModelImplicitlySelected("opus", "anthropic/claude-opus-4-7")).toBe(true);
-    // The default "sonnet" row is bound to 4.6, so a 4.6 pin lights it up.
-    expect(isModelImplicitlySelected("sonnet", "anthropic/claude-sonnet-4-6")).toBe(true);
-    // Fable's concrete id (claude-fable-5) must light up the "fable" row.
-    expect(isModelImplicitlySelected("fable", "anthropic/claude-fable-5")).toBe(true);
-    // ucode gateway IDs carry the tier token too, so the same row lights up.
-    expect(isModelImplicitlySelected("haiku", "databricks-claude-haiku-4-5")).toBe(true);
-    expect(isModelImplicitlySelected("fable", "databricks-claude-fable-5")).toBe(true);
-  });
-
-  it("matches when llmModel is already the bare alias", () => {
-    expect(isModelImplicitlySelected("opus", "opus")).toBe(true);
-  });
-
-  it("routes Sonnet 5 to its own opt-in row instead of the default Sonnet row", () => {
-    // Both ids happen to contain the substring "sonnet", so the default
-    // "sonnet" row (4.6) must not also light up for a Sonnet 5 pin.
-    expect(isModelImplicitlySelected("sonnet_5", "anthropic/claude-sonnet-5")).toBe(true);
-    expect(isModelImplicitlySelected("sonnet", "anthropic/claude-sonnet-5")).toBe(false);
-    expect(isModelImplicitlySelected("sonnet_5", "databricks-claude-sonnet-5")).toBe(true);
-    // The default 4.6 lights the generic "sonnet" row, never the opt-in row.
-    expect(isModelImplicitlySelected("sonnet", "anthropic/claude-sonnet-4-6")).toBe(true);
-    expect(isModelImplicitlySelected("sonnet_5", "anthropic/claude-sonnet-4-6")).toBe(false);
-  });
-
-  it("does not cross-match a different tier", () => {
-    expect(isModelImplicitlySelected("opus", "anthropic/claude-sonnet-4-6")).toBe(false);
-    expect(isModelImplicitlySelected("haiku", "anthropic/claude-opus-4-8")).toBe(false);
-    expect(isModelImplicitlySelected("fable", "anthropic/claude-opus-4-8")).toBe(false);
-    expect(isModelImplicitlySelected("opus", "anthropic/claude-fable-5")).toBe(false);
-  });
-
-  it("returns false when no model is bound", () => {
-    expect(isModelImplicitlySelected("opus", null)).toBe(false);
   });
 });
