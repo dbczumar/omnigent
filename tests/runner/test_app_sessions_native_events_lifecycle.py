@@ -774,9 +774,16 @@ async def test_codex_native_model_options_query_model_list(
 async def test_claude_native_model_options_use_session_launch_catalog(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The runner exposes friendly aliases from one cached Claude config."""
-    from omnigent.claude_native import ClaudeNativeUcodeConfig
+    """The session listing is the launch catalog from one cached Claude config.
 
+    The harness probe's rows are served with the harness's own default
+    marked, both reads agree (the second is the session cache), and the
+    launch-time config resolution is shared — the spec resolves once.
+    """
+    from omnigent.claude_native import ClaudeModelProbe, ClaudeNativeUcodeConfig
+    from tests.runner.conftest import REAL_CLAUDE_LAUNCH_CATALOG
+
+    monkeypatch.setattr("omnigent.claude_native.claude_launch_catalog", REAL_CLAUDE_LAUNCH_CATALOG)
     conv_id = "6a416804870ed618cc8908f5cebab937"
     claude_spec = AgentSpec(
         spec_version=1,
@@ -803,12 +810,29 @@ async def test_claude_native_model_options_use_session_launch_catalog(
         return config
 
     monkeypatch.setattr("omnigent.claude_native.resolve_native_claude_config", _resolve)
+    probe_calls: list[int] = []
 
-    async def _probe_unavailable(claude_config: object) -> None:
+    async def _probe(claude_config: object) -> ClaudeModelProbe:
         del claude_config
-        return
+        probe_calls.append(1)
+        return ClaudeModelProbe(
+            alias_rows=[
+                {
+                    "id": "opus",
+                    "model": "system.ai.claude-opus-4-10",
+                    "displayName": "Opus 4.10",
+                },
+                {
+                    "id": "haiku",
+                    "model": "system.ai.claude-haiku-4-5",
+                    "displayName": "Haiku 4.5",
+                },
+            ],
+            default_model="system.ai.claude-opus-4-10",
+            default_label="Opus 4.10",
+        )
 
-    monkeypatch.setattr("omnigent.claude_native.probe_claude_model_options", _probe_unavailable)
+    monkeypatch.setattr("omnigent.claude_native.probe_claude_model_options", _probe)
 
     async def _fake_auto_create(
         session_id: str,
@@ -860,30 +884,35 @@ async def test_claude_native_model_options_use_session_launch_catalog(
                 "id": "haiku",
                 "model": "system.ai.claude-haiku-4-5",
                 "displayName": "Haiku 4.5",
-                "isDefault": False,
             },
         ]
     }
     assert first.status_code == 200
     assert first.json() == expected
     assert second.json() == expected
-    # Auto-create and both UI reads shared one launch-time live query.
+    # Auto-create and both UI reads shared one launch-time live query, and
+    # the store's fingerprint cache kept the probe to a single boot.
     assert resolved_specs == [claude_spec]
+    assert probe_calls == [1]
 
 
 @pytest.mark.asyncio
-async def test_claude_native_model_options_serves_probe_union_after_pending(
+async def test_claude_native_model_options_serves_probe_rows_after_pending(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A slow probe answers 503-pending, then the union rows, then the cache.
+    """A slow probe answers 503-pending, then the probed rows, then the cache.
 
     The server's fetch retries 503s, so an in-flight probe holds the
-    catalog back rather than serving a stale list; once the harness
-    answers, its rows join the configured ones and the session serves that
-    union for its lifetime.
+    catalog back rather than serving an invented list; once the harness
+    answers, its rows ARE the catalog and the session serves them for its
+    lifetime. The store's single-flight probe survives the inline wait
+    expiring — the second read joins it instead of restarting it.
     """
     from omnigent.claude_native import ClaudeNativeUcodeConfig
     from omnigent.runner import app as runner_app_module
+    from tests.runner.conftest import REAL_CLAUDE_LAUNCH_CATALOG
+
+    monkeypatch.setattr("omnigent.claude_native.claude_launch_catalog", REAL_CLAUDE_LAUNCH_CATALOG)
 
     conv_id = "9c527915981fe729dd9a19a6dfcbca49"
     claude_spec = AgentSpec(
@@ -914,7 +943,8 @@ async def test_claude_native_model_options_serves_probe_union_after_pending(
 
         return ClaudeModelProbe(
             alias_rows=[{"id": "sonnet[1m]", "model": "claude-sonnet-5[1m]"}],
-            gateway_rows=[],
+            default_model=None,
+            default_label=None,
         )
 
     monkeypatch.setattr("omnigent.claude_native.probe_claude_model_options", _slow_probe)
@@ -962,12 +992,10 @@ async def test_claude_native_model_options_serves_probe_union_after_pending(
         resolved = await client.get(f"/v1/sessions/{conv_id}/claude-model-options")
         cached = await client.get(f"/v1/sessions/{conv_id}/claude-model-options")
 
-    expected_ids = [row["id"] for row in resolved.json()["models"]]
     assert resolved.status_code == 200
-    # Configured tier rows keep the rich spelling; the probe contributes
-    # the rows the config does not cover.
-    assert "opus" in expected_ids
-    assert "sonnet[1m]" in expected_ids
+    # The harness's probed rows are the whole catalog — no configured or
+    # static rows are merged in.
+    assert resolved.json() == {"models": [{"id": "sonnet[1m]", "model": "claude-sonnet-5[1m]"}]}
     assert cached.json() == resolved.json()
 
 

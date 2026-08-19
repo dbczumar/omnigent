@@ -15,18 +15,35 @@ probed under one config can never serve another.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
+import hashlib
 import json
 import logging
 import os
 import tempfile
 import time
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
-from omnigent.host.model_options_cache import fingerprint_of
-
 _logger = logging.getLogger(__name__)
+
+
+def fingerprint_of(*parts: object) -> str:
+    """
+    Stable fingerprint of a resolved harness configuration.
+
+    :param parts: Hashable configuration facets — resolved overrides, env
+        pairs, binary identity. Stringified in order.
+    :returns: A short hex digest.
+    """
+    digest = hashlib.sha256()
+    for part in parts:
+        digest.update(repr(part).encode("utf-8"))
+        digest.update(b"\x00")
+    return digest.hexdigest()[:16]
+
 
 #: Catalog entries older than this get a background refresh on read (the
 #: readers decide; the store only reports staleness).
@@ -50,8 +67,7 @@ def catalog_path(harness: str, fingerprint: str) -> Path:
     """Return the catalog file path for one (harness, fingerprint).
 
     :param harness: Canonical harness name, e.g. ``"claude-native"``.
-    :param fingerprint: The launch-config fingerprint
-        (:func:`omnigent.host.model_options_cache.fingerprint_of`).
+    :param fingerprint: The launch-config fingerprint (:func:`fingerprint_of`).
     :returns: ``<data-dir>/cache/model-catalogs/<harness>-<fingerprint>.json``.
     """
     return _data_dir() / "cache" / "model-catalogs" / f"{harness}-{fingerprint}.json"
@@ -113,6 +129,48 @@ def write_catalog(harness: str, fingerprint: str, rows: list[dict[str, Any]]) ->
         _logger.warning("could not persist the %s model catalog", harness, exc_info=True)
 
 
+#: In-flight probes, keyed (harness, fingerprint) — the thin single-flight
+#: wrapper the design keeps process-side: concurrent misses join one probe
+#: instead of each spawning CLI processes.
+_inflight: dict[tuple[str, str], asyncio.Task[list[dict[str, Any]] | None]] = {}
+
+
+async def ensure_catalog(
+    harness: str,
+    fingerprint: str,
+    resolve: Callable[[], Awaitable[list[dict[str, Any]] | None]],
+) -> list[dict[str, Any]] | None:
+    """Store-first catalog access with a single probe in flight per key.
+
+    A hit serves immediately; a miss runs *resolve* once (concurrent
+    callers join it), persists a non-empty answer, and returns it.
+
+    :param harness: Canonical harness name.
+    :param fingerprint: The launch-config fingerprint.
+    :param resolve: Probe coroutine factory producing verbatim rows.
+    :returns: Catalog rows, or ``None`` when no catalog could be obtained.
+    """
+    cached = read_catalog(harness, fingerprint)
+    if cached is not None:
+        return cached
+    key = (harness, fingerprint)
+    task = _inflight.get(key)
+    if task is None or task.done():
+
+        async def _run() -> list[dict[str, Any]] | None:
+            try:
+                rows = await resolve()
+            finally:
+                _inflight.pop(key, None)
+            if rows:
+                write_catalog(harness, fingerprint, rows)
+            return rows
+
+        task = asyncio.create_task(_run(), name=f"model-catalog-{harness}")
+        _inflight[key] = task
+    return await asyncio.shield(task)
+
+
 def default_row(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
     """Return the catalog's single ``isDefault`` row, if any.
 
@@ -138,6 +196,7 @@ __all__ = [
     "catalog_contains",
     "catalog_path",
     "default_row",
+    "ensure_catalog",
     "fingerprint_of",
     "read_catalog",
     "write_catalog",

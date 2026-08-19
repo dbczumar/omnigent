@@ -171,7 +171,6 @@ _logger = logging.getLogger(__name__)
 # pending before the configured rows are served instead. Module-level so
 # tests can patch the pacing.
 _CLAUDE_MODEL_OPTIONS_INLINE_WAIT_S = 2.5
-_CLAUDE_MODEL_OPTIONS_PROBE_GRACE_S = 25.0
 
 
 def _warn_unresolved_sub_agent(session_id: str | None, sub_agent_name: str) -> None:
@@ -4066,7 +4065,40 @@ def create_runner_app(
             read_codex_home_config_model,
             Path(state.codex_home),
         )
-        return mark_launch_default(rows, active_model)
+        marked = mark_launch_default(rows, active_model)
+        # Write the live account rows back to the shared catalog store so the
+        # pre-launch picker converges to account truth after the first
+        # session — keeping the SHAPE's stored default (a session's own pin
+        # must not become the host-wide default).
+        asyncio.get_running_loop().create_task(
+            _write_back_codex_catalog([dict(row) for row in rows])
+        )
+        return marked
+
+    async def _write_back_codex_catalog(rows: list[_JsonObject]) -> None:
+        try:
+            from omnigent import model_catalog_store
+            from omnigent.codex_native_app_server import (
+                codex_catalog_fingerprint,
+                mark_launch_default,
+                resolve_native_codex_launch,
+            )
+
+            launch = await asyncio.to_thread(resolve_native_codex_launch, model=None)
+            fingerprint = codex_catalog_fingerprint(launch)
+            stored = model_catalog_store.read_catalog("codex-native", fingerprint)
+            stored_default = next(
+                (row.get("id") for row in stored or [] if row.get("isDefault") is True),
+                None,
+            )
+            shaped = mark_launch_default(
+                rows, stored_default if isinstance(stored_default, str) else None
+            )
+            await asyncio.to_thread(
+                model_catalog_store.write_catalog, "codex-native", fingerprint, shaped
+            )
+        except Exception:  # noqa: BLE001 — write-back is best-effort
+            _logger.debug("codex model-catalog write-back skipped", exc_info=True)
 
     async def _handle_pi_native_model_change(
         conv_id: str,
@@ -7974,17 +8006,15 @@ def create_runner_app(
         }
         return JSONResponse(status_code=200, content={"models": models})
 
-    # One probe per claude-native session: the merged listing (configured
-    # rows ∪ the harness's own probed answer) resolves once in the
-    # background and is cached for the session's lifetime — the launch
-    # config cannot change under it. A short inline wait lets a warm probe
-    # answer the first request; past that the endpoint answers 503 (the
-    # server's fetch retries those), and past the grace it serves the
-    # configured rows so the catalog is never empty.
+    # Claude's session listing IS the shared launch catalog: the same
+    # fingerprint-keyed store file the launch resolved against and the
+    # host's pre-launch picker serves — identical by construction, no
+    # separate composition. Cached per session for its lifetime (the launch
+    # config cannot change under it). A cold store pays one probe: a short
+    # inline wait answers a warm one, past that the endpoint answers 503
+    # (the server's fetch retries those) while the store's single-flight
+    # probe completes in the background.
     _claude_model_options_rows: dict[str, list[dict[str, object]]] = {}
-    _claude_model_options_probes: dict[
-        str, tuple[asyncio.Task[list[dict[str, object]]], float]
-    ] = {}
 
     @app.get("/v1/sessions/{session_id}/claude-model-options")
     async def get_session_claude_model_options(session_id: str) -> JSONResponse:
@@ -8024,47 +8054,16 @@ def create_runner_app(
                     ),
                 },
             )
-        from omnigent.claude_native import (
-            claude_model_options_with_probe,
-            claude_native_model_options,
-        )
+        from omnigent.claude_native import claude_launch_catalog
 
-        entry = _claude_model_options_probes.get(session_id)
-        if entry is None:
-
-            async def _probed_rows() -> list[dict[str, object]]:
-                merged, _gateway_rows = await claude_model_options_with_probe(claude_config)
-                return merged
-
-            entry = (asyncio.create_task(_probed_rows()), time.monotonic())
-            _claude_model_options_probes[session_id] = entry
-        probe, started_at = entry
-        with contextlib.suppress(TimeoutError):
-            await asyncio.wait_for(
-                asyncio.shield(probe), timeout=_CLAUDE_MODEL_OPTIONS_INLINE_WAIT_S
-            )
-        if probe.done():
-            try:
-                rows = probe.result()
-            except asyncio.CancelledError:
-                raise
-            except Exception:  # noqa: BLE001 — retryable; the next request restarts the probe
-                _claude_model_options_probes.pop(session_id, None)
-                _logger.warning(
-                    "Claude-native model probe failed for session=%s",
-                    session_id,
-                    exc_info=True,
-                )
-                return JSONResponse(
-                    status_code=503,
-                    content={
-                        "error": "claude_native_model_options_failed",
-                        "detail": "the harness model probe failed; retrying",
-                    },
-                )
-            _claude_model_options_rows[session_id] = rows
-            return JSONResponse(status_code=200, content={"models": rows})
-        if time.monotonic() - started_at < _CLAUDE_MODEL_OPTIONS_PROBE_GRACE_S:
+        rows: list[dict[str, object]] | None
+        try:
+            # The store's single-flight probe survives this wait expiring
+            # (ensure_catalog shields it), so a 503 here is genuinely
+            # "pending", not "restarted".
+            async with asyncio.timeout(_CLAUDE_MODEL_OPTIONS_INLINE_WAIT_S):
+                rows = await claude_launch_catalog(claude_config)
+        except TimeoutError:
             return JSONResponse(
                 status_code=503,
                 content={
@@ -8072,13 +8071,35 @@ def create_runner_app(
                     "detail": "the harness model probe is still resolving",
                 },
             )
-        # The probe outlived the grace: serve the configured rows as this
-        # session's listing rather than holding the picker empty.
-        probe.cancel()
-        _claude_model_options_probes.pop(session_id, None)
-        rows = await asyncio.to_thread(claude_native_model_options, claude_config)
+        if not rows:
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "error": "claude_native_model_options_failed",
+                    "detail": "the harness model probe failed; retrying",
+                },
+            )
         _claude_model_options_rows[session_id] = rows
         return JSONResponse(status_code=200, content={"models": rows})
+
+    @app.get("/v1/sessions/{session_id}/model-options")
+    async def get_session_model_options(session_id: str) -> JSONResponse:
+        """One route for every harness family's session model listing.
+
+        The runner derives the harness from the session — the four
+        harness-named routes above/below remain as compatibility aliases
+        for older servers (deprecated; remove in 0.11.0).
+        """
+        harness = _session_harness_name(session_id)
+        if harness == "claude-native":
+            return await get_session_claude_model_options(session_id)
+        if harness in ("codex-native", "opencode-native"):
+            return await get_session_codex_model_options(session_id)
+        if harness == "cursor-native":
+            return await get_session_cursor_model_options(session_id)
+        if harness == "kiro-native":
+            return await get_session_kiro_model_options(session_id)
+        return JSONResponse(status_code=200, content={"models": []})
 
     @app.post("/v1/sessions/{session_id}/skills/resolve")
     async def resolve_session_skill(session_id: str, request: Request) -> JSONResponse:

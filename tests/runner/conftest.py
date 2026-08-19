@@ -20,6 +20,30 @@ from omnigent.spec.types import AgentSpec, ExecutorSpec, MCPServerConfig
 from tests.runner.helpers import NullServerClient
 
 
+@pytest.fixture(autouse=True)
+def _isolated_model_catalog_store(
+    monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    """Keep launch-path catalog consults off the developer's machine.
+
+    The native launch paths consult the shared model-catalog store and, on
+    a miss, probe the REAL harness CLIs — which a unit test must never do
+    (a real ``claude`` boot takes ~6 s and writes the developer's real
+    ``~/.omnigent`` store). Redirect the store's directory seam per test
+    and stub both launch-catalog resolvers to "no catalog" (the
+    pre-catalog behavior); a test exercising catalogs re-patches them
+    explicitly.
+    """
+    store_dir = tmp_path_factory.mktemp("model_catalog_store")
+    monkeypatch.setattr("omnigent.model_catalog_store._data_dir", lambda: store_dir)
+
+    async def _no_catalog(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr("omnigent.claude_native.claude_launch_catalog", _no_catalog)
+    monkeypatch.setattr("omnigent.codex_native_app_server.codex_launch_catalog", _no_catalog)
+
+
 def _drain_session_event_queue(queue: asyncio.Queue[Any] | None) -> list[dict[str, Any]]:
     """
     Drain and return every dict item currently on a runner session queue.

@@ -4091,7 +4091,12 @@ async def _refresh_stale_native_model_options(
     if inflight is None:
         endpoint = _MODEL_OPTIONS_ENDPOINT_BY_WRAPPER[_CLAUDE_NATIVE_WRAPPER_LABEL_VALUE]
         inflight = asyncio.create_task(
-            _load_model_options(runner_client, session_id, f"/v1/sessions/{session_id}/{endpoint}")
+            _load_model_options(
+                runner_client,
+                session_id,
+                f"/v1/sessions/{session_id}/model-options",
+                fallback_path=f"/v1/sessions/{session_id}/{endpoint}",
+            )
         )
         _model_options_inflight[session_id] = inflight
         inflight.add_done_callback(
@@ -8767,8 +8772,16 @@ async def _fetch_model_options(
     if cached is not None and session_id not in _model_options_stale:
         return cached
     if session_id not in _model_options_inflight:
-        path = f"/v1/sessions/{session_id}/{endpoint}"
-        task = asyncio.create_task(_load_model_options(runner_client, session_id, path))
+        # Unified route first; the harness-named route is the fallback for
+        # an older runner (deprecated aliases, removed in 0.11.0).
+        task = asyncio.create_task(
+            _load_model_options(
+                runner_client,
+                session_id,
+                f"/v1/sessions/{session_id}/model-options",
+                fallback_path=f"/v1/sessions/{session_id}/{endpoint}",
+            )
+        )
         _model_options_inflight[session_id] = task
 
         def _clear_runner_options_inflight(_task: asyncio.Task[None]) -> None:

@@ -184,16 +184,9 @@ _CLAUDE_CODE_NESTED_SESSION_ENV = "CLAUDECODE"
 _CLAUDE_CODE_API_KEY_HELPER_TTL_ENV = "CLAUDE_CODE_API_KEY_HELPER_TTL_MS"
 _CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS_ENV = "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS"
 _CLAUDE_CODE_USE_GATEWAY_ENV = "CLAUDE_CODE_USE_GATEWAY"
-#: Opt-in for Claude Code's startup gateway model discovery: with this set and
-#: ``ANTHROPIC_BASE_URL`` pointing at a gateway, the CLI fetches
-#: ``GET /v1/models`` itself and caches the (client-filtered) result to
-#: ``~/.claude/cache/gateway-models.json``.
-_CLAUDE_GATEWAY_DISCOVERY_ENV = "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"
-#: Kill-switch Claude Code treats as covering gateway model discovery too —
-#: a probe env carrying it silently returns no gateway rows.
+#: Kill-switch Claude Code treats as covering nonessential startup traffic;
+#: the probe strips it so speed knobs never mask harness output.
 _CLAUDE_NONESSENTIAL_TRAFFIC_ENV = "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"
-#: The harness-written discovery artifact, relative to the user's home.
-_CLAUDE_GATEWAY_MODELS_CACHE_RELPATH = Path(".claude") / "cache" / "gateway-models.json"
 _CLAUDE_MODEL_PROBE_TIMEOUT_S = 20.0
 #: Wall-clock cap for the per-alias resolution fan-out as a whole; aliases
 #: still unresolved when it expires keep their bare rows (the cache's
@@ -240,13 +233,6 @@ _ANTHROPIC_CUSTOM_MODEL_OPTION_ENV = CUSTOM_MODEL_OPTION_ENV_VAR
 _ANTHROPIC_CUSTOM_MODEL_OPTION_NAME_ENV = CUSTOM_MODEL_OPTION_NAME_ENV_VAR
 _UCODE_CLAUDE_CUSTOM_TIER = LEGACY_CUSTOM_SLOT_ROW_ID
 _UCODE_CLAUDE_CUSTOM_TIER_LABEL = "Sonnet 5"
-_CLAUDE_NATIVE_STATIC_MODEL_OPTIONS: tuple[tuple[str, str], ...] = (
-    ("fable", "Fable"),
-    ("opus", "Opus"),
-    ("sonnet", "Sonnet 4.6"),
-    (_UCODE_CLAUDE_CUSTOM_TIER, _UCODE_CLAUDE_CUSTOM_TIER_LABEL),
-    ("haiku", "Haiku"),
-)
 _DEFAULT_UCODE_AUTH_REFRESH_INTERVAL_MS = 900_000
 _SESSION_LABELS = {
     "omnigent.ui": "terminal",
@@ -652,59 +638,10 @@ def claude_native_model_options(
         if not model_id:
             return []
         return [{"id": model_id, "model": model_id, "displayName": model_id, "isDefault": True}]
-    return [
-        {
-            "id": model_id,
-            "model": model_id,
-            "displayName": label,
-            "isDefault": False,
-        }
-        for model_id, label in _CLAUDE_NATIVE_STATIC_MODEL_OPTIONS
-    ]
-
-
-def _claude_gateway_artifact_rows(base_url: str) -> list[dict[str, object]]:
-    """
-    Read the gateway rows Claude Code's own discovery wrote for *base_url*.
-
-    The artifact is the harness's post-filter conclusion — reading it (rather
-    than replaying the fetch) keeps Claude's discovery semantics inside
-    Claude. The file holds one gateway's result keyed by ``baseUrl``; a
-    mismatch means another launch overwrote it, which reads as no rows.
-
-    :param base_url: The probe's gateway origin, e.g.
-        ``"https://x.databricks.com/anthropic"``.
-    :returns: Picker rows for the discovered models; empty when the artifact
-        is absent, unreadable, or keyed to a different gateway.
-    """
-    artifact = Path.home() / _CLAUDE_GATEWAY_MODELS_CACHE_RELPATH
-    try:
-        payload = json.loads(artifact.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return []
-    if not isinstance(payload, dict):
-        return []
-    cached_url = payload.get("baseUrl")
-    if not isinstance(cached_url, str) or cached_url.rstrip("/") != base_url.rstrip("/"):
-        return []
-    rows: list[dict[str, object]] = []
-    for entry in payload.get("models", []):
-        if not isinstance(entry, dict):
-            continue
-        model_id = entry.get("id")
-        if not isinstance(model_id, str) or not model_id:
-            continue
-        display_name = entry.get("display_name")
-        rows.append(
-            {
-                "id": model_id,
-                "model": model_id,
-                "displayName": (
-                    display_name if isinstance(display_name, str) and display_name else model_id
-                ),
-            }
-        )
-    return rows
+    # No curated fallback: an unconfigured shape's rows come from the probe
+    # (the harness's own enumeration) or not at all — a hand-written list
+    # here is exactly how a frozen "Sonnet 4.6" once shipped.
+    return []
 
 
 def _parse_claude_model_aliases(stdout: str) -> list[str]:
@@ -810,8 +747,7 @@ def _claude_model_probe_invocation(
         }
     )
     # Mirrors the native terminal's env-unset list, plus the nonessential-
-    # traffic kill-switch that also gates gateway discovery — though gateway
-    # mode suppresses that fetch anyway, so the rows stay empty either way.
+    # traffic kill-switch, so speed knobs never mask harness output.
     env.pop("DATABRICKS_CONFIG_PROFILE", None)
     env.pop(_CLAUDE_CODE_NESTED_SESSION_ENV, None)
     env.pop(_CLAUDE_NONESSENTIAL_TRAFFIC_ENV, None)
@@ -941,7 +877,6 @@ class ClaudeModelProbe:
     """One harness enumeration: picker rows plus the bare-launch default.
 
     :param alias_rows: The printed aliases as deduplicated picker rows.
-    :param gateway_rows: Harness-discovered gateway rows (usually empty).
     :param default_model: The model the enumeration run itself launched on
         (its init event's ``model``) — what a no-pick launch of this config
         actually runs — or ``None`` when unreadable.
@@ -950,7 +885,6 @@ class ClaudeModelProbe:
     """
 
     alias_rows: list[dict[str, object]]
-    gateway_rows: list[dict[str, object]]
     default_model: str | None = None
     default_label: str | None = None
 
@@ -1001,8 +935,6 @@ async def probe_claude_model_options(
     :returns: The probe result, or ``None`` when the probe failed (callers
         fall back to the configured/static rows).
     """
-    env_overrides = claude_config.env if claude_config is not None else {}
-    base_url = env_overrides.get(_UCODE_CLAUDE_BASE_URL_ENV)
     command, launch_args, env = _claude_model_probe_invocation(
         claude_config, ("--output-format", "stream-json", "--verbose")
     )
@@ -1057,57 +989,11 @@ async def probe_claude_model_options(
             continue
         seen_models.add(row["model"])
         alias_rows.append(row)
-    gateway_rows: list[dict[str, object]] = []
-    if base_url and env_overrides.get(_CLAUDE_GATEWAY_DISCOVERY_ENV) == "1":
-        # Reads empty on a launch that also sets CLAUDE_CODE_USE_GATEWAY: that
-        # mode suppresses the harness's fetch, so no artifact is ever written.
-        gateway_rows = await asyncio.to_thread(_claude_gateway_artifact_rows, base_url)
     return ClaudeModelProbe(
         alias_rows=alias_rows,
-        gateway_rows=gateway_rows,
         default_model=default_resolution.get("model"),
         default_label=default_resolution.get("label"),
     )
-
-
-async def claude_model_options_with_probe(
-    claude_config: ClaudeNativeUcodeConfig | None,
-) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
-    """
-    The full Claude listing: configured rows ∪ the harness's own answer.
-
-    One composition shared by every surface (the host's pre-launch picker
-    and the runner's session listing), so the two cannot drift. A resolved
-    provider config keeps its tier rows as the rich spelling and the probe
-    contributes the rest; a bare subscription launch is the probe's rows
-    alone. A failed probe falls back to the configured rows.
-
-    :param claude_config: The resolved launch config, or ``None``.
-    :returns: ``(rows, gateway_rows)`` — the merged picker rows, plus the
-        harness-discovered gateway rows on their own for callers that track
-        routability.
-    """
-    configured = await asyncio.to_thread(claude_native_model_options, claude_config)
-    probe = await probe_claude_model_options(claude_config)
-    if probe is None:
-        return configured, []
-    alias_rows, gateway_rows = probe.alias_rows, probe.gateway_rows
-    if claude_config is not None and not _serves_canonical_anthropic_ids(claude_config):
-        # The endpoint routes its own ids only. A pinned family resolves to
-        # the endpoint's spelling and stays; an unpinned alias resolves to a
-        # bare canonical Anthropic id the endpoint would reject at inference,
-        # so offering that row invites a pick that cannot work.
-        alias_rows = [
-            row for row in alias_rows if not str(row.get("model", "")).startswith("claude-")
-        ]
-    merged = list(configured) if claude_config is not None else []
-    seen = {row.get("id") for row in merged} | {row.get("model") for row in merged}
-    for row in (*alias_rows, *gateway_rows):
-        if row["id"] in seen:
-            continue
-        seen.add(row["id"])
-        merged.append(row)
-    return merged, gateway_rows
 
 
 def claude_catalog_fingerprint(claude_config: ClaudeNativeUcodeConfig | None) -> str:
@@ -1152,8 +1038,6 @@ async def claude_model_catalog(
     rows = list(probe.alias_rows)
     if claude_config is not None and not _serves_canonical_anthropic_ids(claude_config):
         rows = [row for row in rows if not str(row.get("model", "")).startswith("claude-")]
-    seen_ids = {row["id"] for row in rows}
-    rows.extend(row for row in probe.gateway_rows if row["id"] not in seen_ids)
 
     default_model = probe.default_model
     marked = False
@@ -1206,13 +1090,9 @@ async def claude_launch_catalog(
     from omnigent import model_catalog_store
 
     fingerprint = claude_catalog_fingerprint(claude_config)
-    cached = model_catalog_store.read_catalog("claude-native", fingerprint)
-    if cached is not None:
-        return cached
-    rows = await claude_model_catalog(claude_config)
-    if rows:
-        model_catalog_store.write_catalog("claude-native", fingerprint, rows)
-    return rows
+    return await model_catalog_store.ensure_catalog(
+        "claude-native", fingerprint, lambda: claude_model_catalog(claude_config)
+    )
 
 
 def build_native_claude_terminal_env(
@@ -2455,11 +2335,6 @@ def _ucode_config_for_profile(
         # 400 "invalid beta flag" is no longer needed on this path.
         _CLAUDE_CODE_USE_GATEWAY_ENV: "1",
         _CLAUDE_CODE_CUSTOM_HEADERS_ENV: _DATABRICKS_CODING_AGENT_HEADER,
-        # Ask Claude Code to discover the gateway's own model inventory at
-        # startup (GET /v1/models, which the gateway now serves). Inert while
-        # CLAUDE_CODE_USE_GATEWAY is set above: the CLI fires that fetch only
-        # on its first-party provider path, so no session discovers anything.
-        _CLAUDE_GATEWAY_DISCOVERY_ENV: "1",
     }
     # Pin each Claude Code model-tier alias to the corresponding Databricks
     # gateway model ID so that the /model picker natively shows gateway model

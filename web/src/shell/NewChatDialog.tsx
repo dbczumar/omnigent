@@ -1345,8 +1345,10 @@ function HarnessConfigModal({
   pickedModel,
   claudeModelOptions,
   claudeModelsLoading,
+  claudeModelsError,
   codexModelOptions,
   codexModelsLoading,
+  codexModelsError,
   pickedEffort,
   pickedHarness,
   costControlMode,
@@ -1373,8 +1375,10 @@ function HarnessConfigModal({
   pickedModel: string;
   claudeModelOptions: readonly Pick<NativeModelOption, "id" | "displayName" | "isDefault">[];
   claudeModelsLoading: boolean;
+  claudeModelsError: string | null;
   codexModelOptions: readonly Pick<NativeModelOption, "id" | "displayName" | "isDefault">[];
   codexModelsLoading: boolean;
+  codexModelsError: string | null;
   pickedEffort: string;
   pickedHarness: string | null;
   costControlMode: CostControlMode;
@@ -1568,7 +1572,7 @@ function HarnessConfigModal({
                   )}
                   {!claudeModelsLoading && claudeModelOptions.length === 0 && (
                     <div className="px-2.5 py-1 text-sm text-muted-foreground">
-                      Models unavailable
+                      {claudeModelsError ?? "Models unavailable"}
                     </div>
                   )}
                 </RoutingModelSelect>
@@ -1639,7 +1643,7 @@ function HarnessConfigModal({
                   )}
                   {!modelsLoading && modelOptions.length === 0 && (
                     <div className="px-2.5 py-1 text-sm text-muted-foreground">
-                      Models unavailable
+                      {codexModelsError ?? "Models unavailable"}
                     </div>
                   )}
                 </RoutingModelSelect>
@@ -1973,16 +1977,16 @@ export function NewChatLandingScreen() {
   const [sandboxSelected, setSandboxSelected] = useState(
     () => landingDraft?.sandboxSelected ?? false,
   );
-  const { data: hostClaudeModelOptions, isLoading: hostClaudeModelsLoading } = useHostModelOptions(
-    selectedHostId,
-    "claude-native",
-    !sandboxSelected,
-  );
-  const { data: hostCodexModelOptions, isLoading: hostCodexModelsLoading } = useHostModelOptions(
-    selectedHostId,
-    "codex-native",
-    !sandboxSelected,
-  );
+  const {
+    data: hostClaudeModelOptions,
+    isLoading: hostClaudeModelsLoading,
+    error: hostClaudeModelsError,
+  } = useHostModelOptions(selectedHostId, "claude-native", !sandboxSelected);
+  const {
+    data: hostCodexModelOptions,
+    isLoading: hostCodexModelsLoading,
+    error: hostCodexModelsError,
+  } = useHostModelOptions(selectedHostId, "codex-native", !sandboxSelected);
   const claudeModelOptions = useMemo(
     () =>
       sandboxSelected
@@ -4176,9 +4180,15 @@ export function NewChatLandingScreen() {
                     claudeModelsLoading={
                       !sandboxSelected && selectedHostId !== null && hostClaudeModelsLoading
                     }
+                    claudeModelsError={
+                      !sandboxSelected ? (hostClaudeModelsError?.message ?? null) : null
+                    }
                     codexModelOptions={codexModelOptions}
                     codexModelsLoading={
                       !sandboxSelected && selectedHostId !== null && hostCodexModelsLoading
+                    }
+                    codexModelsError={
+                      !sandboxSelected ? (hostCodexModelsError?.message ?? null) : null
                     }
                     pickedEffort={pickedEffort}
                     pickedHarness={pickedHarness}

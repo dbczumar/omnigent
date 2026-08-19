@@ -93,8 +93,12 @@ async function fetchHostModelOptions(
     `/v1/hosts/${encodeURIComponent(hostId)}/harnesses/${encodeURIComponent(harness)}/model-options`,
   );
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
-  const body = (await res.json()) as { models?: NativeModelOption[] };
-  return body.models ?? [];
+  const body = (await res.json()) as { models?: NativeModelOption[]; error?: string };
+  const models = body.models ?? [];
+  // An honest empty answer names its reason (the host's probe failed);
+  // surface it as the query error so the picker can say WHY it is empty.
+  if (models.length === 0 && body.error) throw new Error(body.error);
+  return models;
 }
 
 /** Model choices available before launch, resolved on the selected host. */

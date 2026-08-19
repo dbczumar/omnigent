@@ -686,7 +686,7 @@ def create_hosts_router(
             )
         models = result.get("models")
         routable = result.get("routable_models")
-        return {
+        payload: dict[str, Any] = {
             "models": models if isinstance(models, list) else [],
             # Every id the harness's endpoint routes: the picker names one
             # row per model, while a launch takes an exact id.
@@ -694,6 +694,13 @@ def create_hosts_router(
                 [m for m in routable if isinstance(m, str)] if isinstance(routable, list) else []
             ),
         }
+        # An honest empty answer carries the reason (e.g. "the codex model
+        # probe failed — see the host log") so the picker can say WHY it is
+        # empty instead of a generic "Models unavailable".
+        error = result.get("error")
+        if isinstance(error, str) and error:
+            payload["error"] = error
+        return payload
 
     @router.post("/hosts/{host_id}/runners")
     async def launch_runner(

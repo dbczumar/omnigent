@@ -968,17 +968,15 @@ async def codex_launch_catalog(*, codex_path: str | None = None) -> list[_JsonOb
         _logger.warning("codex catalog: launch shape resolution failed", exc_info=True)
         return None
     fingerprint = codex_catalog_fingerprint(launch)
-    cached = model_catalog_store.read_catalog("codex-native", fingerprint)
-    if cached is not None:
-        return cached
-    try:
-        rows = await probe_codex_model_options(codex_path=codex_path)
-    except Exception:  # noqa: BLE001 — probe failure means "no catalog", never a crash
-        _logger.warning("codex catalog probe failed", exc_info=True)
-        return None
-    if rows:
-        model_catalog_store.write_catalog("codex-native", fingerprint, rows)
-    return rows
+
+    async def _probe() -> list[_JsonObject] | None:
+        try:
+            return await probe_codex_model_options(codex_path=codex_path)
+        except Exception:  # noqa: BLE001 — probe failure means "no catalog", never a crash
+            _logger.warning("codex catalog probe failed", exc_info=True)
+            return None
+
+    return await model_catalog_store.ensure_catalog("codex-native", fingerprint, _probe)
 
 
 def _build_native_codex_app_server_argv(
