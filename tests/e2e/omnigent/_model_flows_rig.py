@@ -596,6 +596,20 @@ class Ui:
         """Visible text of the landing model select trigger."""
         return self.page.get_by_test_id("new-chat-landing-config-model").inner_text().strip()
 
+    def wait_landing_model_label(self, pattern: str, timeout_s: float = 90.0) -> str:
+        """Wait until the landing model trigger matches *pattern* (regex).
+
+        The trigger renders a bare sentinel while the host's boot probe is
+        still warming (the web retries the fetch with backoff), so give the
+        label the same warm-up wait a person makes.
+        """
+
+        def _match() -> str | None:
+            text = self.landing_model_label()
+            return text if re.search(pattern, text) else None
+
+        return wait_for(_match, timeout=timeout_s, what=f"landing model label {pattern!r}")
+
     def open_model_dropdown(self, test_id: str, warmup_timeout_s: float = 90.0) -> list[str]:
         """Open a model select and return its visible option texts.
 

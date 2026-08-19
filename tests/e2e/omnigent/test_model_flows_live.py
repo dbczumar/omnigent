@@ -140,7 +140,7 @@ def test_row6_claude_default_label_names_the_true_default(
         ui.open_landing()
         ui.pick_agent("Claude Code")
         ui.open_landing_config()
-        label = ui.landing_model_label()
+        label = ui.wait_landing_model_label(r"Default \(.+\)|Models unavailable")
 
     assert re.fullmatch(r"Default \(.+\)", label), (
         f"claude's Default entry reads {label!r} — the truthful default name is "
@@ -408,7 +408,7 @@ def test_row2_codex_databricks_picker_is_populated_and_decorated(
         ui.open_landing()
         ui.pick_agent("Codex")
         ui.open_landing_config()
-        label = ui.landing_model_label()
+        label = ui.wait_landing_model_label(r"Default \(.+\)|Models unavailable")
         options = ui.open_model_dropdown("new-chat-landing-config-model")
 
     rows = [opt for opt in options if not opt.lower().startswith("default")]
