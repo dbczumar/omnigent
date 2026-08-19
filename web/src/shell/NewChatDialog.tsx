@@ -1565,6 +1565,7 @@ function HarnessConfigModal({
                   offerSmartRouting={smartRoutingEligible}
                   testId="new-chat-landing-config-model"
                   models={claudeModelSelectOptions}
+                  defaultLabel={defaultModelLabel(claudeModelOptions)}
                   contentClassName="[&_[data-slot=select-item]]:pl-2.5"
                 >
                   {claudeModelsLoading && (
@@ -1997,6 +1998,9 @@ export function NewChatLandingScreen() {
         : (hostClaudeModelOptions ?? []).map((option) => ({
             id: option.id,
             displayName: option.displayName ?? option.id,
+            // Keep the catalog's default marker: the Default row names the
+            // model a bare launch truly runs, for claude exactly as codex.
+            isDefault: option.isDefault,
           })),
     [hostClaudeModelOptions, sandboxSelected],
   );
@@ -2597,7 +2601,8 @@ export function NewChatLandingScreen() {
     if (supportsPermissionMode) {
       const modelValue = routingOn
         ? SMART_ROUTING_LABEL
-        : (claudeModelOptions.find((m) => m.id === pickedModel)?.displayName ?? "Default");
+        : (claudeModelOptions.find((m) => m.id === pickedModel)?.displayName ??
+          defaultModelLabel(claudeModelOptions));
       // Routing picks the model + effort per turn, so mirror the modal's frozen
       // Effort row: an em-dash when routing is on, else the picked level.
       const effortValue = routingOn

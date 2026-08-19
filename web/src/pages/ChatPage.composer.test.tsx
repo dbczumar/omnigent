@@ -1834,6 +1834,36 @@ describe("Composer config gear", () => {
     expect(screen.getByRole("option", { name: "Default (GPT-5.6-Luna)" })).toBeTruthy();
   });
 
+  it("names the model Claude's Default resolves to, like Codex", async () => {
+    // The claude branch used to discard the catalog's isDefault marker, so
+    // its gear read a bare "Default" while codex named the model — the same
+    // shared labeling now serves both harnesses.
+    const options = [
+      { id: "sonnet", model: "claude-sonnet-5", displayName: "Sonnet 5" },
+      {
+        id: "opus[1m]",
+        model: "claude-opus-4-8[1m]",
+        displayName: "Opus 4.8 (1M context)",
+        isDefault: true,
+      },
+    ];
+    renderWithTooltips(
+      <Composer
+        {...composerProps({
+          showEffort: false,
+          showModels: true,
+          modelPickerKind: "claude",
+          codexModelOptions: options,
+        })}
+      />,
+    );
+
+    fireEvent.click(gear()!);
+    await screen.findByTestId("composer-config-modal");
+    fireEvent.click(screen.getByTestId("composer-config-model"));
+    expect(screen.getByRole("option", { name: "Default (Opus 4.8 (1M context))" })).toBeTruthy();
+  });
+
   it("does not open the modal via bare /model when the gear is disabled (unreachable)", async () => {
     // Bare /model bumps the open nonce; on an unreachable session the gear is
     // inert, so the nonce must NOT open a modal that can't apply a change.

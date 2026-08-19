@@ -6308,10 +6308,13 @@ function SessionConfigModal({
                 offerSmartRouting={costRoutingEligible}
                 testId="composer-config-model"
                 models={modelSelectOptions}
-                // Codex's Default resolves to a model the spellings don't make
-                // obvious, so name it here exactly as the landing dialog does.
+                // Claude's and Codex's Default resolves to a model the
+                // spellings don't make obvious, so name it here exactly as
+                // the landing dialog does — one shared labeling.
                 defaultLabel={
-                  modelPickerKind === "codex" ? defaultModelLabel(modelOptions) : undefined
+                  modelPickerKind === "codex" || modelPickerKind === "claude"
+                    ? defaultModelLabel(modelOptions)
+                    : undefined
                 }
                 activeModelId={draftModelId}
               />

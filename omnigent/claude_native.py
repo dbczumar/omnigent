@@ -74,9 +74,11 @@ from omnigent._wrapper_labels import (
 )
 from omnigent.claude_launcher import resolve_claude_launch
 from omnigent.claude_model_vocabulary import (
+    ALIAS_MODEL_ENV_VARS,
     CUSTOM_MODEL_OPTION_ENV_VAR,
     CUSTOM_MODEL_OPTION_NAME_ENV_VAR,
     LEGACY_CUSTOM_SLOT_ROW_ID,
+    claude_model_alias,
 )
 from omnigent.claude_native_bridge import (
     BRIDGE_ID_LABEL_KEY,
@@ -2488,9 +2490,27 @@ def _provider_config_for_native_claude(entry: ProviderEntry) -> ClaudeNativeUcod
         family.base_url,
         family.default_model,
     )
+    # Pin the alias vocabulary to the entry's declared models, so ``/model``
+    # and the harness probe resolve aliases inside this gateway's routable
+    # set instead of falling back to canonical Anthropic ids the gateway
+    # rejects. The ``models:`` map's flat tier keys (``opus``/``sonnet``/…)
+    # pin their aliases directly; ``models.default`` pins its own family's
+    # alias when nothing else declared that family.
+    pin_env: dict[str, str] = {}
+    for alias, env_var in ALIAS_MODEL_ENV_VARS.items():
+        pinned = family.models.get(alias)
+        if isinstance(pinned, str) and pinned.strip():
+            pin_env[env_var] = pinned.strip()
+    if family.default_model:
+        default_alias = claude_model_alias(family.default_model, env={})
+        base_alias = (default_alias or "").partition("[")[0]
+        default_env_var = ALIAS_MODEL_ENV_VARS.get(base_alias)
+        if default_env_var:
+            pin_env.setdefault(default_env_var, family.default_model)
     return ClaudeNativeUcodeConfig(
         env={
             _UCODE_CLAUDE_BASE_URL_ENV: family.base_url,
+            **pin_env,
             # Disable beta flags gateways reject (400 "invalid beta flag");
             # skip when CLAUDE_CODE_USE_GATEWAY=1 to keep tool search enabled.
             **(
@@ -2501,6 +2521,15 @@ def _provider_config_for_native_claude(entry: ProviderEntry) -> ClaudeNativeUcod
         },
         api_key_helper=api_key_helper,
         model=family.default_model,
+        # The declared models are exactly what this entry can route.
+        routable_models=tuple(
+            dict.fromkeys(
+                [
+                    *pin_env.values(),
+                    *([family.default_model] if family.default_model else []),
+                ]
+            )
+        ),
     )
 
 

@@ -6605,14 +6605,102 @@ def test_provider_config_for_native_claude_key_injects_base_url_and_helper(
     cfg = claude_native._provider_config_for_native_claude(entry)
     assert cfg is not None
     # ANTHROPIC_BASE_URL plus the gateway-safety beta-disable flag (gateways
-    # 400 on beta flags they don't implement; see _provider_config_for_native_claude).
+    # 400 on beta flags they don't implement; see _provider_config_for_native_claude)
+    # plus the declared default pinning its own family alias, so /model and
+    # the harness probe resolve ``sonnet`` to the entry's model.
     assert cfg.env == {
         "ANTHROPIC_BASE_URL": "https://api.anthropic.com",
+        "ANTHROPIC_DEFAULT_SONNET_MODEL": "claude-sonnet-4-6",
         "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS": "1",
     }
     # Static key delivered via the apiKeyHelper, never the env (allowlist).
     assert cfg.api_key_helper == "printf %s sk-ant-test"
     assert cfg.model == "claude-sonnet-4-6"
+    assert cfg.routable_models == ("claude-sonnet-4-6",)
+
+
+def test_provider_config_for_native_claude_pins_declared_tier_models(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A gateway entry's ``models:`` tier keys pin the alias vocabulary.
+
+    The flat tier keys (``opus``/``sonnet``/…) pin their aliases directly and
+    ``models.default`` pins its own family's alias when that family has no
+    explicit key — so every declared model becomes a servable ``/model``
+    spelling (and a probed catalog row) instead of the alias falling back to
+    a canonical Anthropic id the gateway rejects.
+    """
+    from omnigent.onboarding.provider_config import load_providers
+
+    monkeypatch.delenv("CLAUDE_CODE_USE_GATEWAY", raising=False)
+
+    entry = load_providers(
+        {
+            "providers": {
+                "gw": {
+                    "kind": "gateway",
+                    "anthropic": {
+                        "base_url": "https://gw.example/anthropic",
+                        "auth_command": "my-cli print-token",
+                        "models": {
+                            "default": "system.ai.claude-opus-4-8[1m]",
+                            "sonnet": "system.ai.claude-sonnet-5",
+                            "haiku": "system.ai.claude-haiku-4-5",
+                        },
+                    },
+                }
+            }
+        }
+    )["gw"]
+
+    cfg = claude_native._provider_config_for_native_claude(entry)
+    assert cfg is not None
+    assert cfg.env == {
+        "ANTHROPIC_BASE_URL": "https://gw.example/anthropic",
+        "ANTHROPIC_DEFAULT_SONNET_MODEL": "system.ai.claude-sonnet-5",
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL": "system.ai.claude-haiku-4-5",
+        # The default's own family (opus) had no explicit key, so the
+        # default pins it — bracket markers ride along verbatim.
+        "ANTHROPIC_DEFAULT_OPUS_MODEL": "system.ai.claude-opus-4-8[1m]",
+        "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS": "1",
+    }
+    assert cfg.model == "system.ai.claude-opus-4-8[1m]"
+    assert set(cfg.routable_models) == {
+        "system.ai.claude-opus-4-8[1m]",
+        "system.ai.claude-sonnet-5",
+        "system.ai.claude-haiku-4-5",
+    }
+
+
+def test_provider_config_for_native_claude_explicit_tier_key_beats_the_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``models.default`` never overwrites an explicitly keyed family pin."""
+    from omnigent.onboarding.provider_config import load_providers
+
+    monkeypatch.delenv("CLAUDE_CODE_USE_GATEWAY", raising=False)
+
+    entry = load_providers(
+        {
+            "providers": {
+                "gw": {
+                    "kind": "gateway",
+                    "anthropic": {
+                        "base_url": "https://gw.example/anthropic",
+                        "auth_command": "my-cli print-token",
+                        "models": {
+                            "default": "system.ai.claude-opus-4-8",
+                            "opus": "system.ai.claude-opus-5",
+                        },
+                    },
+                }
+            }
+        }
+    )["gw"]
+
+    cfg = claude_native._provider_config_for_native_claude(entry)
+    assert cfg is not None
+    assert cfg.env["ANTHROPIC_DEFAULT_OPUS_MODEL"] == "system.ai.claude-opus-5"
 
 
 def test_provider_config_for_native_claude_uses_auth_command_verbatim(
@@ -6953,10 +7041,11 @@ def test_resolve_native_claude_config_ambient_prefixed_key(
     cfg = claude_native.resolve_native_claude_config(spec=None)
 
     assert cfg is not None
-    assert cfg.env == {
-        "ANTHROPIC_BASE_URL": "https://api.anthropic.com",
-        "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS": "1",
-    }
+    assert cfg.env["ANTHROPIC_BASE_URL"] == "https://api.anthropic.com"
+    assert cfg.env["CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS"] == "1"
+    # The ambient entry's declared default pins its own family alias too —
+    # one behavior for every provider-entry shape.
+    assert cfg.env.get("ANTHROPIC_DEFAULT_OPUS_MODEL") == cfg.model
     assert cfg.api_key_helper == "printf %s sk-ant-prefixed"
 
 
