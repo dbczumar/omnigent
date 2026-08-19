@@ -1939,6 +1939,7 @@ async def test_events_model_change_on_native_session_types_slash_command(
 async def _post_model_change_with_status_sequence(
     monkeypatch: pytest.MonkeyPatch,
     status_values: list[str | None],
+    pane_status: str | None = None,
 ) -> Any:
     """Run one claude-native ``model_change`` with a scripted status file.
 
@@ -1974,6 +1975,9 @@ async def _post_model_change_with_status_sequence(
         return script.pop(0) if len(script) > 1 else script[0]
 
     monkeypatch.setattr(claude_native_bridge, "read_claude_status_model", _scripted_status)
+    # No tmux behind these tests: the in-loop dialog check must not spend a
+    # real 1 s tmux-info wait per poll.
+    monkeypatch.setattr(claude_native_bridge, "confirm_dialog_if_open", lambda _b, *, hint: False)
     monkeypatch.setattr(runner_app_module, "_CLAUDE_MODEL_CONFIRM_TIMEOUT_S", 0.3)
     monkeypatch.setattr(runner_app_module, "_CLAUDE_MODEL_CONFIRM_POLL_S", 0.01)
 
@@ -2002,6 +2006,8 @@ async def _post_model_change_with_status_sequence(
             },
         )
         assert create_resp.status_code == 201, create_resp.text
+        if pane_status is not None:
+            app.state.native_pane_status["68c7c1acc5eeec3978c5e62043da51a5"] = pane_status
         return await client.post(
             "/v1/sessions/68c7c1acc5eeec3978c5e62043da51a5/events",
             json={"type": "model_change", "model": "claude-opus-4-7"},
@@ -2032,9 +2038,9 @@ async def test_events_model_change_unconfirmed_switch_answers_503(
     """A pane that never switches makes the ask fail loud, not pass silent.
 
     The statusLine snapshot keeps reporting the old model for the whole
-    confirmation budget (the swallowed-dialog case): the runner must answer
-    non-2xx so the server surfaces the divergence instead of the row
-    claiming the pick.
+    confirmation budget on an IDLE pane (the swallowed-dialog case): the
+    runner must answer non-2xx so the server surfaces the divergence
+    instead of the row claiming the pick.
     """
     resp = await _post_model_change_with_status_sequence(
         monkeypatch,
@@ -2044,6 +2050,27 @@ async def test_events_model_change_unconfirmed_switch_answers_503(
     body = resp.json()
     assert body["error"] == "claude_native_model_unconfirmed"
     assert "did not confirm" in body["detail"]
+
+
+@pytest.mark.asyncio
+async def test_events_model_change_mid_turn_defers_instead_of_failing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A switch during an active turn is deferred, never a visible failure.
+
+    Claude queues a mid-turn ``/model`` and applies it when the turn
+    settles — possibly well past the confirmation budget. With the pane
+    reporting ``running``, the timeout answers success (a detached watcher
+    keeps answering the late confirm dialog) so the user does not get a
+    "was not switched" error for a switch that is still on its way; the
+    harness's report settles the picker when it lands.
+    """
+    resp = await _post_model_change_with_status_sequence(
+        monkeypatch,
+        ["claude-opus-4-6"],
+        pane_status="running",
+    )
+    assert resp.status_code == 204, resp.text
 
 
 @pytest.mark.asyncio

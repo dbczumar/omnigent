@@ -3379,6 +3379,38 @@ def _confirm_tui_dialog(
     return False
 
 
+def confirm_dialog_if_open(bridge_dir: Path, *, hint: str) -> bool:
+    """
+    Accept the *hint* dialog iff it is on screen RIGHT NOW; never blind-Enter.
+
+    Loop-safe building block for watchers that outlive a single injection
+    (a mid-turn ``/model`` queues in Claude's composer and pops its confirm
+    dialog only when the turn settles — minutes later). Unlike
+    :func:`_confirm_tui_dialog` there is no timeout fallback Enter, so
+    calling this every few seconds can never type into a surface that is
+    not the named dialog.
+
+    :param bridge_dir: Bridge directory path.
+    :param hint: Text the dialog renders, e.g.
+        :data:`SWITCH_MODEL_DIALOG_HINT`.
+    :returns: ``True`` when the dialog was on screen and confirmed.
+    """
+    try:
+        info = _wait_for_tmux_info(bridge_dir, timeout_s=1.0)
+    except (RuntimeError, OSError):
+        return False
+    socket_path = info["socket_path"]
+    tmux_target = info["tmux_target"]
+    try:
+        pane = _capture_pane(socket_path, tmux_target)
+        if hint not in pane:
+            return False
+        _confirm_and_verify_dialog_closed(socket_path, tmux_target, hint=hint)
+    except (RuntimeError, OSError):
+        return False
+    return True
+
+
 def _confirm_and_verify_dialog_closed(
     socket_path: str,
     tmux_target: str,

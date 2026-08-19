@@ -182,6 +182,13 @@ _CLAUDE_MODEL_OPTIONS_INLINE_WAIT_S = 2.5
 _CLAUDE_MODEL_CONFIRM_TIMEOUT_S = 10.0
 _CLAUDE_MODEL_CONFIRM_POLL_S = 0.25
 
+# How long the detached watcher keeps answering a /model confirm dialog that
+# pops after the active turn settles (a mid-turn switch queues in the
+# composer), and how often it looks. Long turns are common; the watch is
+# cheap (one tmux capture per poll) and never types blind.
+_CLAUDE_MODEL_LATE_DIALOG_BUDGET_S = 1200.0
+_CLAUDE_MODEL_LATE_DIALOG_POLL_S = 2.0
+
 
 def _warn_unresolved_sub_agent(session_id: str | None, sub_agent_name: str) -> None:
     """
@@ -2082,6 +2089,10 @@ def create_runner_app(
     _active_turns: dict[str, asyncio.Task[None] | None] = {}
     app.state.active_turns = _active_turns
     _native_pane_status: dict[str, str] = {}
+    app.state.native_pane_status = _native_pane_status
+    # Detached watchers answering a /model confirm dialog that pops after
+    # the active turn settles (a mid-turn switch queues in the composer).
+    _model_dialog_watchers: set[asyncio.Task[None]] = set()
     _session_message_buffers: dict[str, list[dict[str, Any]]] = {}
     app.state.session_message_buffers = _session_message_buffers
     _author_attribution_sessions: set[str] = set()
@@ -4377,6 +4388,48 @@ def create_runner_app(
             )
         return Response(status_code=204)
 
+    async def _watch_late_model_dialog(
+        conv_id: str,
+        bridge_dir: Path,
+        expected: set[str],
+    ) -> None:
+        """Answer a ``/model`` confirm dialog that pops after the active turn.
+
+        A mid-turn switch queues in Claude's composer; the confirm dialog
+        renders only when the turn settles — potentially minutes after the
+        injection's own watch and the request's confirm window. This watcher
+        presses Enter ONLY when the model dialog is verifiably on screen
+        (never blind), stops as soon as the statusLine reports one of the
+        expected spellings, and gives up quietly after its budget — the
+        persisted request and the forwarder's verbatim report remain the
+        authoritative record either way.
+        """
+        from omnigent.claude_native_bridge import (
+            SWITCH_MODEL_DIALOG_HINT,
+            confirm_dialog_if_open,
+            read_claude_status_model,
+        )
+
+        deadline = time.monotonic() + _CLAUDE_MODEL_LATE_DIALOG_BUDGET_S
+        while time.monotonic() < deadline:
+            try:
+                current = await asyncio.to_thread(read_claude_status_model, bridge_dir)
+                if current and current in expected:
+                    return
+                await asyncio.to_thread(
+                    confirm_dialog_if_open, bridge_dir, hint=SWITCH_MODEL_DIALOG_HINT
+                )
+            except Exception:  # noqa: BLE001 — best-effort; the report reconciles
+                _logger.debug(
+                    "late model-dialog watch errored for session=%s", conv_id, exc_info=True
+                )
+                return
+            await asyncio.sleep(_CLAUDE_MODEL_LATE_DIALOG_POLL_S)
+        _logger.info(
+            "late model-dialog watch for session=%s ended without a confirmed switch",
+            conv_id,
+        )
+
     async def _handle_claude_native_model_change(
         conv_id: str,
         model: str | None,
@@ -4388,6 +4441,7 @@ def create_runner_app(
         from omnigent.claude_native_bridge import (
             SWITCH_MODEL_DIALOG_HINT,
             bridge_dir_for_bridge_id,
+            confirm_dialog_if_open,
             inject_slash_command,
             read_claude_status_model,
             read_model_env,
@@ -4489,9 +4543,33 @@ def create_runner_app(
                     bridge_dir,
                 )
                 return Response(status_code=204)
+            # The confirm dialog can render well after the injection's own
+            # short watch (a warm repaint, or a queued command surfacing) —
+            # answer it whenever it shows inside the window.
+            await asyncio.to_thread(
+                confirm_dialog_if_open, bridge_dir, hint=SWITCH_MODEL_DIALOG_HINT
+            )
             if time.monotonic() >= deadline:
                 break
             await asyncio.sleep(_CLAUDE_MODEL_CONFIRM_POLL_S)
+        if _native_pane_status.get(conv_id) in ("running", "waiting"):
+            # Mid-turn switch: Claude queues the typed command and applies it
+            # when the turn settles — its confirm dialog can pop minutes from
+            # now. Not a failure: answer success, keep a detached watcher on
+            # the late dialog, and let the forwarder's report settle the
+            # picker when the switch actually lands.
+            watcher = asyncio.create_task(
+                _watch_late_model_dialog(conv_id, bridge_dir, expected),
+                name=f"claude-model-dialog-{conv_id}",
+            )
+            _model_dialog_watchers.add(watcher)
+            watcher.add_done_callback(_model_dialog_watchers.discard)
+            _logger.info(
+                "claude-native model change for session=%s is queued behind an active "
+                "turn; watching for the late confirm dialog",
+                conv_id,
+            )
+            return Response(status_code=204)
         return JSONResponse(
             status_code=503,
             content={
