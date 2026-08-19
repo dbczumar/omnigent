@@ -316,18 +316,27 @@ def test_row17_model_and_effort_apply_together(
         ui.wait_composer_label(r"\S", timeout_s=90)
         ui.open_gear()
         ui.gear_rows()
+        # Selecting an option closes the Radix dropdown itself; pressing
+        # Escape afterwards would close the whole gear modal.
         ui.pick_dropdown_option("Sonnet 5")
-        ui.close_dropdown()
         ui.page.get_by_test_id("composer-config-effort").click()
-        ui.pick_dropdown_option("High")
+        # Pick a level that DIFFERS from the ambient default (this
+        # machine runs "high" globally): the save skips unchanged knobs.
+        ui.pick_dropdown_option("Medium")
         ui.save_gear()
         pane_text = pane.wait_for_text(r"Sonnet", timeout=45)
+        # The save serializes its legs IN THE PAGE and the model leg holds
+        # until the pane CONFIRMS the switch (the design's step-6 contract),
+        # so the effort PATCH is sent by the browser seconds after "Sonnet"
+        # appears — the browser must stay open while we poll for it.
+        effort = wait_for(
+            lambda: session_snapshot(rig.base_url, session_id).get("reasoning_effort"),
+            timeout=45.0,
+            what="the effort override to persist",
+        )
 
     assert "Sonnet" in pane_text
-    snapshot = session_snapshot(rig.base_url, session_id)
-    assert snapshot.get("reasoning_effort") in ("high", "High"), (
-        f"the effort half of the save was lost: {snapshot.get('reasoning_effort')!r}"
-    )
+    assert str(effort).lower() == "medium", f"the effort half of the save was lost: {effort!r}"
 
 
 # ---------------------------------------------------------------------------

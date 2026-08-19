@@ -234,6 +234,12 @@ class ModelFlowsRig:
         env.pop("OMNIGENT", None)
         for key in [k for k in env if k.startswith(("OMNIGENT_RUNNER", "OMNIGENT_PROCESS"))]:
             env.pop(key, None)
+        # tests/conftest.py exports OMNIGENT_DISABLE_CATALOG_LOOKUP=1 for the
+        # whole pytest process (hermetic suites must not hit the network). This
+        # suite is the OPPOSITE: a live rig whose databricks shapes need the
+        # real provider catalog, and the spawned server/host inherit our env —
+        # so drop the kill switch for them.
+        env.pop("OMNIGENT_DISABLE_CATALOG_LOOKUP", None)
         spa_dist = os.environ.get(SPA_DIST_ENV)
         if spa_dist:
             env["OMNIGENT_WEB_UI_DIST"] = spa_dist
@@ -364,15 +370,32 @@ class ModelFlowsRig:
 def booted_rig(tmp_root: Path) -> Iterator[ModelFlowsRig]:
     """Context manager: a rig with its server booted (no host yet).
 
+    Snapshots the developer's ``~/.claude/settings.json`` and restores it on
+    exit: the suite's real ``/model`` switches run under the real ``$HOME``
+    and Claude Code persists every switch as the person's global default —
+    without the restore, a test run would rewrite the developer's model.
+
     :param tmp_root: Directory for the sandbox (config home, data, logs, db).
     :yields: The rig; call :meth:`ModelFlowsRig.start_host` per shape.
     """
+    settings_path = Path.home() / ".claude" / "settings.json"
+    settings_before: bytes | None
+    try:
+        settings_before = settings_path.read_bytes()
+    except OSError:
+        settings_before = None
     rig = ModelFlowsRig(repo=rig_repo(), root=tmp_root)
     rig.start_server()
     try:
         yield rig
     finally:
         rig.stop()
+        if settings_before is not None:
+            try:
+                if settings_path.read_bytes() != settings_before:
+                    settings_path.write_bytes(settings_before)
+            except OSError:
+                pass
 
 
 # ---------------------------------------------------------------------------
@@ -503,18 +526,29 @@ def codex_config_copy_model(session_id: str) -> str | None:
     """Return the ``model =`` line of a codex session's private config copy.
 
     The per-session ``CODEX_HOME`` lives under the real home dir regardless of
-    ``OMNIGENT_DATA_DIR`` (it is harness state, not omnigent state).
+    ``OMNIGENT_DATA_DIR`` (it is harness state, not omnigent state) — but its
+    directory is named by a runner-GENERATED bridge id, recorded only in the
+    bridge's own ``state.json`` (as ``session_id``). Resolve by scanning.
 
     :param session_id: The session/conversation id.
     :returns: The pinned model string, or ``None``.
     """
-    path = Path.home() / ".omnigent" / "codex-native" / session_id / "codex-home" / "config.toml"
-    if not path.exists():
+    root = Path.home() / ".omnigent" / "codex-native"
+    for state_path in root.glob("*/state.json"):
+        try:
+            state = json.loads(state_path.read_text())
+        except (OSError, ValueError):
+            continue
+        if state.get("session_id") != session_id:
+            continue
+        config = state_path.parent / "codex-home" / "config.toml"
+        if not config.exists():
+            return None
+        for line in config.read_text().splitlines():
+            match = re.match(r'^model\s*=\s*"(?P<model>[^"]+)"', line.strip())
+            if match:
+                return match.group("model")
         return None
-    for line in path.read_text().splitlines():
-        match = re.match(r'^model\s*=\s*"(?P<model>[^"]+)"', line.strip())
-        if match:
-            return match.group("model")
     return None
 
 
@@ -562,18 +596,34 @@ class Ui:
         """Visible text of the landing model select trigger."""
         return self.page.get_by_test_id("new-chat-landing-config-model").inner_text().strip()
 
-    def open_model_dropdown(self, test_id: str) -> list[str]:
+    def open_model_dropdown(self, test_id: str, warmup_timeout_s: float = 90.0) -> list[str]:
         """Open a model select and return its visible option texts.
 
+        A dropdown opened while the host's boot probe is still warming shows
+        only the loading/error note and the sentinels; the web retries the
+        fetch with backoff, so keep the dropdown open and re-read until model
+        rows (or the settled error) appear — the same wait a person makes.
+
         :param test_id: Trigger test id (landing or composer variant).
+        :param warmup_timeout_s: How long to allow the boot probe to warm.
         :returns: Option texts, whitespace-flattened.
         """
         self.page.get_by_test_id(test_id).click()
-        self.page.wait_for_timeout(500)
-        return [
-            re.sub(r"\s+", " ", opt.inner_text().strip())
-            for opt in self.page.get_by_role("option").all()
-        ]
+        deadline = time.monotonic() + warmup_timeout_s
+
+        def _texts() -> list[str]:
+            return [
+                re.sub(r"\s+", " ", opt.inner_text().strip())
+                for opt in self.page.get_by_role("option").all()
+            ]
+
+        while True:
+            self.page.wait_for_timeout(500)
+            texts = _texts()
+            if any(not t.lower().startswith(("default", "smart routing")) for t in texts):
+                return texts
+            if time.monotonic() >= deadline:
+                return texts
 
     def pick_dropdown_option(self, needle: str) -> None:
         """Click the open dropdown's first option containing *needle*."""
@@ -594,19 +644,24 @@ class Ui:
         self.page.get_by_test_id("new-chat-landing-config-save").click()
         self.page.wait_for_timeout(400)
 
-    def submit_new_chat(self, prompt: str, timeout_s: float = 60.0) -> str:
+    def submit_new_chat(self, prompt: str, timeout_s: float = 150.0) -> str:
         """Type *prompt*, submit, and wait for the session route.
+
+        The wait must be a PLAYWRIGHT wait (`wait_for_url`), not a
+        sleep-poll of ``page.url``: the sync API pumps its event dispatch
+        only inside playwright calls, so a plain ``time.sleep`` loop reads a
+        URL frozen at the landing route forever — the navigation this waits
+        for was landing within seconds while the poll never saw it. The
+        budget still covers a COLD create (host launch + harness boot).
 
         :returns: The new session/conversation id.
         """
         self.page.get_by_test_id("new-chat-landing-input").fill(prompt)
         self.page.get_by_test_id("new-chat-landing-submit").click()
-
-        def _conv() -> str | None:
-            match = re.search(r"/c/([a-z0-9_-]+)", self.page.url, re.I)
-            return match.group(1) if match else None
-
-        return wait_for(_conv, timeout=timeout_s, what="the session route")
+        self.page.wait_for_url(re.compile(r"/c/[a-z0-9_-]+", re.I), timeout=timeout_s * 1000)
+        match = re.search(r"/c/([a-z0-9_-]+)", self.page.url, re.I)
+        assert match is not None, f"no session id in {self.page.url!r}"
+        return match.group(1)
 
     def open_session(self, session_id: str) -> None:
         """Navigate to a session's chat page."""
@@ -675,6 +730,35 @@ def browser_ui(base_url: str) -> Iterator[Ui]:
     with sync_playwright() as pw:
         browser = pw.chromium.launch()
         page = browser.new_context(viewport={"width": 1440, "height": 950}).new_page()
+        if os.environ.get("OMNIGENT_E2E_MODEL_FLOWS_TRACE") == "1":
+            # Debug tap: print API traffic, console errors, and failed
+            # requests so a stalled flow can be attributed from the test log.
+            page.on(
+                "response",
+                lambda resp: (
+                    print(f"[trace] {resp.status} {resp.request.method} {resp.url}")
+                    if "/v1/" in resp.url
+                    else None
+                ),
+            )
+            page.on(
+                "requestfailed",
+                lambda req: print(f"[trace] REQFAIL {req.method} {req.url} :: {req.failure}"),
+            )
+            page.on(
+                "console",
+                lambda msg: (
+                    print(f"[trace] CONSOLE[{msg.type}] {msg.text[:200]}")
+                    if msg.type == "error"
+                    else None
+                ),
+            )
+            page.on(
+                "framenavigated",
+                lambda frame: (
+                    print(f"[trace] NAV {frame.url}") if frame == page.main_frame else None
+                ),
+            )
         try:
             yield Ui(page, base_url)
         finally:

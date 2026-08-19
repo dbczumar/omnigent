@@ -108,7 +108,14 @@ export function useHostModelOptions(hostId: string | null, harness: string, enab
     queryFn: () => fetchHostModelOptions(hostId as string, harness),
     enabled: enabled && hostId !== null,
     staleTime: 30_000,
-    retry: false,
+    // A request racing the host's boot probe gets an honest empty answer
+    // with an error string; the probe itself completes shortly after
+    // (single-flight in the host's catalog store). Retry with backoff so a
+    // picker opened during that warm-up window fills in instead of pinning
+    // the transient error until reopen. A genuinely failing probe still
+    // surfaces its error once the retries exhaust (~45 s).
+    retry: 6,
+    retryDelay: (attempt) => Math.min(5_000, 1_000 * 2 ** attempt),
   });
 }
 
