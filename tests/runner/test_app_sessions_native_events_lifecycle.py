@@ -907,12 +907,15 @@ async def test_claude_native_model_options_serves_probe_union_after_pending(
     )
     release = asyncio.Event()
 
-    async def _slow_probe(
-        claude_config: object,
-    ) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    async def _slow_probe(claude_config: object) -> object:
         del claude_config
         await release.wait()
-        return [{"id": "sonnet[1m]", "model": "claude-sonnet-5[1m]"}], []
+        from omnigent.claude_native import ClaudeModelProbe
+
+        return ClaudeModelProbe(
+            alias_rows=[{"id": "sonnet[1m]", "model": "claude-sonnet-5[1m]"}],
+            gateway_rows=[],
+        )
 
     monkeypatch.setattr("omnigent.claude_native.probe_claude_model_options", _slow_probe)
     monkeypatch.setattr(runner_app_module, "_CLAUDE_MODEL_OPTIONS_INLINE_WAIT_S", 0.01)

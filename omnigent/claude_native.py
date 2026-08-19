@@ -936,31 +936,76 @@ def _claude_alias_row(alias: str, resolution: dict[str, str]) -> dict[str, objec
     return {"id": alias, "model": model, "displayName": label or alias}
 
 
+@dataclass(frozen=True)
+class ClaudeModelProbe:
+    """One harness enumeration: picker rows plus the bare-launch default.
+
+    :param alias_rows: The printed aliases as deduplicated picker rows.
+    :param gateway_rows: Harness-discovered gateway rows (usually empty).
+    :param default_model: The model the enumeration run itself launched on
+        (its init event's ``model``) — what a no-pick launch of this config
+        actually runs — or ``None`` when unreadable.
+    :param default_label: The harness's own label for *default_model*, or
+        ``None``.
+    """
+
+    alias_rows: list[dict[str, object]]
+    gateway_rows: list[dict[str, object]]
+    default_model: str | None = None
+    default_label: str | None = None
+
+
+def _parse_claude_enumeration_aliases(stdout: str) -> list[str]:
+    """Extract the alias list from a stream-json enumeration run.
+
+    The ``Available:`` line lives inside the ``result`` event's text on a
+    stream-json run; falls back to scanning the raw output so a plain-text
+    run still parses.
+
+    :param stdout: The enumeration run's decoded stdout.
+    :returns: Alias names, e.g. ``["sonnet", "opus", ...]``.
+    """
+    for line in stdout.splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(event, dict) and event.get("type") == "result":
+            result_text = event.get("result")
+            if isinstance(result_text, str):
+                aliases = _parse_claude_model_aliases(result_text)
+                if aliases:
+                    return aliases
+    return _parse_claude_model_aliases(stdout)
+
+
 async def probe_claude_model_options(
     claude_config: ClaudeNativeUcodeConfig | None,
-) -> tuple[list[dict[str, object]], list[dict[str, object]]] | None:
+) -> ClaudeModelProbe | None:
     """
-    Ask Claude Code itself which models it would offer.
+    Ask Claude Code itself which models it would offer, and its default.
 
     The harness is the source of truth: a short ``claude -p "/model"`` run
-    with the session-launch env makes Claude Code print its own alias list
-    and — when the env opts into gateway model discovery — fire its own
-    ``/v1/models`` fetch and write its artifact. Each printed alias is then
-    resolved to its concrete model by a per-alias harness run. All outputs
-    are read verbatim; no selection semantics are replicated here. Runs for
-    every config shape, including the bare subscription launch (``None``
-    config).
+    (stream-json, so its init event also names the model a bare launch of
+    this config actually runs — the truthful "Default") makes Claude Code
+    print its own alias list. Each printed alias is then resolved to its
+    concrete model by a per-alias harness run. All outputs are read
+    verbatim; no selection semantics are replicated here. Runs for every
+    config shape, including the bare subscription launch (``None`` config).
 
     :param claude_config: The resolved native launch config
         (:func:`resolve_native_claude_config`), or ``None``.
-    :returns: ``(alias_rows, gateway_rows)`` — the printed aliases as
-        deduplicated picker rows plus any harness-discovered gateway rows —
-        or ``None`` when the probe failed (callers fall back to the
-        configured/static rows).
+    :returns: The probe result, or ``None`` when the probe failed (callers
+        fall back to the configured/static rows).
     """
     env_overrides = claude_config.env if claude_config is not None else {}
     base_url = env_overrides.get(_UCODE_CLAUDE_BASE_URL_ENV)
-    command, launch_args, env = _claude_model_probe_invocation(claude_config)
+    command, launch_args, env = _claude_model_probe_invocation(
+        claude_config, ("--output-format", "stream-json", "--verbose")
+    )
     try:
         process = await asyncio.create_subprocess_exec(
             command,
@@ -991,7 +1036,11 @@ async def probe_claude_model_options(
             stderr.decode(errors="replace").strip()[-500:],
         )
         return None
-    aliases = _parse_claude_model_aliases(stdout.decode(errors="replace"))
+    text = stdout.decode(errors="replace")
+    aliases = _parse_claude_enumeration_aliases(text)
+    # The enumeration run's own init event names what a bare launch runs —
+    # the harness's truthful Default.
+    default_resolution = _parse_claude_current_model(text)
     # The picker renders its own top-level Default choice (launch with no
     # model), which is exactly what the harness's ``default`` alias does —
     # listing it again would duplicate that row.
@@ -1013,7 +1062,12 @@ async def probe_claude_model_options(
         # Reads empty on a launch that also sets CLAUDE_CODE_USE_GATEWAY: that
         # mode suppresses the harness's fetch, so no artifact is ever written.
         gateway_rows = await asyncio.to_thread(_claude_gateway_artifact_rows, base_url)
-    return alias_rows, gateway_rows
+    return ClaudeModelProbe(
+        alias_rows=alias_rows,
+        gateway_rows=gateway_rows,
+        default_model=default_resolution.get("model"),
+        default_label=default_resolution.get("label"),
+    )
 
 
 async def claude_model_options_with_probe(
@@ -1037,7 +1091,7 @@ async def claude_model_options_with_probe(
     probe = await probe_claude_model_options(claude_config)
     if probe is None:
         return configured, []
-    alias_rows, gateway_rows = probe
+    alias_rows, gateway_rows = probe.alias_rows, probe.gateway_rows
     if claude_config is not None and not _serves_canonical_anthropic_ids(claude_config):
         # The endpoint routes its own ids only. A pinned family resolves to
         # the endpoint's spelling and stays; an unpinned alias resolves to a
@@ -1054,6 +1108,111 @@ async def claude_model_options_with_probe(
         seen.add(row["id"])
         merged.append(row)
     return merged, gateway_rows
+
+
+def claude_catalog_fingerprint(claude_config: ClaudeNativeUcodeConfig | None) -> str:
+    """The launch-config fingerprint keying claude's shared model catalog.
+
+    One formula for every consumer (host boot probe, runner launch, session
+    listing), so they read and write the same catalog file.
+
+    :param claude_config: The resolved launch config, or ``None``.
+    :returns: A stable fingerprint string.
+    """
+    from omnigent.model_catalog_store import fingerprint_of
+
+    return fingerprint_of(
+        "claude-native",
+        sorted(claude_config.env.items()) if claude_config is not None else None,
+        claude_config.api_key_helper if claude_config is not None else None,
+        claude_config.model if claude_config is not None else None,
+    )
+
+
+async def claude_model_catalog(
+    claude_config: ClaudeNativeUcodeConfig | None,
+) -> list[dict[str, object]] | None:
+    """
+    The harness-truth catalog: probe rows with one truthful ``isDefault``.
+
+    Rows come from the harness's own enumeration alone (no configured/static
+    merge). Servability filtering matches the listing composition: on a
+    non-canonical endpoint, aliases resolving to bare Anthropic ids are
+    dropped. The default marker is the enumeration run's own init-event
+    model — what a bare launch of this config actually runs — matched onto
+    its row, or appended as its own row when the catalog lacks it (a
+    ``settings.json`` pin, say) and the endpoint can serve it.
+
+    :param claude_config: The resolved launch config, or ``None``.
+    :returns: Catalog rows, or ``None`` when the probe failed.
+    """
+    probe = await probe_claude_model_options(claude_config)
+    if probe is None:
+        return None
+    rows = list(probe.alias_rows)
+    if claude_config is not None and not _serves_canonical_anthropic_ids(claude_config):
+        rows = [row for row in rows if not str(row.get("model", "")).startswith("claude-")]
+    seen_ids = {row["id"] for row in rows}
+    rows.extend(row for row in probe.gateway_rows if row["id"] not in seen_ids)
+
+    default_model = probe.default_model
+    marked = False
+    out: list[dict[str, object]] = []
+    for row in rows:
+        is_default = (
+            bool(default_model)
+            and not marked
+            and (row.get("model") == default_model or row.get("id") == default_model)
+        )
+        if is_default:
+            marked = True
+            out.append({**row, "isDefault": True})
+        else:
+            out.append({key: value for key, value in row.items() if key != "isDefault"})
+    if default_model and not marked:
+        # Append the observed default as its own honest row — but never
+        # claim a bare Anthropic id is launchable on an endpoint that
+        # rejects that spelling.
+        servable = (
+            claude_config is None
+            or _serves_canonical_anthropic_ids(claude_config)
+            or not default_model.startswith("claude-")
+        )
+        if servable:
+            out.append(
+                {
+                    "id": default_model,
+                    "model": default_model,
+                    "displayName": probe.default_label or default_model,
+                    "isDefault": True,
+                }
+            )
+    return out
+
+
+async def claude_launch_catalog(
+    claude_config: ClaudeNativeUcodeConfig | None,
+) -> list[dict[str, object]] | None:
+    """
+    The shared catalog for this launch config: read the store, probe on miss.
+
+    The store read is what keeps launches fast once the host's boot probe
+    (or a previous launch) has run; a cold miss pays one probe and persists
+    the answer for every later consumer.
+
+    :param claude_config: The resolved launch config, or ``None``.
+    :returns: Catalog rows, or ``None`` when no catalog could be obtained.
+    """
+    from omnigent import model_catalog_store
+
+    fingerprint = claude_catalog_fingerprint(claude_config)
+    cached = model_catalog_store.read_catalog("claude-native", fingerprint)
+    if cached is not None:
+        return cached
+    rows = await claude_model_catalog(claude_config)
+    if rows:
+        model_catalog_store.write_catalog("claude-native", fingerprint, rows)
+    return rows
 
 
 def build_native_claude_terminal_env(

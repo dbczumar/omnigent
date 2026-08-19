@@ -803,7 +803,10 @@ def _probe_codex_home(config_overrides: Sequence[str]) -> Path:
     Persistent (unlike the hermetic discovery's temp dir) so Codex's own
     ``models_cache.json`` ETag handling makes repeat probes cheap; keyed by
     the override set so a provider change never replays another provider's
-    cache.
+    cache. The account's real ``auth.json`` is symlinked in, the same way
+    a session launch links it: the credential decides which models the
+    account's catalog lists (login-gated entries, the account default), so
+    a credential-less probe answers for a catalog no session will see.
 
     :param config_overrides: The probe's ``-c`` overrides.
     :returns: The created ``CODEX_HOME`` directory.
@@ -811,6 +814,13 @@ def _probe_codex_home(config_overrides: Sequence[str]) -> Path:
     key = hashlib.sha256("\n".join(config_overrides).encode("utf-8")).hexdigest()[:12]
     home = Path.home() / ".omnigent" / "cache" / "codex-model-probe" / key
     home.mkdir(mode=0o700, parents=True, exist_ok=True)
+    real_auth = _codex_home_config_source_from_env() / "auth.json"
+    probe_auth = home / "auth.json"
+    if real_auth.exists():
+        with contextlib.suppress(OSError):
+            if probe_auth.is_symlink() or probe_auth.exists():
+                probe_auth.unlink()
+            probe_auth.symlink_to(real_auth)
     return home
 
 
@@ -861,10 +871,11 @@ async def probe_codex_model_options(*, codex_path: str | None = None) -> list[_J
     A Databricks profile contributes its provider overrides (gateway base
     URL + minted auth + model pin) and ``DATABRICKS_HOST``; other provider
     shapes carry their resolved ``-c`` overrides verbatim; the plain
-    Codex-login shape probes bare, which yields Codex's own visible
-    catalog. The probe home is isolated (never the user's real
-    ``~/.codex``), so login-gated catalog extras may be absent — the price
-    of a side-effect-free probe.
+    Codex-login shape probes bare, which yields the ACCOUNT's visible
+    catalog: the probe home is isolated (never the user's real
+    ``~/.codex``) but links the real ``auth.json`` in the way a session
+    launch does, so login-gated entries and the account default match what
+    a live session will offer.
 
     :param codex_path: Optional Codex executable override.
     :returns: The probe rows with a single default marked.
@@ -918,6 +929,56 @@ async def probe_codex_model_options(*, codex_path: str | None = None) -> list[_J
             _proc.kill_tree(process)
             await process.wait()
     return mark_launch_default(rows, pinned_model)
+
+
+def codex_catalog_fingerprint(launch: NativeCodexLaunch) -> str:
+    """The launch-config fingerprint keying codex's shared model catalog.
+
+    One formula for every consumer (host boot probe, runner launch, live
+    write-back), so they read and write the same catalog file. Callers
+    fingerprint the SHAPE — a ``model=None`` resolution — so per-session
+    picks never fragment the catalog.
+
+    :param launch: The resolved launch (``resolve_native_codex_launch``).
+    :returns: A stable fingerprint string.
+    """
+    from omnigent.model_catalog_store import fingerprint_of
+
+    return fingerprint_of(
+        "codex-native", launch.profile, launch.model, tuple(launch.config_overrides)
+    )
+
+
+async def codex_launch_catalog(*, codex_path: str | None = None) -> list[_JsonObject] | None:
+    """
+    The shared codex catalog for this host's default shape: store, then probe.
+
+    Reads the on-disk catalog for the ``model=None`` launch shape; a miss
+    pays one session-shaped probe (real auth linked in) and persists the
+    answer for every later consumer.
+
+    :param codex_path: Optional Codex executable override.
+    :returns: Catalog rows, or ``None`` when no catalog could be obtained.
+    """
+    from omnigent import model_catalog_store
+
+    try:
+        launch = await asyncio.to_thread(resolve_native_codex_launch, model=None)
+    except Exception:  # noqa: BLE001 — a broken provider config means no catalog
+        _logger.warning("codex catalog: launch shape resolution failed", exc_info=True)
+        return None
+    fingerprint = codex_catalog_fingerprint(launch)
+    cached = model_catalog_store.read_catalog("codex-native", fingerprint)
+    if cached is not None:
+        return cached
+    try:
+        rows = await probe_codex_model_options(codex_path=codex_path)
+    except Exception:  # noqa: BLE001 — probe failure means "no catalog", never a crash
+        _logger.warning("codex catalog probe failed", exc_info=True)
+        return None
+    if rows:
+        model_catalog_store.write_catalog("codex-native", fingerprint, rows)
+    return rows
 
 
 def _build_native_codex_app_server_argv(
@@ -2001,6 +2062,15 @@ def build_codex_native_server(
                 'sandbox_mode="danger-full-access"',
             ]
         )
+    # Every launch is explicit: the resolved model rides argv (``-c model=``)
+    # AND the private config copy's ``model =`` line (pinned in ``start``),
+    # both written from this one value — so a stale line copied from the
+    # user's shared config can never govern a session, and the two artifacts
+    # cannot drift.
+    if pinned_model and not any(
+        override.split("=", 1)[0] == "model" for override in config_overrides
+    ):
+        config_overrides.append(f"model={json.dumps(pinned_model)}")
     return CodexNativeAppServer(
         codex_path=resolved_codex,
         socket_path=socket_path,

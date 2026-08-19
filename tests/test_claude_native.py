@@ -7605,12 +7605,11 @@ async def test_probe_claude_model_options_runs_bare_and_skips_artifact(
     probe = await claude_native.probe_claude_model_options(None)
 
     assert probe is not None
-    alias_rows, gateway_rows = probe
-    assert alias_rows == [
+    assert probe.alias_rows == [
         {"id": "sonnet", "model": "sonnet", "displayName": "sonnet"},
         {"id": "opus", "model": "opus", "displayName": "opus"},
     ]
-    assert gateway_rows == []
+    assert probe.gateway_rows == []
 
 
 async def test_probe_claude_model_options_resolves_each_alias_via_the_harness(
@@ -7668,7 +7667,7 @@ async def test_probe_claude_model_options_resolves_each_alias_via_the_harness(
     probe = await claude_native.probe_claude_model_options(None)
 
     assert probe is not None
-    alias_rows, _gateway_rows = probe
+    alias_rows = probe.alias_rows
     assert alias_rows == [
         {"id": "sonnet", "model": "claude-sonnet-5", "displayName": "Sonnet 5"},
         {"id": "opus", "model": "claude-opus-5", "displayName": "Opus 5"},
@@ -7707,9 +7706,11 @@ async def test_claude_model_options_with_probe_drops_unservable_rows_on_gateways
 
     async def _fake_probe(
         claude_config: claude_native.ClaudeNativeUcodeConfig | None,
-    ) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    ) -> claude_native.ClaudeModelProbe:
         del claude_config
-        return [dict(row) for row in probe_rows], []
+        return claude_native.ClaudeModelProbe(
+            alias_rows=[dict(row) for row in probe_rows], gateway_rows=[]
+        )
 
     monkeypatch.setattr(claude_native, "probe_claude_model_options", _fake_probe)
     monkeypatch.setattr(
@@ -7781,9 +7782,8 @@ async def test_probe_claude_model_options_runs_the_harness_and_reads_artifact(
     probe = await claude_native.probe_claude_model_options(_gateway_probe_config())
 
     assert probe is not None
-    alias_rows, gateway_rows = probe
-    assert alias_rows == [{"id": "opus", "model": "opus", "displayName": "opus"}]
-    assert gateway_rows == [
+    assert probe.alias_rows == [{"id": "opus", "model": "opus", "displayName": "opus"}]
+    assert probe.gateway_rows == [
         {
             "id": "system.ai.claude-opus-4-8",
             "model": "system.ai.claude-opus-4-8",
@@ -7802,6 +7802,116 @@ async def test_probe_claude_model_options_runs_the_harness_and_reads_artifact(
     assert env["DISABLE_AUTOUPDATER"] == "1"
     assert "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC" not in env
     assert "CLAUDECODE" not in env
+
+
+async def test_claude_model_catalog_marks_the_enumerated_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The enumeration run's own model marks its row as the default."""
+
+    async def _fake_probe(config: object) -> claude_native.ClaudeModelProbe:
+        del config
+        return claude_native.ClaudeModelProbe(
+            alias_rows=[
+                {"id": "sonnet", "model": "claude-sonnet-5", "displayName": "Sonnet 5"},
+                {"id": "opus", "model": "claude-opus-5", "displayName": "Opus 5"},
+            ],
+            gateway_rows=[],
+            default_model="claude-opus-5",
+            default_label="Opus 5",
+        )
+
+    monkeypatch.setattr(claude_native, "probe_claude_model_options", _fake_probe)
+    rows = await claude_native.claude_model_catalog(None)
+    assert rows is not None
+    assert [row["id"] for row in rows] == ["sonnet", "opus"]
+    assert "isDefault" not in rows[0]
+    assert rows[1]["isDefault"] is True
+
+
+async def test_claude_model_catalog_appends_an_off_list_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A settings-pinned default absent from the aliases becomes its own row.
+
+    On this shape a bare launch runs a model no alias resolves to (e.g. a
+    ``settings.json`` ``ANTHROPIC_MODEL`` pin); the catalog appends it as a
+    row so every visible row is launchable and the Default label is honest.
+    """
+
+    async def _fake_probe(config: object) -> claude_native.ClaudeModelProbe:
+        del config
+        return claude_native.ClaudeModelProbe(
+            alias_rows=[
+                {"id": "sonnet", "model": "claude-sonnet-5", "displayName": "Sonnet 5"},
+            ],
+            gateway_rows=[],
+            default_model="claude-opus-4-8[1m]",
+            default_label="Opus 4.8 (1M context)",
+        )
+
+    monkeypatch.setattr(claude_native, "probe_claude_model_options", _fake_probe)
+    rows = await claude_native.claude_model_catalog(None)
+    assert rows is not None
+    assert rows[-1] == {
+        "id": "claude-opus-4-8[1m]",
+        "model": "claude-opus-4-8[1m]",
+        "displayName": "Opus 4.8 (1M context)",
+        "isDefault": True,
+    }
+
+
+async def test_claude_model_catalog_never_appends_an_unservable_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A bare-Anthropic default is not appended on a gateway endpoint.
+
+    The gateway rejects canonical Anthropic spellings, so claiming claude's
+    own default is launchable there would offer a row that cannot work.
+    """
+
+    async def _fake_probe(config: object) -> claude_native.ClaudeModelProbe:
+        del config
+        return claude_native.ClaudeModelProbe(
+            alias_rows=[
+                {
+                    "id": "sonnet",
+                    "model": "databricks-claude-sonnet-5",
+                    "displayName": "Sonnet 5",
+                },
+                {"id": "fable", "model": "claude-fable-5", "displayName": "Fable 5"},
+            ],
+            gateway_rows=[],
+            default_model="claude-opus-5[1m]",
+            default_label="Opus 5 (1M context)",
+        )
+
+    monkeypatch.setattr(claude_native, "probe_claude_model_options", _fake_probe)
+    rows = await claude_native.claude_model_catalog(_gateway_probe_config())
+    assert rows is not None
+    # The unservable alias row is filtered AND the unservable default is not
+    # appended; no row claims the default.
+    assert [row["id"] for row in rows] == ["sonnet"]
+    assert all(row.get("isDefault") is not True for row in rows)
+
+
+async def test_claude_launch_catalog_reads_the_store_then_probes_once(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The launch catalog is store-first; a miss probes once and persists."""
+    monkeypatch.setenv("OMNIGENT_DATA_DIR", str(tmp_path))
+    calls: list[int] = []
+
+    async def _fake_catalog(config: object) -> list[dict[str, object]]:
+        del config
+        calls.append(1)
+        return [{"id": "sonnet", "model": "claude-sonnet-5", "isDefault": True}]
+
+    monkeypatch.setattr(claude_native, "claude_model_catalog", _fake_catalog)
+    first = await claude_native.claude_launch_catalog(None)
+    second = await claude_native.claude_launch_catalog(None)
+    assert first == second == [{"id": "sonnet", "model": "claude-sonnet-5", "isDefault": True}]
+    assert len(calls) == 1, "the second read must come from the store, not a re-probe"
 
 
 async def test_probe_claude_model_options_returns_none_on_probe_failure(

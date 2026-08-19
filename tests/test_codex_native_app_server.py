@@ -588,6 +588,111 @@ def test_build_codex_native_server_pins_profile_resolved_model(
     assert app_server.pinned_model == expected_pin
 
 
+@pytest.mark.parametrize(
+    ("model", "profile", "extra_overrides"),
+    [
+        # Subscription: an explicit pick and a catalog-resolved Default.
+        ("gpt-5.5", None, ['model_provider="openai"']),
+        ("gpt-5.6-terra", None, ['model_provider="openai"']),
+        # cli-config: the user's own provider table rides the config copy.
+        ("gpt-5.5", None, ['model_provider="Databricks"']),
+        # Databricks profile: Default and an explicit pick.
+        (None, "oss", None),
+        ("databricks-gpt-5-5", "oss", None),
+    ],
+)
+def test_launch_argv_and_config_pin_name_the_same_model(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    model: str | None,
+    profile: str | None,
+    extra_overrides: list[str] | None,
+) -> None:
+    """
+    The argv ``-c model=`` and the config copy's pin never drift apart.
+
+    Both artifacts are written from one resolved value, on EVERY provider
+    shape and for Default and explicit picks alike — the structural end of
+    the stale-config-line class where a copied ``model =`` governed a
+    session the argv never named. On the profile shape the file
+    deliberately holds codex's own spelling (the vocabulary its readers
+    compare in) while argv carries the wire spelling; the guard asserts
+    they name the same model, and byte-identity everywhere else.
+    """
+    from omnigent import codex_native_app_server
+    from omnigent.codex_model_vocabulary import comparable_model_id
+
+    monkeypatch.setattr(
+        "omnigent.codex_native_app_server._find_codex_cli",
+        lambda: sys.executable,
+    )
+    monkeypatch.setattr(
+        codex_native_app_server,
+        "_databricks_launch_materialization",
+        lambda *, model, profile: codex_native_app_server._DatabricksLaunchMaterialization(
+            config_overrides=[f'model="{model or "databricks-gpt-5-6-luna"}"'],
+            model=model or "databricks-gpt-5-6-luna",
+            host="https://ws.example",
+        ),
+    )
+
+    app_server = build_codex_native_server(
+        socket_path=tmp_path / "codex.sock",
+        codex_home=tmp_path / "codex-home",
+        cwd=tmp_path,
+        model=model,
+        profile=profile,
+        bridge_dir=tmp_path / "bridge",
+        ap_server_url=None,
+        ap_auth_headers={},
+        extra_config_overrides=list(extra_overrides) if extra_overrides else None,
+    )
+
+    argv_models = [
+        override.split("=", 1)[1]
+        for override in app_server.config_overrides
+        if override.split("=", 1)[0] == "model"
+    ]
+    assert len(argv_models) == 1, app_server.config_overrides
+    argv_model = json.loads(argv_models[0]) if argv_models[0].startswith('"') else argv_models[0]
+    pinned = app_server.pinned_model
+    assert pinned, "every launch must pin a model"
+    assert comparable_model_id(argv_model) == comparable_model_id(pinned)
+    if profile is None:
+        assert argv_model == pinned
+
+
+async def test_codex_launch_catalog_reads_the_store_then_probes_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The launch catalog is store-first; a miss probes once and persists."""
+    from omnigent import codex_native_app_server
+
+    monkeypatch.setenv("OMNIGENT_DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        codex_native_app_server,
+        "resolve_native_codex_launch",
+        lambda *, model, spec=None: codex_native_app_server.NativeCodexLaunch(
+            config_overrides=['model_provider="openai"'], model=model, profile=None
+        ),
+    )
+    calls: list[int] = []
+
+    async def _fake_probe(*, codex_path: str | None = None) -> list[dict[str, object]]:
+        del codex_path
+        calls.append(1)
+        return [{"id": "gpt-5.6-terra", "model": "gpt-5.6-terra", "isDefault": True}]
+
+    monkeypatch.setattr(codex_native_app_server, "probe_codex_model_options", _fake_probe)
+
+    first = await codex_native_app_server.codex_launch_catalog()
+    second = await codex_native_app_server.codex_launch_catalog()
+    assert first == second
+    assert first == [{"id": "gpt-5.6-terra", "model": "gpt-5.6-terra", "isDefault": True}]
+    assert len(calls) == 1, "the second read must come from the store, not a re-probe"
+
+
 def _test_app_server(
     tmp_path: Path,
     codex_home: Path,
