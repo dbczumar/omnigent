@@ -2106,7 +2106,37 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
     savePickerPref(PICKER_PREF_MODEL_KEY, model);
     const { conversationId } = get();
     if (conversationId) {
-      const session = await updateSession(conversationId, { modelOverride: model });
+      const expectConfirmation = opts?.expectConfirmation === true && model !== null;
+      if (expectConfirmation) {
+        // Reported-model sessions: the chip keeps the harness's model until
+        // its own report confirms the switch. Mark the ask pending BEFORE
+        // the PATCH: the PATCH is held open while the runner drives and
+        // CONFIRMS the switch, so the harness's `session.model` report
+        // usually arrives before the PATCH resolves — pending set after the
+        // response would miss that clear and strand the spinner. The
+        // `session.model` event or a `model_change_not_applied` error
+        // settles it; the timer is spinner hygiene for the case where
+        // neither ever arrives (e.g. the session fell asleep mid-ask) — it
+        // outlasts the server's 20 s runner-forward budget.
+        setterFor(conversationId)({ pendingModelChange: model });
+        setTimeout(() => {
+          setterFor(conversationId)((s) =>
+            s.pendingModelChange === model ? { pendingModelChange: null } : {},
+          );
+        }, 30_000);
+      }
+      let session;
+      try {
+        session = await updateSession(conversationId, { modelOverride: model });
+      } catch (err) {
+        // The ask never reached the server — nothing will confirm it.
+        if (expectConfirmation) {
+          setterFor(conversationId)((s) =>
+            s.pendingModelChange === model ? { pendingModelChange: null } : {},
+          );
+        }
+        throw err;
+      }
       // Server-canonical may differ from the optimistic write (e.g.
       // when a clear alias was sent) — refresh local state to match.
       const canonical = session.modelOverride ?? null;
@@ -2121,21 +2151,6 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
       if (pickRevision === modelPickRevision) {
         rootSetState({ selectedModel: canonical });
         savePickerPref(PICKER_PREF_MODEL_KEY, canonical);
-      }
-      if (opts?.expectConfirmation && canonical) {
-        // Reported-model sessions: the chip keeps the harness's model until
-        // its own report confirms the switch. Mark the ask pending on the
-        // PATCHed conversation; the `session.model` event or a
-        // `model_change_not_applied` error settles it. The timer is spinner
-        // hygiene for the case where neither ever arrives (e.g. the session
-        // fell asleep mid-ask) — it outlasts the server's 20 s
-        // runner-forward budget.
-        setterFor(conversationId)({ pendingModelChange: canonical });
-        setTimeout(() => {
-          setterFor(conversationId)((s) =>
-            s.pendingModelChange === canonical ? { pendingModelChange: null } : {},
-          );
-        }, 30_000);
       }
     }
   },

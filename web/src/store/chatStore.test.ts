@@ -4504,6 +4504,43 @@ describe("chatStore — handleSessionEvent (session.* events)", () => {
       expect(useChatStore.getState().llmModel).toBe("opus");
     });
 
+    it("does not resurrect a pending ask the report already settled", async () => {
+      // The PATCH is held open while the runner drives and CONFIRMS the
+      // switch, so the harness's session.model report usually arrives
+      // BEFORE the PATCH resolves. The pending marker is set at ask time
+      // and must never be re-set after the response — that stranded the
+      // spinner until the hygiene timer.
+      seedSession("conv_race", []);
+      await useChatStore.getState().switchTo("conv_race");
+      let releasePatch: ((r: Response) => void) | null = null;
+      fetchMock.mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+        const path = (typeof input === "string" ? input : input.toString()).split("?")[0];
+        if (path === "/v1/sessions/conv_race" && init?.method === "PATCH") {
+          return new Promise<Response>((resolve) => {
+            releasePatch = resolve;
+          });
+        }
+        return defaultFetchHandler(input, init);
+      });
+
+      const ask = useChatStore.getState().setModel("sonnet", { expectConfirmation: true });
+      await tick();
+      // Pending shows from the moment of the ask, not the response.
+      expect(useChatStore.getState().pendingModelChange).toBe("sonnet");
+
+      // The harness confirms while the PATCH is still open.
+      handleSessionEvent(
+        { type: "session_model", conversationId: "conv_race", model: "claude-sonnet-5" },
+        "conv_race",
+      );
+      expect(useChatStore.getState().pendingModelChange).toBeNull();
+
+      releasePatch!(mockResponse({ id: "conv_race", model_override: "sonnet" }));
+      await ask;
+      expect(useChatStore.getState().pendingModelChange).toBeNull();
+      expect(useChatStore.getState().llmModel).toBe("claude-sonnet-5");
+    });
+
     it("settles a pending switch — the report is the ask's outcome", () => {
       // A gear pick marked the ask pending; the harness's own report (in
       // either direction: the pick's confirmation OR an in-pane switch)
