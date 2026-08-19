@@ -661,7 +661,9 @@ describe("Composer model/effort label", () => {
   const label = () => screen.getByTestId("composer-model-effort-label");
 
   it("shows the model in the foreground and effort muted", () => {
-    useChatStore.setState({ selectedModel: "opus", selectedEffort: "high" });
+    // The chip renders the harness's reported model (`llmModel`), never the
+    // sticky preference or the request.
+    useChatStore.setState({ llmModel: "opus", selectedEffort: "high" });
     renderWithTooltips(
       <Composer
         {...composerProps({
@@ -706,7 +708,7 @@ describe("Composer model/effort label", () => {
     expect(label()).not.toHaveTextContent("High");
   });
 
-  it("prefers a claude session override over the cross-session sticky model", () => {
+  it("renders the reported model, never the request or the sticky", () => {
     useChatStore.setState({
       selectedModel: "opus",
       sessionModelOverride: "sonnet",
@@ -725,9 +727,12 @@ describe("Composer model/effort label", () => {
         })}
       />,
     );
-    // The applied session override ("sonnet") wins over the cross-session sticky ("opus").
-    expect(label()).toHaveTextContent("Sonnet 4.6");
+    // The harness's report ("haiku") is the display authority: neither the
+    // pending request ("sonnet") nor the cross-session sticky ("opus") may
+    // render as if it were the session's model.
+    expect(label()).toHaveTextContent("Haiku");
     expect(label()).not.toHaveTextContent("Opus");
+    expect(label()).not.toHaveTextContent("Sonnet");
   });
 
   const CLAUDE_LIVE_OPTIONS = [
@@ -2060,6 +2065,8 @@ describe("Composer config gear", () => {
         setModel,
         codexModelOptions: options,
         sessionModelOverride: ROUTED,
+        // The forwarder reported the routed model — the display authority.
+        llmModel: ROUTED,
         // Routing pinned the model; the session's own routing switch is unset.
         costControlModeOverride: null,
       });

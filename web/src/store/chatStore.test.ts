@@ -4086,26 +4086,36 @@ describe("chatStore — handleSessionEvent (session.* events)", () => {
   });
 
   describe("session.model", () => {
-    it("reflects a TUI-side model switch in selectedModel", () => {
-      // A `/model` change typed into the Claude Code terminal arrives
-      // as session.model; the picker selection must follow it.
-      useChatStore.setState({ conversationId: "conv_abc", selectedModel: "opus" });
+    it("lands the harness's verbatim report on llmModel", () => {
+      // The harness's model report (the launch's own model, or an in-pane
+      // /model switch) arrives as session.model; the reported-model slot
+      // follows it VERBATIM, and neither the sticky preference nor the
+      // request is touched.
+      useChatStore.setState({
+        conversationId: "conv_abc",
+        selectedModel: "opus",
+        sessionModelOverride: "sonnet",
+        llmModel: null,
+      });
       handleSessionEvent({
         type: "session_model",
         conversationId: "conv_abc",
-        model: "sonnet",
+        model: "system.ai.claude-sonnet-5",
       });
-      expect(useChatStore.getState().selectedModel).toBe("sonnet");
+      const state = useChatStore.getState();
+      expect(state.llmModel).toBe("system.ai.claude-sonnet-5");
+      expect(state.selectedModel).toBe("opus");
+      expect(state.sessionModelOverride).toBe("sonnet");
     });
 
     it("ignores a model event from a different session", () => {
-      useChatStore.setState({ conversationId: "conv_open", selectedModel: "opus" });
+      useChatStore.setState({ conversationId: "conv_open", llmModel: "opus" });
       handleSessionEvent({
         type: "session_model",
         conversationId: "conv_other",
         model: "sonnet",
       });
-      expect(useChatStore.getState().selectedModel).toBe("opus");
+      expect(useChatStore.getState().llmModel).toBe("opus");
     });
   });
 
@@ -5505,7 +5515,9 @@ describe("chatStore — bindStream sticky-pref handoff", () => {
       });
   }
 
-  it("PATCHes sticky model and effort onto a claude-native session with no overrides", async () => {
+  it("applies sticky effort but never silently PATCHes the sticky model", async () => {
+    // The sticky model is a UI preference: it must not be written onto the
+    // session as a request the pane was never asked to honor.
     seedSession("conv_cn", []);
     withSnapshot("conv_cn", {
       labels: { "omnigent.wrapper": "claude-code-native-ui" },
@@ -5519,20 +5531,17 @@ describe("chatStore — bindStream sticky-pref handoff", () => {
     await useChatStore.getState().switchTo("conv_cn");
 
     const patches = patchCallsFor("conv_cn");
-    // Model is silent; effort must notify the running native session.
-    expect(patches).toEqual(
-      expect.arrayContaining([
-        { model_override: "opus", silent: true },
-        { reasoning_effort: "high" },
-      ]),
-    );
+    expect(patches).toEqual(expect.arrayContaining([{ reasoning_effort: "high" }]));
+    expect(patches.some((p) => "model_override" in p)).toBe(false);
 
     const state = useChatStore.getState();
+    // The preference survives as a preference; no request was created.
     expect(state.selectedModel).toBe("opus");
+    expect(state.sessionModelOverride).toBeNull();
     expect(state.selectedEffort).toBe("high");
   });
 
-  it("applies a persisted Claude model after delayed model options arrive", async () => {
+  it("keeps the sticky as a preference when delayed model options arrive", async () => {
     seedSession("conv_cn_delayed", []);
     window.localStorage.setItem("omnigent.picker.model", "opus");
     let snapshotCount = 0;
@@ -5568,12 +5577,12 @@ describe("chatStore — bindStream sticky-pref handoff", () => {
     });
     await tick();
 
-    expect(patchCallsFor("conv_cn_delayed")).toEqual(
-      expect.arrayContaining([{ model_override: "opus", silent: true }]),
-    );
+    // The catalog fills the picker; the sticky stays a preference — no
+    // silent request is ever written on its behalf.
+    expect(patchCallsFor("conv_cn_delayed").some((p) => "model_override" in p)).toBe(false);
     expect(useChatStore.getState()).toMatchObject({
       selectedModel: "opus",
-      sessionModelOverride: "opus",
+      sessionModelOverride: null,
       codexModelOptions: CLAUDE_MODEL_OPTIONS,
     });
     window.localStorage.removeItem("omnigent.picker.model");
@@ -5642,21 +5651,21 @@ describe("chatStore — bindStream sticky-pref handoff", () => {
     await switchPromise;
     await tick();
 
-    expect(patchCallsFor("conv_cn_race")).toEqual(
-      expect.arrayContaining([{ model_override: "opus", silent: true }]),
-    );
+    // The raced catalog still lands; the sticky stays a preference and no
+    // silent request is written.
+    expect(patchCallsFor("conv_cn_race").some((p) => "model_override" in p)).toBe(false);
     expect(useChatStore.getState()).toMatchObject({
       selectedModel: "opus",
-      sessionModelOverride: "opus",
+      sessionModelOverride: null,
       codexModelOptions: CLAUDE_MODEL_OPTIONS,
     });
     window.localStorage.removeItem("omnigent.picker.model");
   });
 
-  it("drops a removed sticky alias when the resolved catalog wins the bind race", async () => {
+  it("keeps a catalog-absent sticky as a preference when the catalog wins the race", async () => {
     // Same race as above, but the sticky pick ("fable") is absent from the
-    // raced catalog: the bind's raced branch must not leave it visually
-    // selected with no server override behind it.
+    // raced catalog. Display never derives from the sticky, so nothing needs
+    // clearing — the preference survives and no request is written.
     seedSession("conv_cn_race_removed", []);
     window.localStorage.setItem("omnigent.picker.model", "fable");
     let resolveInitialSnapshot: ((response: Response) => void) | null = null;
@@ -5725,7 +5734,7 @@ describe("chatStore — bindStream sticky-pref handoff", () => {
       false,
     );
     expect(useChatStore.getState()).toMatchObject({
-      selectedModel: null,
+      selectedModel: "fable",
       sessionModelOverride: null,
       codexModelOptions: CLAUDE_MODEL_OPTIONS,
     });
@@ -5794,7 +5803,7 @@ describe("chatStore — bindStream sticky-pref handoff", () => {
     expect(useChatStore.getState().sessionModelOverride).toBeNull();
   });
 
-  it("PATCHes sticky model and effort onto a codex-native session with no overrides", async () => {
+  it("applies sticky effort but never the sticky model on a codex-native session", async () => {
     seedSession("conv_codex", []);
     withSnapshot("conv_codex", {
       labels: { "omnigent.wrapper": "codex-native-ui" },
@@ -5822,15 +5831,12 @@ describe("chatStore — bindStream sticky-pref handoff", () => {
     await useChatStore.getState().switchTo("conv_codex");
 
     const patches = patchCallsFor("conv_codex");
-    expect(patches).toEqual(
-      expect.arrayContaining([
-        { model_override: "gpt-5.4", silent: true },
-        { reasoning_effort: "xhigh" },
-      ]),
-    );
+    expect(patches).toEqual(expect.arrayContaining([{ reasoning_effort: "xhigh" }]));
+    expect(patches.some((p) => "model_override" in p)).toBe(false);
 
     const state = useChatStore.getState();
     expect(state.selectedModel).toBe("gpt-5.4");
+    expect(state.sessionModelOverride).toBeNull();
     expect(state.selectedEffort).toBe("xhigh");
   });
 
@@ -6070,8 +6076,9 @@ describe("chatStore — bindStream sticky-pref handoff", () => {
 
     const state = useChatStore.getState();
     expect(state.selectedEffort).toBe("low");
-    expect(state.selectedModel).toBe("claude-sonnet-4-6");
-    // The server override is the session truth shown by `/model`.
+    // The sticky preference is untouched by the session's own request…
+    expect(state.selectedModel).toBe("claude-opus-4-7");
+    // …which rides in verbatim as the request slot.
     expect(state.sessionModelOverride).toBe("claude-sonnet-4-6");
   });
 
@@ -6097,9 +6104,9 @@ describe("chatStore — bindStream sticky-pref handoff", () => {
     expect(state.sessionModelOverride).toBeNull();
   });
 
-  it("surfaces the applied sticky model as the session override (claude-native)", async () => {
-    // The claude-native handoff persists the sticky model, so it IS the
-    // session's active override — `/model` should show it.
+  it("never surfaces the sticky as the session override (claude-native)", async () => {
+    // The sticky is a UI preference, not a request: binding a session must
+    // neither PATCH it nor present it as the session's active override.
     seedSession("conv_sticky_cn", []);
     withSnapshot("conv_sticky_cn", {
       labels: { "omnigent.wrapper": "claude-code-native-ui" },
@@ -6109,10 +6116,8 @@ describe("chatStore — bindStream sticky-pref handoff", () => {
     useChatStore.setState({ selectedModel: "opus", sessionModelOverride: null });
     await useChatStore.getState().switchTo("conv_sticky_cn");
 
-    expect(patchCallsFor("conv_sticky_cn")).toEqual(
-      expect.arrayContaining([{ model_override: "opus", silent: true }]),
-    );
-    expect(useChatStore.getState().sessionModelOverride).toBe("opus");
+    expect(patchCallsFor("conv_sticky_cn").some((p) => "model_override" in p)).toBe(false);
+    expect(useChatStore.getState().sessionModelOverride).toBeNull();
   });
 
   it("does NOT surface a non-Claude sticky model as the session override (claude-native)", async () => {

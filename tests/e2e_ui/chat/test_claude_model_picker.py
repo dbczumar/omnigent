@@ -167,7 +167,13 @@ def test_claude_native_picker_updates_after_delayed_catalog(
     page: Page,
     seeded_session: tuple[str, str],
 ) -> None:
-    """A live catalog event fills the modal and applies a compatible sticky alias."""
+    """A live catalog event fills the modal; the sticky stays a preference.
+
+    The catalog's arrival populates the picker rows and lets the label
+    resolve the reported model to its display name. The cross-session
+    sticky pick is never silently PATCHed onto the session — a request
+    exists only when the user explicitly picks.
+    """
     base_url, session_id = seeded_session
     catalog_state = {"ready": False}
     patch_bodies = _patch_session_as_claude_native(
@@ -221,8 +227,10 @@ def test_claude_native_picker_updates_after_delayed_catalog(
         {"sessionId": session_id},
     )
 
-    expect(label).to_contain_text("Opus 4.10", timeout=10_000)
-    assert {"model_override": "opus", "silent": True} in patch_bodies
+    # The catalog labels the reported model; the sticky ("opus") is never
+    # silently written as a request.
+    expect(label).to_contain_text("Sonnet 5", timeout=10_000)
+    assert not any("model_override" in body for body in patch_bodies)
     page.get_by_test_id("composer-config-gear").click()
     page.get_by_test_id("composer-config-model").click()
     expect(page.locator('[role="option"][data-model-id]')).to_have_count(len(_EXPECTED_ROWS))
@@ -232,7 +240,11 @@ def test_claude_native_alias_selection_persists(
     page: Page,
     seeded_session: tuple[str, str],
 ) -> None:
-    """Picking Opus PATCHes its alias and the label shows the live name.
+    """Picking Opus PATCHes its row id; the label keeps the reported model.
+
+    The pick is a REQUEST — it persists verbatim as ``model_override`` —
+    while the composer label keeps rendering the harness's reported model
+    until a confirmation report arrives.
 
     :param page: Playwright page fixture.
     :param seeded_session: ``(base_url, session_id)`` for a real server-backed
@@ -261,8 +273,9 @@ def test_claude_native_alias_selection_persists(
         page.get_by_test_id("composer-config-save").click()
 
     assert patch_bodies[-1] == {"model_override": "opus"}
-    # The read-only composer label reflects the new pick.
-    expect(page.get_by_test_id("composer-model-effort-label")).to_contain_text("Opus 4.10")
+    # The read-only composer label keeps the reported model — a request is
+    # not truth until the harness confirms it.
+    expect(page.get_by_test_id("composer-model-effort-label")).to_contain_text("Sonnet 5")
 
 
 def _force_asleep_liveness(page: Page, session_id: str) -> None:
@@ -613,15 +626,14 @@ def test_claude_model_label_never_claims_a_version_the_catalog_didnt_give(
     page: Page,
     seeded_session: tuple[str, str],
 ) -> None:
-    """Pre-catalog, the composer label is friendly but version-free.
+    """The label renders the reported model — raw before the catalog labels it.
 
-    The chip prefers the catalog's display name; before the catalog
-    arrives it must fall back to a mechanical rendering of the alias
-    (``sonnet[1m]`` → "Sonnet (1M context)") — never the raw id, and
-    never a version claim (the old fallback said "Sonnet 4.6" while the
-    catalog resolves the alias to Sonnet 5). Every label the page ever
-    paints is recorded, so a transient wrong label can't hide from a
-    retrying ``expect()``.
+    The chip renders only the harness's reported model: the raw wire id
+    until the catalog can name it, the catalog's display name after — and
+    at no point a version the catalog didn't give (the old fallback said
+    "Sonnet 4.6" while the catalog resolves to Sonnet 5). Every label the
+    page ever paints is recorded, so a transient wrong label can't hide
+    from a retrying ``expect()``.
     """
     base_url, session_id = seeded_session
     catalog_state = {"ready": False}
@@ -640,6 +652,7 @@ def test_claude_model_label_never_claims_a_version_the_catalog_didnt_give(
         model_override="sonnet[1m]",
         catalog_state=catalog_state,
         model_options=one_m_catalog,
+        llm_model="system.ai.claude-sonnet-5[1m]",
     )
     stream_script = """
         (() => {
@@ -668,9 +681,9 @@ def test_claude_model_label_never_claims_a_version_the_catalog_didnt_give(
 
     page.goto(f"{base_url}/c/{session_id}")
 
-    # Pre-catalog: the mechanical fallback, alias rendered friendly.
+    # Pre-catalog: the reported wire id renders raw — honest over pretty.
     label = page.get_by_test_id("composer-model-effort-label")
-    expect(label).to_contain_text("Sonnet (1M context)", timeout=15_000)
+    expect(label).to_contain_text("system.ai.claude-sonnet-5[1m]", timeout=15_000)
     page.wait_for_function("window.__claudeModelStreamController !== undefined")
 
     # The catalog lands: its display name supersedes the fallback.
@@ -691,15 +704,12 @@ def test_claude_model_label_never_claims_a_version_the_catalog_didnt_give(
     log = page.evaluate("window.__modelLabelLog")
     labels = [entry["text"] for entry in log if entry["text"]]
     assert labels, "the recorder never saw a composer label"
-    offending = [
-        text
-        for text in labels
-        if "sonnet[1m]" in text.lower() or "4.6" in text or text.strip().startswith("sonnet")
-    ]
+    offending = [text for text in labels if "4.6" in text]
     assert not offending, (
-        f"the composer painted a raw id or an invented version: {offending} "
-        f"(full label sequence: {labels}). Pre-catalog labels must render the "
-        "alias mechanically; versions come only from the catalog."
+        f"the composer painted a version the catalog didn't give: {offending} "
+        f"(full label sequence: {labels}). Labels render the reported model — "
+        "raw before the catalog names it, the catalog's name after — never an "
+        "invented version."
     )
     _screenshot(page, "one-m-label-settled")
 
@@ -773,16 +783,22 @@ def test_union_catalog_pick_patches_the_row_id_verbatim(
         page.get_by_test_id("composer-config-save").click()
 
     assert patch_bodies[-1] == {"model_override": "sonnet[1m]"}
-    expect(page.get_by_test_id("composer-model-effort-label")).to_contain_text(
-        "Sonnet 5 (1M context)"
-    )
+    # The label keeps the reported model ("Sonnet 5" — the bound
+    # databricks-claude-sonnet-5); the request flips nothing until the
+    # harness confirms.
+    expect(page.get_by_test_id("composer-model-effort-label")).to_contain_text("Sonnet 5")
 
 
-def test_claude_native_picker_prefers_session_override_over_sticky_model(
+def test_claude_native_picker_highlights_the_reported_model(
     page: Page,
     seeded_session: tuple[str, str],
 ) -> None:
-    """The active row follows the session override, not another session's pick."""
+    """The active row follows the reported model — not the request or sticky.
+
+    The session carries a pending request ("opus") and another session's
+    sticky pick ("haiku"), but the pane reports Sonnet 5: only its row may
+    read as active.
+    """
     page.add_init_script("window.localStorage.setItem('omnigent.picker.model', 'haiku')")
     base_url, session_id = seeded_session
     _patch_session_as_claude_native(page, session_id, model_override="opus")
@@ -794,7 +810,10 @@ def test_claude_native_picker_prefers_session_override_over_sticky_model(
     gear.click()
     page.get_by_test_id("composer-config-model").click()
 
-    expect(page.locator('[role="option"][data-model-id="opus"]')).to_have_attribute(
+    expect(page.locator('[role="option"][data-model-id="sonnet"]')).to_have_attribute(
+        "data-active", "true"
+    )
+    expect(page.locator('[role="option"][data-model-id="opus"]')).not_to_have_attribute(
         "data-active", "true"
     )
     expect(page.locator('[role="option"][data-model-id="haiku"]')).not_to_have_attribute(

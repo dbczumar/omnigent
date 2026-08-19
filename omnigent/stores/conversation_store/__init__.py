@@ -769,6 +769,7 @@ class ConversationStore(ABC):
         _unset_harness_override: bool = False,
         terminal_launch_args: list[str] | None = None,
         archived: bool | None = None,
+        reported_model: str | None = None,
     ) -> Conversation | None:
         """
         Update mutable fields on a conversation.
@@ -778,7 +779,9 @@ class ConversationStore(ABC):
         and ``harness_override``,
         ``None`` means "leave unchanged". To explicitly clear them
         back to ``None``, pass
-        the matching ``_unset_*`` flag.
+        the matching ``_unset_*`` flag. ``reported_model`` (the model
+        the harness last reported, verbatim) has no ``_unset`` variant:
+        reports only ever move forward.
 
         :param conversation_id: Unique conversation identifier,
             e.g. ``"conv_abc123"``.
