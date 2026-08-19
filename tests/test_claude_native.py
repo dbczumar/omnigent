@@ -9488,6 +9488,51 @@ async def test_claude_model_catalog_never_appends_an_unservable_default(
     assert all(row.get("isDefault") is not True for row in rows)
 
 
+async def test_claude_model_catalog_marks_the_launch_pin_as_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A provider-configured shape's default is its LAUNCH PIN, not claude's.
+
+    Default launches on these shapes pass ``--model <config.model>``
+    explicitly, so that pin — not the enumeration run's own model — is what
+    a Default launch actually runs. The gateway-entry shape (one pinned
+    alias) must mark its row, or the picker reads a bare "Default".
+    """
+
+    async def _fake_probe(config: object) -> claude_native.ClaudeModelProbe:
+        del config
+        return claude_native.ClaudeModelProbe(
+            alias_rows=[
+                {
+                    "id": "opus",
+                    "model": "system.ai.claude-opus-4-8[1m]",
+                    "displayName": "Opus 4.8 (1M context)",
+                }
+            ],
+            default_model=None,
+            default_label=None,
+        )
+
+    monkeypatch.setattr(claude_native, "probe_claude_model_options", _fake_probe)
+    config = claude_native.ClaudeNativeUcodeConfig(
+        env={
+            "ANTHROPIC_BASE_URL": "https://gw.example/anthropic",
+            "ANTHROPIC_DEFAULT_OPUS_MODEL": "system.ai.claude-opus-4-8[1m]",
+        },
+        api_key_helper="printf token",
+        model="system.ai.claude-opus-4-8[1m]",
+    )
+    rows = await claude_native.claude_model_catalog(config)
+    assert rows == [
+        {
+            "id": "opus",
+            "model": "system.ai.claude-opus-4-8[1m]",
+            "displayName": "Opus 4.8 (1M context)",
+            "isDefault": True,
+        }
+    ]
+
+
 async def test_claude_launch_catalog_reads_the_store_then_probes_once(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

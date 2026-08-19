@@ -1073,8 +1073,10 @@ async def claude_model_catalog(
     Rows come from the harness's own enumeration alone (no configured/static
     merge). Servability filtering matches the listing composition: on a
     non-canonical endpoint, aliases resolving to bare Anthropic ids are
-    dropped. The default marker is the enumeration run's own init-event
-    model — what a bare launch of this config actually runs — matched onto
+    dropped. The default marker is what a Default launch of this config
+    actually runs: the config's own launch pin when the provider resolves
+    one (those launches pass ``--model`` explicitly), else the enumeration
+    run's init-event model (a bare subscription launch). It is matched onto
     its row, or appended as its own row when the catalog lacks it (a
     ``settings.json`` pin, say) and the endpoint can serve it.
 
@@ -1088,7 +1090,8 @@ async def claude_model_catalog(
     if claude_config is not None and not _serves_canonical_anthropic_ids(claude_config):
         rows = [row for row in rows if not str(row.get("model", "")).startswith("claude-")]
 
-    default_model = probe.default_model
+    configured_pin = claude_config.model if claude_config is not None else None
+    default_model = configured_pin or probe.default_model
     marked = False
     out: list[dict[str, object]] = []
     for row in rows:
@@ -1112,11 +1115,19 @@ async def claude_model_catalog(
             or not default_model.startswith("claude-")
         )
         if servable:
+            # The probe's printed label describes the ENUMERATION run's
+            # model; it only names a config-pinned default when the two are
+            # the same model.
+            label = (
+                probe.default_label
+                if default_model == probe.default_model and probe.default_label
+                else default_model
+            )
             out.append(
                 {
                     "id": default_model,
                     "model": default_model,
-                    "displayName": probe.default_label or default_model,
+                    "displayName": label,
                     "isDefault": True,
                 }
             )
