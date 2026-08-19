@@ -89,6 +89,20 @@ _DRIFTED_WITH_SLOT = {
         # Empty / whitespace-only input is never a spellable model.
         ("", _PINNED_ENV, None),
         ("   ", _PINNED_ENV, None),
+        # UNPINNED (canonical endpoint): a full Anthropic id names an exact
+        # generation and ``/model`` accepts it verbatim — stepping down to
+        # the family alias would land on claude's CURRENT generation (picking
+        # Opus 4.8 (1M) used to type ``/model opus`` and run Opus 5).
+        ("claude-opus-4-8[1m]", {}, "claude-opus-4-8[1m]"),
+        ("claude-sonnet-4-6", {}, "claude-sonnet-4-6"),
+        # Bare family aliases stay aliases on an unpinned env.
+        ("opus", {}, "opus"),
+        ("sonnet[1m]", {}, "sonnet[1m]"),
+        # A gateway spelling still cannot be typed on an unpinned session.
+        ("databricks-claude-opus-4-8", {}, "opus"),
+        # With pins, a full id no alias resolves to stays unspeakable —
+        # the caller fails loud instead of switching to something else.
+        ("claude-fable-5", _PINNED_ENV, None),
     ],
 )
 def test_command_arg_spells_the_routed_model_or_nothing(

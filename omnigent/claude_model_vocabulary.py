@@ -225,4 +225,14 @@ def claude_model_command_arg(
     custom = environ.get(CUSTOM_MODEL_OPTION_ENV_VAR, "").strip()
     if custom and normalized_model_id(custom) == normalized_model_id(model):
         return custom
+    candidate = model.strip()
+    if not alias_pins(env) and candidate.lower().startswith("claude-"):
+        # A full Anthropic model id names an EXACT generation, and ``/model``
+        # on an unpinned (canonical-endpoint) session accepts full ids
+        # verbatim — the same spelling the harness's own enumeration
+        # resolves. Stepping down to the family alias here would switch to
+        # claude's CURRENT generation of that family instead (picking
+        # "Opus 4.8 (1M context)" used to type ``/model opus`` and land on
+        # Opus 5).
+        return candidate
     return claude_model_alias(model, env)
