@@ -250,6 +250,57 @@ async def test_events_codex_native_settings_change_uses_thread_settings_update(
 
 
 @pytest.mark.asyncio
+async def test_events_codex_native_model_change_without_bridge_fails_loud(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A model ask with no loaded Codex bridge answers 503, never 204.
+
+    Nothing applied the settings, so a silent success would let the row
+    claim a switch the app-server never saw — the server surfaces the 503
+    as the visible not-applied error instead.
+    """
+    from omnigent.spec.types import ExecutorSpec
+
+    conv_id = "624fe55f9d5a7f66fec5c5401a930b85"
+    monkeypatch.setattr(codex_native_bridge, "_BRIDGE_ROOT", tmp_path / "codex-bridge")
+
+    codex_native_spec = AgentSpec(
+        spec_version=1,
+        name="t",
+        executor=ExecutorSpec(
+            type="omnigent",
+            config={"harness": "codex-native", "model": "gpt-5.4"},
+        ),
+    )
+
+    async def _resolver(agent_id: str, session_id: str | None = None) -> AgentSpec:
+        del agent_id, session_id
+        return codex_native_spec
+
+    pm = _FakeProcessManager(_ScriptedHarnessClient([]))
+    app = create_runner_app(
+        process_manager=pm,  # type: ignore[arg-type]
+        spec_resolver=_resolver,
+        server_client=NullServerClient(),  # type: ignore[arg-type]
+    )
+
+    async with _runner_client(app) as client:
+        create_resp = await client.post(
+            "/v1/sessions",
+            json={"session_id": conv_id, "agent_id": "880b5afda28ad55ff74cbeb9b5fc67fb"},
+        )
+        assert create_resp.status_code == 201, create_resp.text
+        resp = await client.post(
+            f"/v1/sessions/{conv_id}/events",
+            json={"type": "model_change", "model": "gpt-5.6-terra"},
+        )
+
+    assert resp.status_code == 503, resp.text
+    assert resp.json()["error"] == "codex_native_settings_update_failed"
+
+
+@pytest.mark.asyncio
 async def test_kiro_native_model_options_use_cli_catalog(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

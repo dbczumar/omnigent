@@ -172,6 +172,12 @@ _logger = logging.getLogger(__name__)
 # tests can patch the pacing.
 _CLAUDE_MODEL_OPTIONS_INLINE_WAIT_S = 2.5
 
+# Claude-native model switch confirmation: how long to watch the pane's
+# statusLine snapshot for the switched model after typing ``/model``, and how
+# often to re-read it. Module-level so tests can patch the pacing.
+_CLAUDE_MODEL_CONFIRM_TIMEOUT_S = 10.0
+_CLAUDE_MODEL_CONFIRM_POLL_S = 0.25
+
 
 def _warn_unresolved_sub_agent(session_id: str | None, sub_agent_name: str) -> None:
     """
@@ -3926,7 +3932,16 @@ def create_runner_app(
             return Response(status_code=204)
         state = await _codex_native_bridge_state_for_session(conv_id, action="settings update")
         if state is None:
-            return Response(status_code=204)
+            # No loaded Codex bridge means nothing applied the settings; a
+            # silent 204 here would let the caller claim a switch the
+            # app-server never saw.
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "error": "codex_native_settings_update_failed",
+                    "detail": "Codex-native settings update requires a loaded Codex bridge.",
+                },
+            )
 
         codex_client = client_for_transport(
             state.socket_path,
@@ -3977,7 +3992,13 @@ def create_runner_app(
                 if resp.status_code == 200:
                     snapshot = resp.json()
                     if isinstance(snapshot, dict):
-                        raw_model = snapshot.get("model_override") or snapshot.get("llm_model")
+                        # ``llm_model`` is the harness's own report — the model
+                        # the pane is actually on. ``model_override`` is only a
+                        # request and may predate a relaunch or an unconfirmed
+                        # switch, so it is the fallback, not the lead: a
+                        # plan-mode toggle must re-assert the pane's real
+                        # model, never resurrect a stale ask.
+                        raw_model = snapshot.get("llm_model") or snapshot.get("model_override")
                         if isinstance(raw_model, str) and raw_model.strip():
                             model = raw_model.strip()
                         raw_effort = snapshot.get("reasoning_effort")
@@ -4213,6 +4234,7 @@ def create_runner_app(
             SWITCH_MODEL_DIALOG_HINT,
             bridge_dir_for_bridge_id,
             inject_slash_command,
+            read_claude_status_model,
             read_model_env,
         )
 
@@ -4253,6 +4275,7 @@ def create_runner_app(
                 },
             )
         command = f"/model {model_arg}"
+        baseline = await asyncio.to_thread(read_claude_status_model, bridge_dir)
         try:
             # Accepted trade-off: ``/model <id>`` also saves the pick as the
             # person's global default in ``~/.claude/settings.json``. Driving
@@ -4274,7 +4297,56 @@ def create_runner_app(
                     "detail": _client_safe_error_detail(exc, context="claude-native model change"),
                 },
             )
-        return Response(status_code=204)
+        # Verify against the statusLine snapshot the forwarder already polls:
+        # Claude rewrites it on every render, including right after ``/model``.
+        # Expected spellings come from this session's own catalog rows (every
+        # row's ``model`` is the harness's own resolution), plus the typed arg
+        # and its selection mapping. Success replies only after the pane
+        # actually switched; the swallowed-dialog case answers non-2xx so the
+        # server surfaces it instead of the row silently claiming the pick.
+        expected = {value for value in (resolved_model, model_arg) if value}
+        for row in _claude_model_options_rows.get(conv_id) or []:
+            if row.get("id") in (selected_model, resolved_model) or row.get("model") in (
+                selected_model,
+                resolved_model,
+            ):
+                row_model = row.get("model")
+                if isinstance(row_model, str) and row_model:
+                    expected.add(row_model)
+        deadline = time.monotonic() + _CLAUDE_MODEL_CONFIRM_TIMEOUT_S
+        while True:
+            current = await asyncio.to_thread(read_claude_status_model, bridge_dir)
+            if current and (current in expected or (baseline and current != baseline)):
+                # The pane switched. When it landed somewhere other than the
+                # expected spelling, the forwarder's verbatim report is the
+                # truth the UI will settle on — the command still took effect.
+                return Response(status_code=204)
+            if baseline is None and current is None:
+                # No statusLine snapshot on either side of the injection: a
+                # live wrapper-managed pane writes one on every render, so
+                # this is a shape without the wrapper — the switch is
+                # unverifiable, not failed. Report success and leave the
+                # forwarder to reconcile the row.
+                _logger.warning(
+                    "claude-native model change for session=%s could not be verified: "
+                    "no statusLine snapshot in %s",
+                    conv_id,
+                    bridge_dir,
+                )
+                return Response(status_code=204)
+            if time.monotonic() >= deadline:
+                break
+            await asyncio.sleep(_CLAUDE_MODEL_CONFIRM_POLL_S)
+        return JSONResponse(
+            status_code=503,
+            content={
+                "error": "claude_native_model_unconfirmed",
+                "detail": (
+                    f"the terminal did not confirm the switch to {model_arg} within "
+                    f"{_CLAUDE_MODEL_CONFIRM_TIMEOUT_S:.0f}s — a dialog may be open in the pane"
+                ),
+            },
+        )
 
     async def _apply_claude_native_plan_verdict(
         conv_id: str,

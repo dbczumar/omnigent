@@ -449,6 +449,14 @@ export interface ChatState {
    */
   llmModel: string | null;
   /**
+   * A model switch the harness has not confirmed yet: the requested model
+   * from the moment the PATCH lands until the harness's own report
+   * (``session.model``) or a ``model_change_not_applied`` error settles it.
+   * Drives the composer's pending indicator; never display state for the
+   * chip itself (the chip keeps showing ``llmModel`` — the truth).
+   */
+  pendingModelChange: string | null;
+  /**
    * Effective brain harness for the active session (override-aware),
    * e.g. ``"claude-sdk"`` or ``"pi"``. Populated from the session
    * snapshot on bind; drives the composer pill's harness suffix.
@@ -663,8 +671,12 @@ export interface ChatState {
    * Set the sticky model and PATCH it onto the current session. For
    * claude-native, the server also injects ``/model`` into the tmux
    * pane so the in-binary picker tracks the change.
+   *
+   * ``expectConfirmation`` marks the pick pending until the harness's own
+   * report (or a not-applied error) settles it — pass it for sessions
+   * whose chip renders the reported model (claude-/codex-native).
    */
-  setModel: (model: string | null) => Promise<void>;
+  setModel: (model: string | null, opts?: { expectConfirmation?: boolean }) => Promise<void>;
   /**
    * Set the active session's cost-control switch — optimistic local
    * flip, then PATCH; the server's canonical value (or a rollback on
@@ -1095,6 +1107,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   pendingComposerAttachments: [],
   failedSendDraft: null,
   llmModel: null,
+  pendingModelChange: null,
   sessionHarness: null,
   subAgentName: null,
   contextWindow: null,
@@ -1809,6 +1822,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         loadingMoreHistory: false,
         oldestItemId: null,
         llmModel: null,
+        pendingModelChange: null,
         sessionHarness: null,
         // ``selectedEffort`` / ``selectedModel`` are sticky user picks —
         // not reset here so a CLI-created new chat inherits them.
@@ -1950,7 +1964,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
   },
 
-  setModel: async (model) => {
+  setModel: async (model, opts) => {
     // `selectedModel` is the sticky pick; `sessionModelOverride` is this
     // session's applied override. An explicit `/model` sets both.
     set({ selectedModel: model, sessionModelOverride: model });
@@ -1961,8 +1975,26 @@ export const useChatStore = create<ChatState>((set, get) => ({
       // Server-canonical may differ from the optimistic write (e.g.
       // when a clear alias was sent) — refresh local state to match.
       const canonical = session.modelOverride ?? null;
-      set({ selectedModel: canonical, sessionModelOverride: canonical });
       savePickerPref(PICKER_PREF_MODEL_KEY, canonical);
+      // Session-scoped state stays with its session: a switch-away during
+      // the PATCH must not clobber the newly bound session's override.
+      if (get().conversationId !== conversationId) return;
+      set({ selectedModel: canonical, sessionModelOverride: canonical });
+      if (opts?.expectConfirmation && canonical) {
+        // Reported-model sessions: the chip keeps the harness's model until
+        // its own report confirms the switch. Mark the ask pending; the
+        // `session.model` event or a `model_change_not_applied` error
+        // settles it. The timer is spinner hygiene for the case where
+        // neither ever arrives (e.g. the session fell asleep mid-ask) —
+        // it outlasts the server's 20 s runner-forward budget.
+        set({ pendingModelChange: canonical });
+        setTimeout(() => {
+          const s = get();
+          if (s.conversationId === conversationId && s.pendingModelChange === canonical) {
+            set({ pendingModelChange: null });
+          }
+        }, 30_000);
+      }
     }
   },
 
@@ -2314,6 +2346,7 @@ function sessionBindingPatch(
   | "boundAgentId"
   | "boundAgentName"
   | "llmModel"
+  | "pendingModelChange"
   | "sessionModelOverride"
   | "sessionHarness"
   | "subAgentName"
@@ -2339,6 +2372,7 @@ function sessionBindingPatch(
     boundAgentId: session.agentId,
     boundAgentName: session.agentName,
     llmModel: session.llmModel ?? null,
+    pendingModelChange: null,
     sessionModelOverride: session.modelOverride ?? null,
     sessionHarness: session.harness ?? null,
     subAgentName: session.subAgentName ?? null,
@@ -4347,9 +4381,24 @@ export function handleSessionEvent(event: StreamEvent): void {
       // snapshot's `llm_model`.
       // Guard by conversation id so a late frame from a switched-away
       // stream cannot overwrite the model for the currently-open session.
+      // The report also settles any pending switch: whatever the harness
+      // says it runs now IS the outcome of the ask.
       useChatStore.setState((s) =>
-        s.conversationId === event.conversationId ? { llmModel: event.model } : {},
+        s.conversationId === event.conversationId
+          ? { llmModel: event.model, pendingModelChange: null }
+          : {},
       );
+      return;
+    case "error":
+      // A `model_change_not_applied` error is the loud outcome of a model
+      // ask the pane never took: settle the pending indicator (the chip
+      // already shows the true model). The error block itself renders
+      // through the BlockStream reducer as usual.
+      if (event.error.code === "model_change_not_applied") {
+        useChatStore.setState((s) =>
+          s.pendingModelChange !== null ? { pendingModelChange: null } : {},
+        );
+      }
       return;
     case "session_reasoning_effort":
       // A thinking-level switch made inside a native terminal. Reflect it

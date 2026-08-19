@@ -4117,6 +4117,62 @@ describe("chatStore — handleSessionEvent (session.* events)", () => {
       });
       expect(useChatStore.getState().llmModel).toBe("opus");
     });
+
+    it("settles a pending switch — the report is the ask's outcome", () => {
+      // A gear pick marked the ask pending; the harness's own report (in
+      // either direction: the pick's confirmation OR an in-pane switch)
+      // settles the indicator and flips the reported model.
+      useChatStore.setState({
+        conversationId: "conv_abc",
+        llmModel: "claude-sonnet-5",
+        pendingModelChange: "opus",
+      });
+      handleSessionEvent({
+        type: "session_model",
+        conversationId: "conv_abc",
+        model: "claude-opus-4-10",
+      });
+      const state = useChatStore.getState();
+      expect(state.llmModel).toBe("claude-opus-4-10");
+      expect(state.pendingModelChange).toBeNull();
+    });
+
+    it("settles a pending switch on the not-applied error", () => {
+      // The runner answered non-2xx (swallowed dialog / no bridge): the
+      // server publishes the model_change_not_applied error. The pending
+      // indicator clears; the reported model stays — the chip never lied.
+      useChatStore.setState({
+        conversationId: "conv_abc",
+        llmModel: "claude-sonnet-5",
+        pendingModelChange: "haiku",
+      });
+      handleSessionEvent({
+        type: "error",
+        source: "execution",
+        toolName: null,
+        error: {
+          code: "model_change_not_applied",
+          message: "The terminal was not switched to haiku.",
+        },
+      });
+      const state = useChatStore.getState();
+      expect(state.pendingModelChange).toBeNull();
+      expect(state.llmModel).toBe("claude-sonnet-5");
+    });
+
+    it("leaves pending state alone for unrelated errors", () => {
+      useChatStore.setState({
+        conversationId: "conv_abc",
+        pendingModelChange: "haiku",
+      });
+      handleSessionEvent({
+        type: "error",
+        source: "execution",
+        toolName: null,
+        error: { code: "tool_failed", message: "boom" },
+      });
+      expect(useChatStore.getState().pendingModelChange).toBe("haiku");
+    });
   });
 
   describe("session.reasoning_effort", () => {

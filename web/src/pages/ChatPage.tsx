@@ -4913,9 +4913,14 @@ export function Composer({
         // Confirmation is a durable `[System: model changed to X]` note the
         // server appends to the transcript (see _persist_model_change_note) —
         // not a transient composer hint. Surface only failures inline here.
+        // Native reported-model sessions additionally show the pending
+        // indicator until the harness's own report settles the ask.
+        const harness = useChatStore.getState().sessionHarness;
         void useChatStore
           .getState()
-          .setModel(clear ? null : target)
+          .setModel(clear ? null : target, {
+            expectConfirmation: harness === "claude-native" || harness === "codex-native",
+          })
           .catch((err: unknown) => {
             setCommandError(err instanceof Error ? err.message : "Failed to set model");
           });
@@ -6233,7 +6238,13 @@ function SessionConfigModal({
           // routing off just clears via setModel(null) below.
           const modelChanged = draftModelId !== resolvedModelId;
           const rePinAfterRouting = liveRoutingOn && showModels;
-          if (rePinAfterRouting || modelChanged) await store.setModel(draftModelId);
+          if (rePinAfterRouting || modelChanged)
+            await store.setModel(draftModelId, {
+              // Reported-model sessions confirm through the harness's own
+              // report — mark the ask pending until it (or the not-applied
+              // error) settles.
+              expectConfirmation: modelPickerKind === "claude" || modelPickerKind === "codex",
+            });
           if (costRoutingEligible && liveRoutingOn) await store.setCostControlMode("off");
         }
         // Skip effort while routing is on: the router picks it per turn, and a
@@ -6669,8 +6680,20 @@ function ComposerModelEffortLabel({
 }) {
   const selectedEffort = useChatStore((s) => s.selectedEffort);
   const costControlModeOverride = useChatStore((s) => s.costControlModeOverride);
+  const pendingModelChange = useChatStore((s) => s.pendingModelChange);
   const { modelLabel } = useResolvedComposerModel(modelPickerKind, codexModelOptions);
   const routingOn = costRoutingEligible && costControlModeOverride === "on";
+  // An asked-but-unconfirmed switch on a reported-model session: the chip
+  // keeps the harness's model; this spinner is the honest "asked, not yet
+  // true" marker until the report (or the not-applied error) settles it.
+  const modelPending =
+    pendingModelChange !== null && (modelPickerKind === "claude" || modelPickerKind === "codex") ? (
+      <Loader2Icon
+        data-testid="composer-model-pending"
+        aria-label="Model change pending"
+        className="ml-1 inline size-3 shrink-0 animate-spin text-muted-foreground"
+      />
+    ) : null;
   // Routing picks the model + effort per turn, so the label reads
   // "Smart Routing" with no pinned model/effort — matching the tooltip.
   if (routingOn) {
@@ -6716,6 +6739,7 @@ function ComposerModelEffortLabel({
       {model && <span className="text-foreground">{model}</span>}
       {model && effortLabel && " "}
       {effortLabel && <span className="text-muted-foreground">{effortLabel}</span>}
+      {modelPending}
     </span>
   );
 }

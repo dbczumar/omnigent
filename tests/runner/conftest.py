@@ -13,11 +13,18 @@ import httpx
 import pytest
 from fastapi import FastAPI
 
+from omnigent import claude_native
 from omnigent.process_logging import PROCESS_LOG_FILE_ENV_VAR
 from omnigent.runner import create_runner_app
 from omnigent.runner.mcp_manager import McpSchemasResult
 from omnigent.spec.types import AgentSpec, ExecutorSpec, MCPServerConfig
 from tests.runner.helpers import NullServerClient
+
+# The real store-backed catalog resolver, captured before the autouse fixture
+# below stubs it: a test that exercises the catalog path re-patches the module
+# attribute back to this. (An assignment, not an alias import, so lint
+# autofixes can't strip it as unused.)
+REAL_CLAUDE_LAUNCH_CATALOG = claude_native.claude_launch_catalog
 
 
 @pytest.fixture(autouse=True)

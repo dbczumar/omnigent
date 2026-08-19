@@ -6438,7 +6438,15 @@ async def test_patch_model_override_surfaces_a_refused_native_forward(
 
     async def _runner_refused(*_args: Any, **_kwargs: Any) -> _RunnerForwardResult:
         """The runner is up and answered that it could not drive the pane."""
-        return _RunnerForwardResult(status_code=503, body="claude_native_model_failed")
+        return _RunnerForwardResult(
+            status_code=503,
+            body=json.dumps(
+                {
+                    "error": "claude_native_model_unconfirmed",
+                    "detail": "the terminal did not confirm the switch to opus within 10s",
+                }
+            ),
+        )
 
     monkeypatch.setattr(
         "omnigent.server.routes.sessions._forward_session_change_to_runner",
@@ -6464,6 +6472,8 @@ async def test_patch_model_override_surfaces_a_refused_native_forward(
     ]
     assert len(errors) == 1, f"Expected one visible failure notice; got {published!r}"
     assert "opus" in errors[0]["error"]["message"]
+    # The runner's own detail (the concrete cause) rides into the notice.
+    assert "did not confirm the switch" in errors[0]["error"]["message"]
 
 
 async def test_patch_model_override_stays_quiet_when_no_runner_answers(

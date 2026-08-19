@@ -1936,6 +1936,116 @@ async def test_events_model_change_on_native_session_types_slash_command(
     )
 
 
+async def _post_model_change_with_status_sequence(
+    monkeypatch: pytest.MonkeyPatch,
+    status_values: list[str | None],
+) -> Any:
+    """Run one claude-native ``model_change`` with a scripted status file.
+
+    ``status_values`` are successive ``read_claude_status_model`` answers
+    (the first is the pre-injection baseline); the last value repeats once
+    the script is exhausted. Injection is stubbed; the confirm pacing is
+    tightened so the unconfirmed path stays fast.
+
+    :returns: The ``/events`` HTTP response.
+    """
+    from omnigent.runner import app as runner_app_module
+    from omnigent.spec.types import ExecutorSpec
+
+    def _fake_inject(
+        bridge_dir: Any,
+        *,
+        command: str,
+        timeout_s: float,
+        auto_confirm: bool = False,
+        confirm_hint: str | None = None,
+    ) -> None:
+        del bridge_dir, command, timeout_s, auto_confirm, confirm_hint
+
+    monkeypatch.setattr(claude_native_bridge, "inject_slash_command", _fake_inject)
+    monkeypatch.setattr(
+        claude_native_bridge,
+        "read_model_env",
+        lambda _bridge_dir: {"ANTHROPIC_CUSTOM_MODEL_OPTION": "claude-opus-4-7"},
+    )
+    script = list(status_values)
+
+    def _scripted_status(_bridge_dir: Any) -> str | None:
+        return script.pop(0) if len(script) > 1 else script[0]
+
+    monkeypatch.setattr(claude_native_bridge, "read_claude_status_model", _scripted_status)
+    monkeypatch.setattr(runner_app_module, "_CLAUDE_MODEL_CONFIRM_TIMEOUT_S", 0.3)
+    monkeypatch.setattr(runner_app_module, "_CLAUDE_MODEL_CONFIRM_POLL_S", 0.01)
+
+    native_spec = AgentSpec(
+        spec_version=1,
+        name="t",
+        executor=ExecutorSpec(type="omnigent", config={"harness": "claude-native"}),
+    )
+
+    async def _resolver(agent_id: str, session_id: str | None = None) -> AgentSpec:
+        del agent_id, session_id
+        return native_spec
+
+    pm = _FakeProcessManager(_ScriptedHarnessClient([]))
+    app = create_runner_app(
+        process_manager=pm,  # type: ignore[arg-type]
+        spec_resolver=_resolver,
+        server_client=NullServerClient(),  # type: ignore[arg-type]
+    )
+    async with _runner_client(app) as client:
+        create_resp = await client.post(
+            "/v1/sessions",
+            json={
+                "session_id": "68c7c1acc5eeec3978c5e62043da51a5",
+                "agent_id": "880b5afda28ad55ff74cbeb9b5fc67fb",
+            },
+        )
+        assert create_resp.status_code == 201, create_resp.text
+        return await client.post(
+            "/v1/sessions/68c7c1acc5eeec3978c5e62043da51a5/events",
+            json={"type": "model_change", "model": "claude-opus-4-7"},
+        )
+
+
+@pytest.mark.asyncio
+async def test_events_model_change_confirms_against_the_status_file(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The switch replies success only after the pane's status shows it.
+
+    The statusLine snapshot starts on the old model and flips to the picked
+    one after the injection — the design's confirmed-switch contract: the
+    reply follows the pane, not the keystroke.
+    """
+    resp = await _post_model_change_with_status_sequence(
+        monkeypatch,
+        ["claude-opus-4-6", "claude-opus-4-6", "claude-opus-4-7"],
+    )
+    assert resp.status_code == 204, resp.text
+
+
+@pytest.mark.asyncio
+async def test_events_model_change_unconfirmed_switch_answers_503(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pane that never switches makes the ask fail loud, not pass silent.
+
+    The statusLine snapshot keeps reporting the old model for the whole
+    confirmation budget (the swallowed-dialog case): the runner must answer
+    non-2xx so the server surfaces the divergence instead of the row
+    claiming the pick.
+    """
+    resp = await _post_model_change_with_status_sequence(
+        monkeypatch,
+        ["claude-opus-4-6"],
+    )
+    assert resp.status_code == 503, resp.text
+    body = resp.json()
+    assert body["error"] == "claude_native_model_unconfirmed"
+    assert "did not confirm" in body["detail"]
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("pins", "picked", "expected_command"),

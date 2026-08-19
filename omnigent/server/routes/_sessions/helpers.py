@@ -5020,6 +5020,13 @@ def _surface_model_change_forward_failure(
     if 200 <= runner_result.status_code < 300:
         return
     reason = f"the runner returned status {runner_result.status_code}"
+    # The runner's own detail names the concrete cause (e.g. "a dialog may
+    # be open in the pane"); carry it into the visible notice when present.
+    with contextlib.suppress(ValueError, TypeError):
+        parsed_body = json.loads(runner_result.body)
+        detail = parsed_body.get("detail") if isinstance(parsed_body, dict) else None
+        if isinstance(detail, str) and detail.strip():
+            reason = f"{reason} ({detail.strip()})"
     _logger.warning(
         "Model change not applied to the terminal for session=%s model=%r: %s (body=%s)",
         session_id,
