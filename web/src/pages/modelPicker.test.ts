@@ -132,6 +132,22 @@ describe("Codex model-list helpers", () => {
     ]);
   });
 
+  it("does not throw when a native row carries a null model (cursor rows)", () => {
+    // Cursor picker rows arrive as { id, displayName } with model === null on
+    // the wire (typed model?: string). The fold fallback must null-guard, or
+    // comparableModelId(null) throws "Cannot read properties of null
+    // (reading 'trim')" and blanks the whole chat page.
+    const cursorRows = [
+      { id: "auto", model: null, displayName: "Auto" },
+      { id: "gpt-5.3-codex", model: null, displayName: "Codex 5.3" },
+      { id: "composer-2.5", model: null, displayName: "Composer 2.5" },
+    ] as unknown as NativeModelOption[];
+    expect(() => findNativeModelOption(cursorRows, "default")).not.toThrow();
+    expect(findNativeModelOption(cursorRows, "default")).toBeNull();
+    // Exact id still resolves against null-model rows.
+    expect(findNativeModelOption(cursorRows, "composer-2.5")?.id).toBe("composer-2.5");
+  });
+
   it("offers no effort levels until the model resolves to a Codex row", () => {
     // Codex reports `isDefault` off its bundled catalog, so it stays put even
     // when the session launched on something else. Borrowing that row's ladder

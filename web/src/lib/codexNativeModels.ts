@@ -12,8 +12,13 @@ const CATALOG_PREFIXES = ["databricks-", "system.ai."] as const;
  * spelling in both ``id`` and ``model``. Mirrors the server's
  * ``comparable_model_id``.
  */
-function comparableModelId(model: string): string {
-  let bare = model.trim().toLowerCase();
+function comparableModelId(model: string | null | undefined): string {
+  // Null-safe: a picker row may carry a null ``model`` (cursor rows have
+  // only ``id`` + ``displayName``), and folding it must not throw. An empty
+  // fold never equals a real (non-empty) target, so it simply never matches.
+  const raw = model?.trim();
+  if (!raw) return "";
+  let bare = raw.toLowerCase();
   if (bare.endsWith("[1m]")) bare = bare.slice(0, -"[1m]".length);
   for (const prefix of CATALOG_PREFIXES) {
     if (bare.startsWith(prefix)) {
@@ -46,8 +51,8 @@ export function findNativeModelOption(
   return (
     options.find(
       (option) =>
-        comparableModelId(option.id) === target ||
-        (option.model !== undefined && comparableModelId(option.model) === target),
+        (option.id != null && comparableModelId(option.id) === target) ||
+        (option.model != null && comparableModelId(option.model) === target),
     ) ?? null
   );
 }
