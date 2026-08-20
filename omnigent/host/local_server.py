@@ -96,6 +96,31 @@ _LOCAL_SERVER_SIG_PATH = _local_data_dir() / "local_server.sig"
 # ``omnigent server`` (its logs stream to the terminal, not a file).
 _LOCAL_SERVER_LOG_REF_PATH = _local_data_dir() / "local_server.logpath"
 
+_DEFAULT_LOCAL_SERVER_PID_PATH = _LOCAL_SERVER_PID_PATH
+_DEFAULT_LOCAL_SERVER_SIG_PATH = _LOCAL_SERVER_SIG_PATH
+_DEFAULT_LOCAL_SERVER_LOG_REF_PATH = _LOCAL_SERVER_LOG_REF_PATH
+
+
+def _local_server_pid_path() -> Path:
+    """Return the local-server pidfile, resolving test data isolation late."""
+    if _LOCAL_SERVER_PID_PATH != _DEFAULT_LOCAL_SERVER_PID_PATH:
+        return _LOCAL_SERVER_PID_PATH
+    return _local_data_dir() / "local_server.pid"
+
+
+def _local_server_sig_path() -> Path:
+    """Return the local-server signature sidecar, resolving it late."""
+    if _LOCAL_SERVER_SIG_PATH != _DEFAULT_LOCAL_SERVER_SIG_PATH:
+        return _LOCAL_SERVER_SIG_PATH
+    return _local_data_dir() / "local_server.sig"
+
+
+def _local_server_log_ref_path() -> Path:
+    """Return the local-server log-reference sidecar, resolving it late."""
+    if _LOCAL_SERVER_LOG_REF_PATH != _DEFAULT_LOCAL_SERVER_LOG_REF_PATH:
+        return _LOCAL_SERVER_LOG_REF_PATH
+    return _local_data_dir() / "local_server.logpath"
+
 
 def server_config_signature(*, include_features: bool = True) -> str:
     """
@@ -182,10 +207,11 @@ def _read_local_server_pid_file() -> tuple[int, int] | None:
 
     :returns: ``(pid, port)`` if well-formed, ``None`` otherwise.
     """
-    if not _LOCAL_SERVER_PID_PATH.exists():
+    pid_path = _local_server_pid_path()
+    if not pid_path.exists():
         return None
     try:
-        lines = _LOCAL_SERVER_PID_PATH.read_text().strip().splitlines()
+        lines = pid_path.read_text().strip().splitlines()
         if len(lines) < 2:
             return None
         return int(lines[0]), int(lines[1])
@@ -245,19 +271,22 @@ def _write_local_server_record(
         any stale log-ref sidecar is then removed so status never reports a
         log file that doesn't apply to the running server.
     """
-    _LOCAL_SERVER_PID_PATH.parent.mkdir(parents=True, exist_ok=True)
+    pid_path = _local_server_pid_path()
+    sig_path = _local_server_sig_path()
+    log_ref_path = _local_server_log_ref_path()
+    pid_path.parent.mkdir(parents=True, exist_ok=True)
     # Write each file atomically (temp + os.replace) so a concurrent
     # connect/run reader never observes a half-written record — a torn read
     # would parse as malformed and trigger a needless respawn. Sig first:
     # both replaces are individually atomic, so once the pidfile (what reuse
     # keys on) appears, its sig is already fully in place.
-    _atomic_write(_LOCAL_SERVER_SIG_PATH, f"{sig}\n")
+    _atomic_write(sig_path, f"{sig}\n")
     if log_path is not None:
-        _atomic_write(_LOCAL_SERVER_LOG_REF_PATH, f"{log_path}\n")
+        _atomic_write(log_ref_path, f"{log_path}\n")
     else:
         with contextlib.suppress(OSError):
-            _LOCAL_SERVER_LOG_REF_PATH.unlink()
-    _atomic_write(_LOCAL_SERVER_PID_PATH, f"{pid}\n{port}\n")
+            log_ref_path.unlink()
+    _atomic_write(pid_path, f"{pid}\n{port}\n")
 
 
 def _read_local_server_log_path() -> Path | None:
@@ -269,7 +298,7 @@ def _read_local_server_log_path() -> Path | None:
         record, or no server) or unreadable.
     """
     try:
-        text = _LOCAL_SERVER_LOG_REF_PATH.read_text().strip()
+        text = _local_server_log_ref_path().read_text().strip()
     except OSError:
         return None
     return Path(text) if text else None
@@ -310,7 +339,7 @@ def _read_local_server_sig() -> str | None:
         ``None`` if the sidecar is absent (legacy server) or unreadable.
     """
     try:
-        sig = _LOCAL_SERVER_SIG_PATH.read_text().strip()
+        sig = _local_server_sig_path().read_text().strip()
     except OSError:
         return None
     return sig or None
@@ -360,6 +389,48 @@ def _terminate_pid(pid: int) -> None:
         time.sleep(_STOP_POLL_INTERVAL_S)
 
 
+def _server_belongs_to_local_data_dir(pid: int) -> bool:
+    """Return whether *pid* can be proven to be this data dir's server.
+
+    A pidfile alone is not ownership evidence: it can belong to a live daemon
+    from another checkout or to a recycled PID. Refuse to signal whenever the
+    command line is unavailable, does not describe an Omnigent server, or its
+    artifact directory lies outside the currently resolved data directory.
+    """
+    try:
+        cmdline = list(psutil.Process(pid).cmdline())
+    except (psutil.Error, OSError):
+        return False
+    if not cmdline:
+        return False
+    executable = Path(cmdline[0]).name
+    if executable not in {"omnigent", "omni"} and "omnigent.cli" not in cmdline:
+        return False
+    try:
+        server_index = cmdline.index("server")
+    except ValueError:
+        return False
+    if server_index == 0:
+        return False
+    artifact: str | None = None
+    for index, arg in enumerate(cmdline):
+        if arg == "--artifact-location" and index + 1 < len(cmdline):
+            artifact = cmdline[index + 1]
+            break
+        if arg.startswith("--artifact-location="):
+            artifact = arg.split("=", 1)[1]
+            break
+    if artifact is None:
+        return False
+    try:
+        artifact_parent = Path(artifact).expanduser().resolve().parent
+        data_dir = _local_data_dir().resolve()
+        artifact_parent.relative_to(data_dir)
+    except (OSError, ValueError):
+        return False
+    return True
+
+
 def stop_local_omnigent_server() -> None:
     """Stop the daemon-owned background local server and clear its files.
 
@@ -381,13 +452,16 @@ def stop_local_omnigent_server() -> None:
     existing = _read_local_server_pid_file()
     if existing is not None:
         pid, _port = existing
+        if not _server_belongs_to_local_data_dir(pid):
+            _logger.warning("Refusing to stop unverified local server pid=%s", pid)
+            return
         _terminate_pid(pid)
     with contextlib.suppress(OSError):
-        _LOCAL_SERVER_PID_PATH.unlink()
+        _local_server_pid_path().unlink()
     with contextlib.suppress(OSError):
-        _LOCAL_SERVER_SIG_PATH.unlink()
+        _local_server_sig_path().unlink()
     with contextlib.suppress(OSError):
-        _LOCAL_SERVER_LOG_REF_PATH.unlink()
+        _local_server_log_ref_path().unlink()
 
 
 @dataclass(frozen=True)
@@ -804,25 +878,16 @@ def stop_untracked_local_server(port: int = _DEFAULT_LOCAL_PORT) -> int | None:
     The pidfile can be lost while the server process lives (a torn/cleared
     record, a respawn that landed on a different port, a crash). Such a
     server then escapes :func:`stop_local_omnigent_server`, which only knows the
-    pidfile PID — so ``omnigent stop`` / ``server stop`` would leave it
-    running. This sweep covers that hole: if a live Omnigent server answers
-    ``/health`` on the canonical loopback *port*, find its PID and terminate
-    it. Call it AFTER :func:`stop_local_omnigent_server` so a normally-tracked
-    server is already gone and ``/health`` no longer answers (this is a
-    no-op). Best-effort: returns ``None`` when nothing untracked is found or
-    ``lsof`` is unavailable.
+    pidfile PID. It is deliberately left running: a listener and health
+    response prove neither process ownership nor PID lineage, so terminating
+    it could kill a user's foreground server. Best-effort: this always returns
+    ``None`` until a future record format supplies verifiable ownership.
 
     :param port: Canonical loopback port to sweep, e.g. ``6767``.
     :returns: The PID stopped, or ``None`` if there was nothing to stop.
     """
-    base_url = f"http://127.0.0.1:{port}"
-    if not _local_server_health_ok(base_url):
-        return None
-    pid = _pid_listening_on_port(port)
-    if pid is None or not _pid_alive(pid):
-        return None
-    _terminate_pid(pid)
-    return pid
+    del port
+    return None
 
 
 def register_local_server(port: int) -> None:
@@ -857,11 +922,11 @@ def clear_local_server_record() -> None:
     existing = _read_local_server_pid_file()
     if existing is not None and existing[0] == os.getpid():
         with contextlib.suppress(OSError):
-            _LOCAL_SERVER_PID_PATH.unlink()
+            _local_server_pid_path().unlink()
         with contextlib.suppress(OSError):
-            _LOCAL_SERVER_SIG_PATH.unlink()
+            _local_server_sig_path().unlink()
         with contextlib.suppress(OSError):
-            _LOCAL_SERVER_LOG_REF_PATH.unlink()
+            _local_server_log_ref_path().unlink()
 
 
 def _wait_for_local_omnigent_server(
@@ -950,9 +1015,9 @@ def _raise_local_server_failed(base_url: str, log_path: Path) -> None:
     # A failed spawn leaves a misleading pidfile; clear it (and the sig
     # sidecar) so the next invocation does not try to reuse a dead entry.
     with contextlib.suppress(OSError):
-        _LOCAL_SERVER_PID_PATH.unlink()
+        _local_server_pid_path().unlink()
     with contextlib.suppress(OSError):
-        _LOCAL_SERVER_SIG_PATH.unlink()
+        _local_server_sig_path().unlink()
     raise click.ClickException(
         f"Background local server failed to start ({base_url}).\n"
         f"  Server log: {log_path}\n"

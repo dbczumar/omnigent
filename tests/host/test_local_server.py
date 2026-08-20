@@ -133,6 +133,7 @@ def test_ensure_local_omnigent_server_reuses_without_spawning(
     monkeypatch.setattr(
         local_server, "_LOCAL_SERVER_LOG_REF_PATH", tmp_path / "local_server.logpath"
     )
+    monkeypatch.setattr(local_server, "_server_belongs_to_local_data_dir", lambda pid: True)
 
     def _must_not_popen(*_args: object, **_kwargs: object) -> Any:
         raise AssertionError("spawned a new server despite a healthy one existing")
@@ -166,6 +167,7 @@ def test_ensure_local_omnigent_server_respawns_on_config_drift(
     monkeypatch.setattr(
         local_server, "_LOCAL_SERVER_LOG_REF_PATH", tmp_path / "local_server.logpath"
     )
+    monkeypatch.setattr(local_server, "_server_belongs_to_local_data_dir", lambda pid: True)
     monkeypatch.setattr(local_server, "_LOCAL_SERVER_PID_PATH", tmp_path / "local_server.pid")
     monkeypatch.setattr(local_server, "pick_local_port", lambda preferred=8000: 8766)
     monkeypatch.setattr(Path, "home", classmethod(lambda _cls: tmp_path))
@@ -346,6 +348,7 @@ def test_stop_local_omnigent_server_waits_for_process_exit(
     until the process exits. This test verifies the poll loop runs and
     that both the pidfile and sig sidecar are cleaned up.
     """
+    monkeypatch.setattr(local_server, "_server_belongs_to_local_data_dir", lambda pid: True)
     pid_file = tmp_path / "local_server.pid"
     sig_file = tmp_path / "local_server.sig"
     pid_file.write_text("7777\n8000\n")
@@ -407,6 +410,7 @@ def test_stop_local_omnigent_server_escalates_to_sigkill(
     the port stays bound indefinitely. The test stubs ``time.monotonic``
     to simulate the grace period expiring, then verifies SIGKILL is sent.
     """
+    monkeypatch.setattr(local_server, "_server_belongs_to_local_data_dir", lambda pid: True)
     pid_file = tmp_path / "local_server.pid"
     sig_file = tmp_path / "local_server.sig"
     pid_file.write_text("8888\n8000\n")
@@ -482,6 +486,19 @@ def test_local_data_dir_honors_data_dir_not_config_home(
     # DATA_DIR is the data-isolation knob.
     monkeypatch.setenv("OMNIGENT_DATA_DIR", str(tmp_path / "data"))
     assert local_server._local_data_dir() == tmp_path / "data"
+
+
+def test_local_server_paths_honor_data_dir_set_after_import(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Late test isolation must not read the user's import-time pidfile."""
+    isolated = tmp_path / "isolated"
+    monkeypatch.setenv("OMNIGENT_DATA_DIR", str(isolated))
+
+    assert local_server._local_server_pid_path() == isolated / "local_server.pid"
+    assert local_server._local_server_sig_path() == isolated / "local_server.sig"
+    assert local_server._local_server_log_ref_path() == isolated / "local_server.logpath"
 
 
 def test_pick_local_port_returns_preferred_when_free() -> None:
@@ -795,32 +812,18 @@ def _fake_subprocess(stdout: str | None = None, raises: BaseException | None = N
     return _Sub
 
 
-def test_stop_untracked_local_server_kills_orphan_on_default_port(
+def test_stop_untracked_local_server_refuses_unowned_listener(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A live Omnigent server on :8000 with no pidfile entry is found and stopped.
+    """A listener without ownership evidence is never terminated."""
 
-    This is the reported bug: the pidfile was lost while the server lived, so
-    ``stop_local_omnigent_server`` (pidfile-scoped) couldn't see it. The sweep must
-    confirm it's our server via ``/health``, resolve its PID via lsof, and
-    terminate it — returning the PID so the off-switch can report it.
-    """
-
-    def _healthy(url: str, *, timeout: float, trust_env: bool) -> _FakeHealthResp:
-        assert trust_env is False
-        return _FakeHealthResp(200, {"status": "ok"})
-
-    monkeypatch.setattr("httpx.get", _healthy)
-    monkeypatch.setattr(local_server, "subprocess", _fake_subprocess(stdout="93359\n93360\n"))
-    monkeypatch.setattr(local_server, "_pid_alive", lambda pid: True)
     terminated: list[int] = []
     monkeypatch.setattr(local_server, "_terminate_pid", terminated.append)
 
     result = local_server.stop_untracked_local_server(port=8000)
 
-    # The first lsof PID is the listener; it must actually be terminated.
-    assert result == 93359
-    assert terminated == [93359]
+    assert result is None
+    assert terminated == []
 
 
 def test_stop_untracked_local_server_noop_when_nothing_listening(
@@ -1280,3 +1283,33 @@ def test_wait_fails_fast_without_stopping_a_child_that_already_died(
         )
 
     assert proc.terminated is False
+
+
+def test_stop_local_server_refuses_pid_from_another_data_dir(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A test-local pidfile must never signal a server owned by another dir."""
+    monkeypatch.setenv("OMNIGENT_DATA_DIR", str(tmp_path / "isolated"))
+    pid_file = tmp_path / "isolated" / "local_server.pid"
+    pid_file.parent.mkdir()
+    pid_file.write_text("4242\n8123\n")
+    monkeypatch.setattr(local_server, "_pid_alive", lambda pid: pid == 4242)
+
+    class _Process:
+        def cmdline(self) -> list[str]:
+            return [
+                "omnigent",
+                "server",
+                "--artifact-location",
+                str(tmp_path / "live" / "artifacts"),
+            ]
+
+    monkeypatch.setattr(local_server.psutil, "Process", lambda pid: _Process())
+    terminated: list[int] = []
+    monkeypatch.setattr(local_server, "_terminate_pid", terminated.append)
+
+    local_server.stop_local_omnigent_server()
+
+    assert terminated == []
+    assert pid_file.exists()

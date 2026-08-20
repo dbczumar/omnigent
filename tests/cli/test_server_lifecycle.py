@@ -11,6 +11,7 @@ import pytest
 from click import ClickException
 from click.testing import CliRunner
 
+import omnigent.cli as cli_module
 from omnigent.cli import _HostDaemonRecord, _SessionPagesResult, cli
 from omnigent.host.local_server import LocalServerInfo, LocalServerStartup
 
@@ -33,6 +34,18 @@ def _record(
         log_path=None,
         started_at=0,
     )
+
+
+def test_host_daemon_paths_honor_data_dir_set_after_import(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Daemon registry writes stay inside pytest's late-bound data directory."""
+    isolated = tmp_path / "isolated"
+    monkeypatch.setenv("OMNIGENT_DATA_DIR", str(isolated))
+
+    assert cli_module._host_pid_path() == isolated / "host.pid"
+    assert cli_module._daemon_registry_dir() == isolated / "daemons"
 
 
 # ── server status ──────────────────────────────────────────────────

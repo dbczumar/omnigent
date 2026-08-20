@@ -2229,6 +2229,14 @@ def _runner_loopback_host(host: str) -> str:
 
 
 _HOST_PID_PATH = data_dir() / "host.pid"
+_DEFAULT_HOST_PID_PATH = _HOST_PID_PATH
+
+
+def _host_pid_path() -> Path:
+    """Return the host pidfile, resolving the runtime data dir late."""
+    if _HOST_PID_PATH != _DEFAULT_HOST_PID_PATH:
+        return _HOST_PID_PATH
+    return data_dir() / "host.pid"
 
 
 # host.pid records the daemon PID + the "target" it serves: a normalized
@@ -2454,7 +2462,7 @@ def _daemon_registry_dir() -> Path:
     :returns: Registry directory path, e.g.
         ``Path("~/.omnigent/daemons")``.
     """
-    return _HOST_PID_PATH.parent / "daemons"
+    return _host_pid_path().parent / "daemons"
 
 
 def _daemon_record_path(target: str) -> Path:
@@ -2560,7 +2568,7 @@ def _delete_daemon_record(record: _HostDaemonRecord) -> None:
     legacy = _read_host_pid_file()
     if legacy is not None and legacy[1] == record.target:
         with contextlib.suppress(OSError):
-            _HOST_PID_PATH.unlink()
+            _host_pid_path().unlink()
 
 
 def _legacy_daemon_record() -> _HostDaemonRecord | None:
@@ -2902,7 +2910,7 @@ def _persist_spawned_daemon(
             config_sig=config_sig,
         )
     )
-    _HOST_PID_PATH.write_text(f"{spawned.pid}\n{target}\n")
+    _host_pid_path().write_text(f"{spawned.pid}\n{target}\n")
 
 
 def _foreground_daemon_record(
@@ -3049,7 +3057,7 @@ def _ensure_host_daemon(server_url: str | None) -> bool:
     if not decision.config_changed and _local_daemon_serves_target(target, server_url):
         return False
 
-    _HOST_PID_PATH.parent.mkdir(parents=True, exist_ok=True)
+    _host_pid_path().parent.mkdir(parents=True, exist_ok=True)
     mode_args = ["--local"] if not server_url else ["--server", server_url]
     args = [sys.executable, "-m", "omnigent.host._daemon_entry", *mode_args]
     spawned = _spawn_host_daemon_process(
@@ -3125,10 +3133,11 @@ def _read_host_pid_file() -> tuple[int, str] | None:
 
     :returns: ``(pid, server_url)`` if well-formed, ``None`` otherwise.
     """
-    if not _HOST_PID_PATH.exists():
+    pid_path = _host_pid_path()
+    if not pid_path.exists():
         return None
     try:
-        lines = _HOST_PID_PATH.read_text().strip().splitlines()
+        lines = pid_path.read_text().strip().splitlines()
         if len(lines) < 2:
             return None
         return int(lines[0]), lines[1]
