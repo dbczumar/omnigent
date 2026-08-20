@@ -6794,13 +6794,25 @@ function useResolvedComposerModel(
     isReportedModelPicker && llmModel
       ? (findNativeModelOption(codexModelOptions, llmModel)?.id ?? llmModel)
       : null;
+  // Before the harness has reported anything (a routed session whose pane
+  // has not started, a reload of one), the gear seeds from the session's
+  // own REQUEST so the pick the user (or the router) made is what the row
+  // offers to edit — a request is never display truth, but it is the draft.
+  // The moment a report exists it wins, so a request the pane never took
+  // can't masquerade as the active model.
+  const requestedRowId =
+    isReportedModelPicker && sessionModelOverride
+      ? (findNativeModelOption(codexModelOptions, sessionModelOverride)?.id ?? sessionModelOverride)
+      : null;
   // cursor mirrors its live TUI model into ``model_override``; kiro sets it
   // on a web pick (which also drives a live ``/model`` switch); opencode/pi
   // mirror both ways into ``model_override``. Those wrappers keep their
   // override-derived surface until they adopt reported-model semantics.
   // SDK/bundle agents (no native picker) resolve the session override or the
   // bound default — never the cross-session sticky.
-  const pickerSelectedModel = isReportedModelPicker ? reportedRowId : sessionModelOverride;
+  const pickerSelectedModel = isReportedModelPicker
+    ? (reportedRowId ?? requestedRowId)
+    : sessionModelOverride;
   const effectiveModel = nativeVendorOwnsModel
     ? modelPickerKind === "cursor" || modelPickerKind === "kiro"
       ? sessionModelOverride

@@ -1044,9 +1044,21 @@ async def test_claude_native_model_options_serves_probe_rows_after_pending(
         cached = await client.get(f"/v1/sessions/{conv_id}/claude-model-options")
 
     assert resolved.status_code == 200
-    # The harness's probed rows are the whole catalog — no configured or
-    # static rows are merged in.
-    assert resolved.json() == {"models": [{"id": "sonnet[1m]", "model": "claude-sonnet-5[1m]"}]}
+    # The harness's probed rows are the catalog — no configured or static
+    # rows are merged in — plus the config's launch pin appended as the
+    # marked default: a Default launch on this shape passes it as --model,
+    # so it is the row a Default launch truly runs.
+    assert resolved.json() == {
+        "models": [
+            {"id": "sonnet[1m]", "model": "claude-sonnet-5[1m]"},
+            {
+                "id": "system.ai.claude-opus-4-10",
+                "model": "system.ai.claude-opus-4-10",
+                "displayName": "system.ai.claude-opus-4-10",
+                "isDefault": True,
+            },
+        ]
+    }
     assert cached.json() == resolved.json()
 
 
