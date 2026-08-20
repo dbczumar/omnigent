@@ -125,7 +125,7 @@ import {
 import { readLastHarness, writeLastHarness } from "@/lib/harnessPreferences";
 import { readHideUnconfiguredHarnesses } from "@/lib/harnessVisibilityPreferences";
 import { readDefaultBaseBranch } from "@/lib/baseBranchPreferences";
-import { readHarnessOptions, writeHarnessOption } from "@/lib/modePreferences";
+import { readHarnessOptions, writeHarnessOption, type HarnessOptions } from "@/lib/modePreferences";
 import {
   AUTO_HARNESS_DESCRIPTION,
   AUTO_HARNESS_ID,
@@ -391,6 +391,60 @@ const CODEX_NATIVE_BYPASS_APPROVAL_OPTION = {
   description: "Runs Codex with no approval prompts and no command sandbox",
   args: [] as string[],
 };
+
+function createdHarnessOptions({
+  harness,
+  supportsPermissionMode,
+  supportsApprovalMode,
+  supportsCursorMode,
+  supportsAgySkipPermissions,
+  supportsModelPicker,
+  permissionMode,
+  approvalMode,
+  bypassSandbox,
+  cursorExecMode,
+  agySkipMode,
+  pickedModel,
+  pickedEffort,
+  smartRoutingEligible,
+  costControlMode,
+}: {
+  harness: string | null;
+  supportsPermissionMode: boolean;
+  supportsApprovalMode: boolean;
+  supportsCursorMode: boolean;
+  supportsAgySkipPermissions: boolean;
+  supportsModelPicker: boolean;
+  permissionMode: string;
+  approvalMode: string;
+  bypassSandbox: boolean;
+  cursorExecMode: string;
+  agySkipMode: string;
+  pickedModel: string;
+  pickedEffort: string;
+  smartRoutingEligible: boolean;
+  costControlMode: CostControlMode;
+}): HarnessOptions | null {
+  if (harness === null) return null;
+
+  const options: HarnessOptions = {};
+  if (supportsModelPicker) options.model = pickedModel;
+  if (supportsPermissionMode) {
+    options.mode = permissionMode;
+    options.effort = pickedEffort;
+  } else if (supportsApprovalMode) {
+    options.mode = bypassSandbox ? CODEX_NATIVE_BYPASS_APPROVAL_VALUE : approvalMode;
+  } else if (supportsCursorMode) {
+    options.mode = cursorExecMode;
+  } else if (supportsAgySkipPermissions) {
+    options.mode = agySkipMode;
+  }
+
+  if (smartRoutingEligible) {
+    options.routing = costControlMode === "on" ? "on" : "off";
+  }
+  return Object.keys(options).length > 0 ? options : null;
+}
 
 /** Use a local-friendly label only when the desktop shell proves the host id is this machine. */
 export function displayNameForHost(
@@ -1632,12 +1686,13 @@ function HarnessConfigModal({
       setPickedModel(draftModel);
       setPickedEffort(draftEffort);
       setPermissionMode(draftPermission);
-      if (entryHarness)
+      if (entryHarness) {
         writeHarnessOption(entryHarness, {
           model: draftModel,
           effort: draftEffort,
           mode: draftPermission,
         });
+      }
     } else if (hasModelPicker) {
       setPickedModel(draftModel);
       if (entryHarness) writeHarnessOption(entryHarness, { model: draftModel });
@@ -1645,11 +1700,12 @@ function HarnessConfigModal({
       if (isCodex) setPickedModel(draftModel);
       setApprovalMode(draftApproval);
       setBypassSandbox(draftBypass);
-      if (entryHarness)
+      if (entryHarness) {
         writeHarnessOption(entryHarness, {
-          mode: draftApproval,
+          mode: isCodex && draftBypass ? CODEX_NATIVE_BYPASS_APPROVAL_VALUE : draftApproval,
           ...(isCodex ? { model: draftModel } : {}),
         });
+      }
     } else if (hasCursor) {
       setCursorExecMode(draftCursor);
       if (entryHarness) writeHarnessOption(entryHarness, { mode: draftCursor });
@@ -1675,11 +1731,12 @@ function HarnessConfigModal({
         setPickedModel("");
         setPickedEffort("");
       }
-      if (entryHarness)
+      if (entryHarness) {
         writeHarnessOption(entryHarness, {
           routing: draftRouting === "on" ? "on" : "off",
           ...(draftRouting === "on" ? { model: "", effort: "" } : {}),
         });
+      }
     }
     onOpenChange(false);
   };
@@ -2961,10 +3018,13 @@ export function NewChatLandingScreen() {
   // first id, or a persisted/draft pick resolving on mount), which would wipe a
   // costControlMode/bypass restored from the landing draft.
   const prevAgentIdRef = useRef<string | null | undefined>(undefined);
+  const suppressBypassSeedRef = useRef(false);
   useEffect(() => {
     const prev = prevAgentIdRef.current;
     prevAgentIdRef.current = effectiveAgentId;
-    if (prev === undefined || prev === effectiveAgentId) return;
+    suppressBypassSeedRef.current =
+      prev !== undefined && prev !== null && prev !== effectiveAgentId;
+    if (!suppressBypassSeedRef.current) return;
     setBypassSandbox(false);
     setCostControlMode(null);
   }, [effectiveAgentId, setCostControlMode]);
@@ -3021,6 +3081,11 @@ export function NewChatLandingScreen() {
           : "",
       );
     } else if (supportsApprovalMode) {
+      setBypassSandbox(
+        !suppressBypassSeedRef.current &&
+          selectedNativeHarness === "codex-native" &&
+          stored.mode === CODEX_NATIVE_BYPASS_APPROVAL_VALUE,
+      );
       setApprovalMode(resolve(CODEX_NATIVE_APPROVAL_MODES, CODEX_NATIVE_DEFAULT_APPROVAL_MODE));
       // A remembered routing "on" outranks a remembered concrete model, and
       // also drops any model/effort left in the shared state (e.g. seeded for
@@ -3991,6 +4056,32 @@ export function NewChatLandingScreen() {
           return;
         }
         data = { id: created.id };
+      }
+      // Persist the configuration that actually launched. Modal Save updates
+      // storage eagerly so an immediate Send cannot observe stale state; this
+      // successful-create snapshot also covers restored drafts and every
+      // harness-specific creation path.
+      if (!smartRoutingHarnessSelected) {
+        const launchedOptions = createdHarnessOptions({
+          harness: selectedNativeHarness,
+          supportsPermissionMode: agentSupportsPermissionMode,
+          supportsApprovalMode: agentSupportsApprovalMode,
+          supportsCursorMode: agentSupportsCursorMode,
+          supportsAgySkipPermissions: agentSupportsAgySkip,
+          supportsModelPicker: agentSupportsModelPicker || nativeAgent?.harness === "codex-native",
+          permissionMode,
+          approvalMode,
+          bypassSandbox,
+          cursorExecMode,
+          agySkipMode,
+          pickedModel,
+          pickedEffort,
+          smartRoutingEligible: effectiveAgentId !== PENDING_AGENT_ID && smartRoutingEligible,
+          costControlMode,
+        });
+        if (launchedOptions !== null) {
+          writeHarnessOption(selectedNativeHarness, launchedOptions);
+        }
       }
       // Promote the born-filed session to first-class project membership. The
       // create above already stamped the `omni_project` label (so the row
