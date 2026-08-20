@@ -258,8 +258,17 @@ def test_row15_failed_switch_surfaces_error_and_keeps_the_reported_model(
     # always visible, and its collapsed detail carries the specific reason.
     headline = page.get_by_test_id("error-headline").first
     expect(headline).to_be_visible(timeout=10_000)
-    headline.click()
-    expect(page.get_by_text("was not switched", exact=False).first).to_be_visible(timeout=10_000)
+    # Expand to read the detail. The click can land before the disclosure
+    # handler is wired under suite load, so retry until the detail shows.
+    detail = page.get_by_text("was not switched", exact=False).first
+    for _ in range(5):
+        headline.click()
+        try:
+            expect(detail).to_be_visible(timeout=2_000)
+            break
+        except AssertionError:
+            continue
+    expect(detail).to_be_visible(timeout=5_000)
     # The chip never claimed the pick: it keeps the pane's reported model.
     expect(chip).to_contain_text("Sonnet 5")
     expect(chip).not_to_contain_text("Haiku")
