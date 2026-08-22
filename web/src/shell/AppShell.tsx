@@ -29,7 +29,10 @@ import {
   type DesignModeElement,
 } from "@/lib/designModePrompt";
 import { readSessionWorkspaceState, writeSessionWorkspaceState } from "@/lib/sessionWorkspaceState";
-import { readDefaultWorkspacePanelOpen } from "@/lib/workspacePanelPreferences";
+import {
+  readDefaultWorkspacePanelOpen,
+  writeDefaultWorkspacePanelOpen,
+} from "@/lib/workspacePanelPreferences";
 import {
   Dialog,
   DialogContent,
@@ -1011,6 +1014,10 @@ export function AppShell() {
   const toggleRightPanel = () => {
     const next = !rightPanelOpen;
     if (conversationId) writeSessionWorkspaceState(conversationId, { open: next });
+    // Remember the choice app-wide as well, so a collapsed rail stays collapsed
+    // in the next chat the user opens (and on reload) until they reopen it.
+    // Sessions with their own saved open-state still win over this.
+    writeDefaultWorkspacePanelOpen(next);
     if (next) {
       if (selectedFilePath) {
         // Reopening lands back on the file remembered in per-session
