@@ -148,12 +148,16 @@ _SHELL_MODE_GLYPH = "!"
 # has. A row starting with one of these is a candidate input box; which
 # glyph it is says whether a chat message may be typed there.
 _COMPOSER_MODE_GLYPHS = (_CLAUDE_PROMPT_GLYPH, _SHELL_MODE_GLYPH)
-# Glyphs the input box's own frame is drawn from — corner-free by design.
-# Every other box the TUI draws (welcome banner, ctrl+r filter field,
-# dialogs) closes its rules with ``╭╮╰╯``, so a corner-free rule directly
+# Box-drawing glyphs a TUI horizontal rule is made of. A rule directly
 # above a composer glyph is what marks the live input box rather than a
-# prompt echoed into scrollback (see :func:`_composer_row`).
-_INPUT_BOX_RULE_CHARS = frozenset("─━╌╍")
+# prompt echoed into scrollback (see :func:`_composer_row`), and the last
+# rule on screen is where the footer begins (see
+# :func:`_permission_mode_from_pane`). Corner glyphs are included because
+# Claude Code has framed the input box both ways across versions.
+_BOX_RULE_CHARS = frozenset("─━╭╮╰╯│┃╌╍")
+# Footer rows the permission-mode reader falls back to scanning while the
+# input box has not mounted yet and no rule is on screen to anchor on.
+_PROMPT_SCAN_TAIL_LINES = 5
 _CLAUDE_READY_POLL_INTERVAL_S = 0.15
 _PASTE_SETTLE_S = 0.1  # let the TUI commit a paste before the separate submit Enter
 # How long to wait for the pasted draft to visibly land in Claude's
@@ -3913,28 +3917,29 @@ def _composer_row(pane: str) -> str | None:
     """
     Return the row Claude Code's live input box renders, or ``None``.
 
-    The box is the last thing on screen framed by corner-free rules
-    (:data:`_INPUT_BOX_RULE_CHARS`), and its row is the one directly under
-    that frame's opening rule, led by a composer glyph
+    The box is the last thing on screen framed by rules
+    (:func:`_is_box_rule`), and its row is the one directly under that
+    frame's opening rule, led by a composer glyph
     (:data:`_COMPOSER_MODE_GLYPHS`).
 
     That frame is what tells the composer apart from every look-alike: a
     prompt echoed into scrollback, the ctrl+r search's selected history
     row, the rewind dialog's ``❯ (current)`` and a startup menu's
-    ``❯ 2. No (recommended)`` all carry the glyph without it. Taking the
-    row under the OPENING rule (rather than under the lowest rule) is what
-    keeps the ``?`` shortcuts panel's "! for shell mode" row — which sits
-    directly under the box's closing rule — from reading as a shell-mode
-    composer. When the pane is too short to show the closing rule (a
-    multi-line draft in a sliver-height terminal), the lowest rule is the
-    opening one and the row under it is the composer.
+    ``❯ 2. No (recommended)`` all carry the glyph without a rule directly
+    above them. Taking the row under the OPENING rule (rather than under
+    the lowest rule) is what keeps the ``?`` shortcuts panel's "! for
+    shell mode" row — which sits directly under the box's closing rule —
+    from reading as a shell-mode composer. When the pane is too short to
+    show the closing rule (a multi-line draft in a sliver-height
+    terminal), the lowest rule is the opening one and the row under it is
+    the composer.
 
     :param pane: Captured pane text from :func:`_capture_pane`.
     :returns: The row's text, e.g. ``"❯ fix the bug"`` or ``"!"`` in shell
         mode, or ``None`` when no input box is on screen.
     """
     non_empty = [line for line in pane.splitlines() if line.strip()]
-    rules = [idx for idx, line in enumerate(non_empty) if _is_input_box_rule(line)]
+    rules = [idx for idx, line in enumerate(non_empty) if _is_box_rule(line)]
     if not rules:
         return None
     candidates = [rules[-2] + 1] if len(rules) >= 2 else []
@@ -3973,22 +3978,21 @@ def _claude_prompt_rendered(pane: str) -> bool:
     return row is not None and row.strip().startswith(_CLAUDE_PROMPT_GLYPH)
 
 
-def _is_input_box_rule(line: str) -> bool:
+def _is_box_rule(line: str) -> bool:
     """
-    Return whether a line is one of the input box's frame rules.
+    Return whether a line is a TUI box-drawing horizontal rule.
 
-    Claude Code frames the input box with corner-free rows of ``─``
-    (:data:`_INPUT_BOX_RULE_CHARS`). Its other boxes — the welcome
-    banner, the ctrl+r filter field, dialogs — close their rules with
-    corner glyphs instead, so excluding corners is what keeps
-    :func:`_composer_row` from reading a glyph under one of those as the
-    composer.
+    Claude Code frames the input box with a row of ``─``
+    (:data:`_BOX_RULE_CHARS`), with or without corner glyphs depending on
+    the version. Both spellings count: :func:`_composer_row` anchors on
+    the rule directly above the composer, so it is the position that
+    identifies the box, not the corners.
 
     :param line: A single pane line, e.g. ``"──────────"``.
-    :returns: ``True`` when the line is an input-box frame rule.
+    :returns: ``True`` when the line is a box-drawing rule.
     """
     stripped = line.strip()
-    return len(stripped) >= 3 and all(ch in _INPUT_BOX_RULE_CHARS for ch in stripped)
+    return len(stripped) >= 3 and all(ch in _BOX_RULE_CHARS for ch in stripped)
 
 
 def _submit_needle(content: str) -> str:

@@ -8150,6 +8150,30 @@ def test_a_multiline_draft_in_a_sliver_pane_still_reads_as_ready() -> None:
     assert _occupying_surface(_SLIVER_MULTILINE_DRAFT_PANE) is None
 
 
+def test_a_corner_framed_composer_still_reads_as_ready() -> None:
+    """
+    The composer counts whether or not its frame draws corner glyphs.
+
+    Claude Code has rendered the input box both ways across versions —
+    a bare ``────`` rule in 2.1.240, ``╭──╮``/``╰──╯`` elsewhere — and it
+    is the rule's POSITION directly above the row that identifies the
+    box, not its corners. Reading only one spelling would leave a healthy
+    composer looking covered: an Escape at it, then a readiness timeout.
+    """
+    pane = "\n".join(
+        [
+            "● Working on it",
+            "╭──────────────╮",
+            "❯ ",
+            "╰──────────────╯",
+            "  Opus 5 │ 0/1M (0%)",
+            "  ⏵⏵ auto mode on (shift+tab to cycle)",
+        ]
+    )
+    assert _claude_prompt_rendered(pane) is True
+    assert _occupying_surface(pane) is None
+
+
 def test_the_shortcuts_panel_shell_mode_row_is_not_read_as_shell_mode() -> None:
     """
     The ``?`` panel's "! for shell mode" row is not a shell-mode composer.
