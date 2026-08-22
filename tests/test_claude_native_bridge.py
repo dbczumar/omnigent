@@ -8256,14 +8256,48 @@ def test_inject_slash_command_restores_an_occupied_input_box_first(
     bridge_dir = _picker_bridge_dir(tmp_path)
     sends = _fake_tmux(
         monkeypatch,
-        # Search up at the occupied-input check, idle after the Escape,
-        # then the typed command renders and the submit clears it.
-        [_REVERSE_SEARCH_PANE, _IDLE_PANE, _composer_pane("/effort high"), _IDLE_PANE],
+        # Search up at the occupied-input check and again at the
+        # re-confirmation, idle after the Escape, then the typed command
+        # renders and the submit clears it.
+        [
+            _REVERSE_SEARCH_PANE,
+            _REVERSE_SEARCH_PANE,
+            _IDLE_PANE,
+            _composer_pane("/effort high"),
+            _IDLE_PANE,
+        ],
     )
 
     claude_native_bridge.inject_slash_command(bridge_dir, command="/effort high")
 
     assert [args[-1] for args in sends] == ["Escape", "C-u", "/effort high", "Enter"]
+
+
+def test_a_single_frame_without_a_composer_does_not_draw_an_escape(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    A surface must be seen twice before an Escape is spent on it.
+
+    Occupancy is inferred from the absence of a framed composer, so any
+    single frame that fails to show one — a repaint caught mid-flight —
+    would otherwise send an Escape, and on a bare composer that
+    interrupts the running turn. A real surface is still there a poll
+    later; this frame is not, so no Escape may be sent.
+    """
+    bridge_dir = _picker_bridge_dir(tmp_path)
+    sends = _fake_tmux(
+        monkeypatch,
+        # One composer-less frame, then the live input box again.
+        ["● Working on it", _IDLE_PANE, _composer_pane("/effort high"), _IDLE_PANE],
+    )
+
+    claude_native_bridge.inject_slash_command(bridge_dir, command="/effort high")
+
+    tails = [args[-1] for args in sends]
+    assert "Escape" not in tails, f"A one-frame sighting must not draw an Escape; got {tails}."
+    assert tails == ["C-u", "/effort high", "Enter"]
 
 
 def test_the_shortcuts_panel_is_not_treated_as_an_occupied_input(

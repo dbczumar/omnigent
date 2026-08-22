@@ -3848,10 +3848,12 @@ def _restore_occupied_input(socket_path: str, tmux_target: str) -> None:
     cancel"), which commits nothing and hands the empty input box back, so
     the web-UI message wins the pane.
 
-    Escape is only sent while the current capture verifiably shows one —
+    Escape is only sent while the surface is verifiably on screen —
     never blind, because on the bare composer Escape interrupts an
     in-flight turn. An empty (torn) capture means "unknown" and gets no
-    Escape. A swallowed Escape is re-sent while the surface remains,
+    Escape, and a surface seen in a single frame is re-confirmed a poll
+    later before an Escape is spent on it, so a repaint artifact cannot
+    draw one. A swallowed Escape is re-sent while the surface remains,
     spaced by :data:`_OCCUPIED_INPUT_DISMISS_RETRY_INTERVAL_S`.
     Best-effort: a surface that outlives
     :data:`_OCCUPIED_INPUT_DISMISS_TIMEOUT_S` is left on screen and the
@@ -3864,6 +3866,7 @@ def _restore_occupied_input(socket_path: str, tmux_target: str) -> None:
     """
     deadline = time.monotonic() + _OCCUPIED_INPUT_DISMISS_TIMEOUT_S
     last_escape: float | None = None
+    confirmed = False
     while True:
         pane = _capture_pane(socket_path, tmux_target)
         surface = _occupying_surface(pane)
@@ -3877,7 +3880,13 @@ def _restore_occupied_input(socket_path: str, tmux_target: str) -> None:
                 _OCCUPIED_INPUT_DISMISS_TIMEOUT_S,
             )
             return
-        if last_escape is None or now - last_escape >= _OCCUPIED_INPUT_DISMISS_RETRY_INTERVAL_S:
+        if not confirmed:
+            # One sighting is not enough to spend an Escape on: on a bare
+            # composer Escape interrupts the running turn, and a single frame
+            # can misreport during a repaint. A real surface is still there a
+            # poll later; a repaint artifact is not.
+            confirmed = True
+        elif last_escape is None or now - last_escape >= _OCCUPIED_INPUT_DISMISS_RETRY_INTERVAL_S:
             _logger.info("claude-native: dismissing %s covering the input box", surface)
             _run_tmux(socket_path, "send-keys", "-t", tmux_target, "Escape")
             last_escape = now
