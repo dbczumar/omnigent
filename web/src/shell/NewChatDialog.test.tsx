@@ -982,6 +982,7 @@ describe("NewChatLandingScreen", () => {
     renderLanding();
 
     expect(screen.getByTestId("new-chat-landing-input")).toHaveClass(
+      "block",
       "min-h-[60px]",
       "max-h-[200px]",
       "overflow-y-auto",
