@@ -459,6 +459,8 @@ def test_compacted_fork_remaps_boundary_and_continues_with_claude(
 
     with _workspaces_trusted_in_claude_config([workspace]):
         with _host_daemon(tmp_path, live_server):
+            # 1. Launch a real Claude Code session and seed history that must
+            # survive both compaction and the subsequent fork.
             host_id = _online_host_id(http_client, timeout=30.0)
             agent_id = _claude_native_agent_id(http_client)
             source_id = _create_native_session(
@@ -480,9 +482,8 @@ def test_compacted_fork_remaps_boundary_and_continues_with_claude(
             )
             _wait_for_external_session_id(http_client, session_id=source_id, timeout=60.0)
 
-            # Claude refuses /compact for a one-turn transcript even when
-            # startup instructions consume a substantial part of the context
-            # window. Commit a second real turn so compaction is eligible.
+            # 2. Complete the second real turn Claude requires before it will
+            # accept /compact, even with substantial startup instructions.
             second_ack = f"SECOND_ACK_{uuid.uuid4().hex[:6].upper()}"
             _send_user_message(
                 http_client,
@@ -496,23 +497,62 @@ def test_compacted_fork_remaps_boundary_and_continues_with_claude(
                 timeout=180.0,
             )
 
+            # 3. Invoke Claude Code's real /compact flow and validate the
+            # source cursor before forking through the public session API.
             compact = http_client.post(
                 f"/v1/sessions/{source_id}/events",
                 json={"type": "compact", "data": {}},
                 timeout=30.0,
             )
-            assert compact.status_code == 202, compact.text
+            assert compact.status_code == 202, (
+                f"compact request returned {compact.status_code}: {compact.text}"
+            )
+            assert compact.json() == {"queued": False}, (
+                f"compact request returned an unexpected acknowledgement: {compact.json()!r}"
+            )
             source_compaction = _wait_for_compaction_item(
                 http_client,
                 session_id=source_id,
                 timeout=180.0,
             )
+            source_summary = source_compaction.get("summary")
+            assert isinstance(source_summary, str) and source_summary.strip(), (
+                f"source compaction did not persist a non-empty summary: {source_compaction!r}"
+            )
+            source_boundary_id = source_compaction.get("last_item_id")
+            assert isinstance(source_boundary_id, str) and source_boundary_id, (
+                f"source compaction did not persist a string boundary: {source_compaction!r}"
+            )
 
+            source_items_resp = http_client.get(
+                f"/v1/sessions/{source_id}/items",
+                params={"limit": 100, "order": "asc"},
+                timeout=30.0,
+            )
+            source_items_resp.raise_for_status()
+            source_items = source_items_resp.json()["data"]
+            source_ids = {item["id"] for item in source_items}
+            assert len(source_ids) == len(source_items), "source item IDs must be unique"
+            assert source_boundary_id in source_ids, (
+                f"source compaction boundary {source_boundary_id!r} does not reference a "
+                f"source item; source IDs: {sorted(source_ids)!r}"
+            )
+            source_compactions = [
+                item for item in source_items if item.get("type") == "compaction"
+            ]
+            assert len(source_compactions) == 1, (
+                f"expected exactly one source compaction, got {len(source_compactions)}"
+            )
+
+            # 4. Fork the compacted session and prove every item received a
+            # fresh ID while type/response ordering and the cursor position
+            # were preserved exactly.
             fork_id = _fork_session(
                 http_client,
                 source_id=source_id,
                 title=f"compacted clone of {source_id}",
             )
+            assert fork_id != source_id, "fork endpoint returned the source session ID"
             fork_items_resp = http_client.get(
                 f"/v1/sessions/{fork_id}/items",
                 params={"limit": 100, "order": "asc"},
@@ -520,11 +560,51 @@ def test_compacted_fork_remaps_boundary_and_continues_with_claude(
             )
             fork_items_resp.raise_for_status()
             fork_items = fork_items_resp.json()["data"]
-            fork_compaction = next(item for item in fork_items if item.get("type") == "compaction")
-            fork_boundary_id = fork_compaction["last_item_id"]
-            assert fork_boundary_id != source_compaction["last_item_id"]
-            assert fork_boundary_id in {item["id"] for item in fork_items}
+            fork_ids = {item["id"] for item in fork_items}
+            assert len(fork_ids) == len(fork_items), "fork item IDs must be unique"
+            assert len(fork_items) == len(source_items), (
+                f"fork copied {len(fork_items)} items from a {len(source_items)}-item source"
+            )
+            assert source_ids.isdisjoint(fork_ids), (
+                f"fork reused source item IDs: {sorted(source_ids & fork_ids)!r}"
+            )
 
+            source_shape = [(item.get("type"), item.get("response_id")) for item in source_items]
+            fork_shape = [(item.get("type"), item.get("response_id")) for item in fork_items]
+            assert fork_shape == source_shape, (
+                "fork changed ordered item types/response IDs: "
+                f"source={source_shape!r}, fork={fork_shape!r}"
+            )
+
+            fork_compactions = [item for item in fork_items if item.get("type") == "compaction"]
+            assert len(fork_compactions) == 1, (
+                f"expected exactly one fork compaction, got {len(fork_compactions)}"
+            )
+            fork_compaction = fork_compactions[0]
+            assert fork_compaction.get("summary") == source_summary, (
+                "fork did not preserve the source compaction summary"
+            )
+            fork_boundary_id = fork_compaction.get("last_item_id")
+            assert isinstance(fork_boundary_id, str) and fork_boundary_id, (
+                f"fork compaction did not persist a string boundary: {fork_compaction!r}"
+            )
+            source_boundary_position = next(
+                index
+                for index, item in enumerate(source_items)
+                if item["id"] == source_boundary_id
+            )
+            expected_fork_boundary_id = fork_items[source_boundary_position]["id"]
+            assert fork_boundary_id == expected_fork_boundary_id, (
+                "fork compaction cursor did not map to the clone of the source boundary: "
+                f"expected {expected_fork_boundary_id!r} at position "
+                f"{source_boundary_position}, got {fork_boundary_id!r}"
+            )
+            assert fork_boundary_id != source_boundary_id, (
+                "fork compaction cursor still references the source item ID"
+            )
+
+            # 5. Resume the cloned real-Claude transcript and demand exact
+            # recall, proving the remapped compacted session remains usable.
             _launch_runner(
                 http_client,
                 host_id=host_id,
@@ -546,7 +626,9 @@ def test_compacted_fork_remaps_boundary_and_continues_with_claude(
                 marker=marker,
                 timeout=180.0,
             )
-            assert marker in text
+            assert text.strip() == marker, (
+                f"resumed compacted fork should answer exactly {marker!r}, got {text!r}"
+            )
 
 
 def test_fork_resume_worktree_carries_history(
