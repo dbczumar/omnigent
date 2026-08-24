@@ -1806,8 +1806,16 @@
         "description": "Terminal event for a turn that ended with an error.\n\nCarries a `omnigent.server.schemas.FailedResponseObject`\nwhose `error` field describes the failure. Response metadata may\nbe absent when the failure occurs before response allocation.",
         "properties": {
           "response": {
-            "$ref": "#/components/schemas/FailedResponseObject",
-            "description": "The failure response object with `status=\"failed\"` and `error` populated."
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ResponseObject"
+              },
+              {
+                "$ref": "#/components/schemas/FailedResponseObject"
+              }
+            ],
+            "description": "The failure response object with `status=\"failed\"` and `error` populated.",
+            "title": "Response"
           },
           "sequence_number": {
             "anyOf": [

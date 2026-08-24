@@ -3941,7 +3941,7 @@ class FailedEvent(_SSEEventBase):
     """
 
     type: Literal["response.failed"]
-    response: FailedResponseObject
+    response: ResponseObject | FailedResponseObject
 
 
 class CancelledEvent(_SSEEventBase):

@@ -407,6 +407,21 @@ def test_response_failed_accepts_preallocation_failure_payload() -> None:
     assert "created_at" not in parsed.response.model_dump()
 
 
+def test_response_failed_accepts_allocated_response_model() -> None:
+    """Harnesses may construct a failed event from a strict response model."""
+    response = ResponseObject(
+        id="resp_abc123",
+        status="failed",
+        model="test-agent",
+        created_at=1,
+        error={"code": "model_not_found", "message": "model not found"},
+    )
+
+    event = FailedEvent(type="response.failed", response=response)
+
+    assert event.response is response
+
+
 @pytest.mark.parametrize(
     "event_type,status",
     [
