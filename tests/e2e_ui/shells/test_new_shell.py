@@ -35,12 +35,13 @@ independent session.
 
 from __future__ import annotations
 
+import json
 import re
 import time
 from pathlib import Path
 
 import httpx
-from playwright.sync_api import Page, expect
+from playwright.sync_api import Page, Route, expect
 
 from tests.e2e_ui.conftest import open_right_rail
 
@@ -147,6 +148,37 @@ def test_terminal_toggle_stays_disabled_when_only_a_shell_is_open(
 ) -> None:
     """A live rail shell does not enable or populate the agent Terminal view."""
     base_url, session_id = terminal_session
+
+    # Runner-hosted SDK sessions auto-create ``terminal_tui_main`` when the
+    # parity sidecar is available (as it is in CI). Hide that pane from this
+    # browser's terminal snapshot and stream so the test deterministically
+    # models the cache window from the bug: a user shell has landed while the
+    # agent pane has not. The shell itself is still launched and attached
+    # through the real runner below.
+    def _serve_shells_only(route: Route) -> None:
+        response = route.fetch()
+        payload = response.json()
+        rows = payload.get("data", [])
+        shells = [
+            row
+            for row in rows
+            if isinstance(row, dict)
+            and isinstance(row.get("metadata"), dict)
+            and str(row["metadata"].get("session_key", "")).startswith("u-")
+        ]
+        payload["data"] = shells
+        payload["first_id"] = shells[0]["id"] if shells else None
+        payload["last_id"] = shells[-1]["id"] if shells else None
+        payload["has_more"] = False
+        route.fulfill(
+            status=response.status,
+            headers={**response.headers, "content-type": "application/json"},
+            body=json.dumps(payload),
+        )
+
+    terminal_list = re.compile(rf"/v1/sessions/{re.escape(session_id)}/resources/terminals\?.*")
+    page.route(terminal_list, _serve_shells_only)
+    page.route(f"**/v1/sessions/{session_id}/stream*", lambda route: route.abort())
 
     terminal_first = httpx.patch(
         f"{base_url}/v1/sessions/{session_id}",
