@@ -203,6 +203,41 @@ def _wait_for_external_session_id(client: httpx.Client, *, session_id: str, time
     )
 
 
+def _wait_for_compaction_item(
+    client: httpx.Client,
+    *,
+    session_id: str,
+    timeout: float,
+) -> dict[str, object]:
+    """Wait until Claude Code's real ``/compact`` persists its boundary.
+
+    :param client: HTTP client pointed at the test server.
+    :param session_id: Source session being compacted.
+    :param timeout: Maximum seconds to wait for the transcript forwarder.
+    :returns: The flattened compaction item from ``GET /items``.
+    :raises AssertionError: If no compaction item appears in time.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        resp = client.get(
+            f"/v1/sessions/{session_id}/items",
+            params={"limit": 100, "order": "desc"},
+            timeout=30.0,
+        )
+        resp.raise_for_status()
+        compaction = next(
+            (item for item in resp.json().get("data", []) if item.get("type") == "compaction"),
+            None,
+        )
+        if compaction is not None:
+            return dict(compaction)
+        time.sleep(POLL_INTERVAL_S)
+    raise AssertionError(
+        f"Claude Code /compact did not persist a compaction item for "
+        f"{session_id} within {timeout}s"
+    )
+
+
 def _fork_session(
     client: httpx.Client, *, source_id: str, title: str, agent_id: str | None = None
 ) -> str:
@@ -403,6 +438,115 @@ def test_fork_resume_same_dir_carries_history(
                 resume_workspace=workspace,
                 git=None,
             )
+
+
+def test_compacted_fork_remaps_boundary_and_continues_with_claude(
+    live_server: str,
+    http_client: httpx.Client,
+    tmp_path: Path,
+) -> None:
+    """A real Claude Code compaction remains valid after fork and resume.
+
+    Runs an actual Claude turn, invokes ``/compact`` in its live TUI,
+    waits for the hook/transcript forwarder to persist the boundary, and
+    forks through the public session API. The fork must remap the boundary
+    to one of its fresh item IDs, then its cloned Claude session must resume
+    and recall the pre-compaction marker.
+    """
+    workspace = tmp_path / "compacted-fork-workspace"
+    workspace.mkdir()
+    marker = f"COMPACT_FORK_{uuid.uuid4().hex[:6].upper()}"
+
+    with _workspaces_trusted_in_claude_config([workspace]):
+        with _host_daemon(tmp_path, live_server):
+            host_id = _online_host_id(http_client, timeout=30.0)
+            agent_id = _claude_native_agent_id(http_client)
+            source_id = _create_native_session(
+                http_client,
+                agent_id=agent_id,
+                host_id=host_id,
+                workspace=workspace,
+            )
+            _send_user_message(
+                http_client,
+                session_id=source_id,
+                text=f"Remember {marker}. Reply with exactly ACK.",
+            )
+            _poll_for_assistant_marker(
+                http_client,
+                session_id=source_id,
+                marker="ACK",
+                timeout=180.0,
+            )
+            _wait_for_external_session_id(http_client, session_id=source_id, timeout=60.0)
+
+            # Claude refuses /compact for a one-turn transcript even when
+            # startup instructions consume a substantial part of the context
+            # window. Commit a second real turn so compaction is eligible.
+            second_ack = f"SECOND_ACK_{uuid.uuid4().hex[:6].upper()}"
+            _send_user_message(
+                http_client,
+                session_id=source_id,
+                text=f"Reply with exactly {second_ack}.",
+            )
+            _poll_for_assistant_marker(
+                http_client,
+                session_id=source_id,
+                marker=second_ack,
+                timeout=180.0,
+            )
+
+            compact = http_client.post(
+                f"/v1/sessions/{source_id}/events",
+                json={"type": "compact", "data": {}},
+                timeout=30.0,
+            )
+            assert compact.status_code == 202, compact.text
+            source_compaction = _wait_for_compaction_item(
+                http_client,
+                session_id=source_id,
+                timeout=180.0,
+            )
+
+            fork_id = _fork_session(
+                http_client,
+                source_id=source_id,
+                title=f"compacted clone of {source_id}",
+            )
+            fork_items_resp = http_client.get(
+                f"/v1/sessions/{fork_id}/items",
+                params={"limit": 100, "order": "asc"},
+                timeout=30.0,
+            )
+            fork_items_resp.raise_for_status()
+            fork_items = fork_items_resp.json()["data"]
+            fork_compaction = next(item for item in fork_items if item.get("type") == "compaction")
+            fork_boundary_id = fork_compaction["last_item_id"]
+            assert fork_boundary_id != source_compaction["last_item_id"]
+            assert fork_boundary_id in {item["id"] for item in fork_items}
+
+            _launch_runner(
+                http_client,
+                host_id=host_id,
+                session_id=fork_id,
+                workspace=workspace,
+                git=None,
+            )
+            _send_user_message(
+                http_client,
+                session_id=fork_id,
+                text=(
+                    "What marker did I ask you to remember before compaction? "
+                    "Reply with exactly that marker."
+                ),
+            )
+            text = _poll_for_assistant_marker(
+                http_client,
+                session_id=fork_id,
+                marker=marker,
+                timeout=180.0,
+            )
+            assert marker in text
 
 
 def test_fork_resume_worktree_carries_history(
