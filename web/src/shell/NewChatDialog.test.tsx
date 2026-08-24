@@ -1498,21 +1498,22 @@ describe("NewChatLandingScreen", () => {
     expect(screen.getByText("Bypass permissions")).toBeTruthy();
   });
 
-  it("shows the shared Codex Permissions presets in the gear modal", () => {
+  it("shows the launch-only bypass as a fourth Codex Permissions option", () => {
     renderLanding();
-    // Open Codex's (a2) config modal — it uses the same three permission
-    // presets as the active-session composer.
     openAgentConfig("a2");
     expect(screen.getByTestId("new-chat-landing-config-model")).toBeTruthy();
     const modal = screen.getByTestId("new-chat-landing-config-modal");
     expect(within(modal).getByText("Permissions", { exact: true })).toBeTruthy();
+    expect(screen.getByTestId("new-chat-landing-config-approval").getAttribute("aria-label")).toBe(
+      "Permissions",
+    );
     openSelect("new-chat-landing-config-approval");
     expect(screen.getAllByRole("option").map((option) => option.textContent)).toEqual([
       "Default",
       "Full access",
       "Read only",
+      "Bypass approvals & sandbox",
     ]);
-    expect(screen.queryByRole("option", { name: "Bypass approvals & sandbox" })).toBeNull();
   });
 
   it("sends the selected Codex launch model without changing Claude's remembered model", async () => {
@@ -1553,16 +1554,53 @@ describe("NewChatLandingScreen", () => {
     expect(useHostModelOptionsMock).toHaveBeenCalledWith("host_1", "codex-native", true);
   });
 
-  it("migrates a remembered Codex bypass choice to Full access", () => {
-    localStorage.setItem(
-      "omnigent:last-mode-by-harness",
-      JSON.stringify({ "codex-native": { mode: "bypass" } }),
-    );
+  it("arms Codex full bypass as a plain Permissions option, with no warning banner", () => {
     renderLanding();
     openAgentConfig("a2");
-    expect(screen.getByTestId("new-chat-landing-config-approval").textContent).toContain(
-      "Full access",
+    openSelect("new-chat-landing-config-approval");
+    fireEvent.pointerEnter(screen.getByRole("option", { name: "Bypass approvals & sandbox" }));
+    expect(screen.getByTestId("new-chat-landing-config-approval-detail").textContent).toContain(
+      "no approval prompts and no command sandbox",
     );
+    fireEvent.click(screen.getByRole("option", { name: "Bypass approvals & sandbox" }));
+    expect(screen.getByTestId("new-chat-landing-config-approval").textContent).toContain(
+      "Bypass approvals & sandbox",
+    );
+    expect(
+      within(screen.getByTestId("new-chat-landing-config-modal")).queryByRole("alert"),
+    ).toBeNull();
+  });
+
+  it("disarms the launch-only bypass when the agent changes", () => {
+    renderLanding();
+    openAgentConfig("a2");
+    pickSelectOption("new-chat-landing-config-approval", "Bypass approvals & sandbox");
+    saveConfig();
+
+    selectAgent("a1");
+    openAgentConfig("a2");
+    expect(screen.getByTestId("new-chat-landing-config-approval").textContent).toContain("Default");
+  });
+
+  it("seeds the Codex bypass-sandbox label in the create body when armed", async () => {
+    authenticatedFetchMock.mockResolvedValue({
+      ok: true,
+      json: async () => ({ id: "conv_new" }),
+    } as unknown as Response);
+    renderLanding();
+    openAgentConfig("a2");
+    pickSelectOption("new-chat-landing-config-approval", "Bypass approvals & sandbox");
+    saveConfig();
+    fireEvent.change(screen.getByTestId("new-chat-landing-input"), {
+      target: { value: "run the build" },
+    });
+    fireEvent.submit(screen.getByTestId("new-chat-landing-composer"));
+    await waitFor(() => expect(authenticatedFetchMock).toHaveBeenCalledTimes(1));
+    const [, init] = authenticatedFetchMock.mock.calls[0];
+    const body = JSON.parse((init as RequestInit).body as string) as Record<string, unknown>;
+    const labels = body.labels as Record<string, string>;
+    expect(labels["omnigent.codex_native.bypass_sandbox"]).toBe("1");
+    expect(labels["omnigent.wrapper"]).toBe("codex-native-ui");
   });
 
   it("shows a conflict banner in the file browser for an occupied directory", async () => {
@@ -3125,11 +3163,10 @@ describe("NewChatLandingScreen agent picker + config gear", () => {
     expect(tooltip.textContent).not.toContain("—");
   });
 
-  it("labels the Codex gear summary Permissions", async () => {
+  it("shows launch-only Codex bypass under Permissions in the gear summary", async () => {
     renderLanding();
-    // Pick a non-default Codex permission preset and Save.
     openAgentConfig("a2");
-    pickSelectOption("new-chat-landing-config-approval", "Full access");
+    pickSelectOption("new-chat-landing-config-approval", "Bypass approvals & sandbox");
     saveConfig();
     fireEvent.focus(screen.getByTestId("new-chat-landing-config-gear"));
     await waitFor(() =>
@@ -3138,8 +3175,9 @@ describe("NewChatLandingScreen agent picker + config gear", () => {
       ),
     );
     const tooltip = screen.getAllByTestId("new-chat-landing-config-gear-tooltip")[0];
-    expect(tooltip.textContent).toContain("Permissions: Full access");
+    expect(tooltip.textContent).toContain("Permissions: Bypass approvals & sandbox");
     expect(tooltip.textContent).not.toContain("Approval:");
+    expect(tooltip.textContent).not.toContain("Bypass: On");
   });
 
   it("shows the permission mode description in the dropdown footer, tracking hover", () => {

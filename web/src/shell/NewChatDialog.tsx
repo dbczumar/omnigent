@@ -320,10 +320,17 @@ const CURSOR_NATIVE_EXEC_MODES: {
   },
 ];
 
-// Legacy value written by builds that exposed a separate Codex bypass choice.
-// It now migrates to the shared Full access preset when read so the new-session
-// and in-session permission menus always expose the same options.
+// Launch-only Codex full bypass. Unlike the three approval presets, this cannot
+// be switched safely on a running session, so it is offered only by the new
+// session composer and rides on the conversation as a label.
+const CODEX_NATIVE_BYPASS_SANDBOX_LABEL_KEY = "omnigent.codex_native.bypass_sandbox";
 const CODEX_NATIVE_BYPASS_APPROVAL_VALUE = "bypass";
+const CODEX_NATIVE_BYPASS_APPROVAL_OPTION = {
+  value: CODEX_NATIVE_BYPASS_APPROVAL_VALUE,
+  label: "Bypass approvals & sandbox",
+  description: "Runs Codex with no approval prompts and no command sandbox",
+  args: [] as string[],
+};
 
 function createdHarnessOptions({
   harness,
@@ -334,6 +341,7 @@ function createdHarnessOptions({
   supportsModelPicker,
   permissionMode,
   approvalMode,
+  bypassSandbox,
   cursorExecMode,
   agySkipMode,
   pickedModel,
@@ -349,6 +357,7 @@ function createdHarnessOptions({
   supportsModelPicker: boolean;
   permissionMode: string;
   approvalMode: string;
+  bypassSandbox: boolean;
   cursorExecMode: string;
   agySkipMode: string;
   pickedModel: string;
@@ -364,7 +373,10 @@ function createdHarnessOptions({
     options.mode = permissionMode;
     options.effort = pickedEffort;
   } else if (supportsApprovalMode) {
-    options.mode = approvalMode;
+    options.mode =
+      harness === "codex-native" && bypassSandbox
+        ? CODEX_NATIVE_BYPASS_APPROVAL_VALUE
+        : approvalMode;
   } else if (supportsCursorMode) {
     options.mode = cursorExecMode;
   } else if (supportsAgySkipPermissions) {
@@ -1463,6 +1475,7 @@ function HarnessConfigModal({
   approvalMode,
   cursorExecMode,
   agySkipMode,
+  bypassSandbox,
   pickedModel,
   claudeModelOptions,
   claudeModelsLoading,
@@ -1479,6 +1492,7 @@ function HarnessConfigModal({
   setApprovalMode,
   setCursorExecMode,
   setAgySkipMode,
+  setBypassSandbox,
   setPickedModel,
   setPickedEffort,
   setPickedHarness,
@@ -1493,6 +1507,7 @@ function HarnessConfigModal({
   smartRoutingEligible: boolean;
   permissionMode: string;
   approvalMode: string;
+  bypassSandbox: boolean;
   cursorExecMode: string;
   agySkipMode: string;
   pickedModel: string;
@@ -1511,6 +1526,7 @@ function HarnessConfigModal({
   setApprovalMode: (mode: string) => void;
   setCursorExecMode: (mode: string) => void;
   setAgySkipMode: (mode: string) => void;
+  setBypassSandbox: (enabled: boolean) => void;
   setPickedModel: (model: string) => void;
   setPickedEffort: (effort: string) => void;
   setPickedHarness: (harness: string | null, agentId?: string) => void;
@@ -1537,6 +1553,7 @@ function HarnessConfigModal({
   const [draftApproval, setDraftApproval] = useState(approvalMode);
   const [draftCursor, setDraftCursor] = useState(cursorExecMode);
   const [draftAgySkip, setDraftAgySkip] = useState(agySkipMode);
+  const [draftBypass, setDraftBypass] = useState(bypassSandbox);
   const [draftHarness, setDraftHarness] = useState<string | null>(pickedHarness);
   const [draftRouting, setDraftRouting] = useState<CostControlMode>(costControlMode);
 
@@ -1548,6 +1565,7 @@ function HarnessConfigModal({
     setDraftApproval(approvalMode);
     setDraftCursor(cursorExecMode);
     setDraftAgySkip(agySkipMode);
+    setDraftBypass(bypassSandbox);
     setDraftHarness(pickedHarness);
     setDraftRouting(costControlMode);
     // Seed once per open from the current live values.
@@ -1628,9 +1646,10 @@ function HarnessConfigModal({
     } else if (hasApproval) {
       if (isCodex) setPickedModel(draftModel);
       setApprovalMode(draftApproval);
+      setBypassSandbox(draftBypass);
       if (entryHarness) {
         writeHarnessOption(entryHarness, {
-          mode: draftApproval,
+          mode: isCodex && draftBypass ? CODEX_NATIVE_BYPASS_APPROVAL_VALUE : draftApproval,
           ...(isCodex ? { model: draftModel } : {}),
         });
       }
@@ -1801,9 +1820,22 @@ function HarnessConfigModal({
               </ConfigRow>
               <ConfigRow label="Permissions" description="How much Codex asks before acting">
                 <DescribedSelect
-                  value={draftApproval}
-                  onValueChange={setDraftApproval}
-                  options={CODEX_NATIVE_APPROVAL_MODES}
+                  value={
+                    isCodex && draftBypass ? CODEX_NATIVE_BYPASS_APPROVAL_VALUE : draftApproval
+                  }
+                  onValueChange={(value) => {
+                    if (value === CODEX_NATIVE_BYPASS_APPROVAL_VALUE) {
+                      setDraftBypass(true);
+                    } else {
+                      setDraftBypass(false);
+                      setDraftApproval(value);
+                    }
+                  }}
+                  options={
+                    isCodex
+                      ? [...CODEX_NATIVE_APPROVAL_MODES, CODEX_NATIVE_BYPASS_APPROVAL_OPTION]
+                      : CODEX_NATIVE_APPROVAL_MODES
+                  }
                   testId="new-chat-landing-config-approval"
                   ariaLabel="Permissions"
                   componentId="new_chat.config.approval"
@@ -1975,6 +2007,7 @@ interface LandingDraft {
   prefilledBranch: string;
   permissionMode: string;
   approvalMode: string;
+  bypassSandbox: boolean;
   cursorExecMode: string;
   agySkipMode: string;
   pickedHarness: string | null;
@@ -2297,6 +2330,9 @@ export function NewChatLandingScreen() {
   const [approvalMode, setApprovalMode] = useState<string>(
     () => landingDraft?.approvalMode ?? CODEX_NATIVE_DEFAULT_APPROVAL_MODE,
   );
+  const [bypassSandbox, setBypassSandbox] = useState<boolean>(
+    () => landingDraft?.bypassSandbox ?? false,
+  );
   // Execution mode for Cursor (cursor-agent --mode / --yolo). Only meaningful
   // for the cursor-native wrapper; ignored otherwise.
   const [cursorExecMode, setCursorExecMode] = useState<string>(
@@ -2381,6 +2417,7 @@ export function NewChatLandingScreen() {
     prefilledBranch,
     permissionMode,
     approvalMode,
+    bypassSandbox,
     cursorExecMode,
     agySkipMode,
     pickedHarness,
@@ -2865,7 +2902,10 @@ export function NewChatLandingScreen() {
     if (supportsApprovalMode) {
       const isCodex = nativeCodingAgentForAvailableAgent(selectedAgent)?.harness === "codex-native";
       const approvalValue =
-        CODEX_NATIVE_APPROVAL_MODES.find((m) => m.value === approvalMode)?.label ?? approvalMode;
+        isCodex && bypassSandbox
+          ? CODEX_NATIVE_BYPASS_APPROVAL_OPTION.label
+          : (CODEX_NATIVE_APPROVAL_MODES.find((m) => m.value === approvalMode)?.label ??
+            approvalMode);
       const pickedCodexRow = codexModelOptions.find((m) => m.id === pickedModel);
       const modelRows =
         routingOn || !isCodex
@@ -2915,22 +2955,26 @@ export function NewChatLandingScreen() {
     pickedEffort,
     permissionMode,
     approvalMode,
+    bypassSandbox,
     cursorExecMode,
     agySkipMode,
     pickedHarness,
   ]);
-  // Reset per-agent-instance routing when the agent changes. Switching to an
-  // agent whose modal has no routing control (or isn't routable) would
-  // otherwise leave it stuck "on" with no UI to turn it off.
+  // Bypass is a per-agent launch opt-in, so an actual agent change disarms it.
+  // Routing also resets because the next agent may have no control to clear it.
   //
   // Only reset on an ACTUAL agent change — not the initial resolution (null →
   // first id, or a persisted/draft pick resolving on mount), which would wipe a
-  // costControlMode restored from the landing draft.
+  // costControlMode/bypass restored from the landing draft.
   const prevAgentIdRef = useRef<string | null | undefined>(undefined);
+  const suppressBypassSeedRef = useRef(false);
   useEffect(() => {
     const prev = prevAgentIdRef.current;
     prevAgentIdRef.current = effectiveAgentId;
-    if (prev === undefined || prev === null || prev === effectiveAgentId) return;
+    suppressBypassSeedRef.current =
+      prev !== undefined && prev !== null && prev !== effectiveAgentId;
+    if (!suppressBypassSeedRef.current) return;
+    setBypassSandbox(false);
     setCostControlMode(null);
   }, [effectiveAgentId, setCostControlMode]);
   // Seed the harness's knobs from the user's last picks when the selected
@@ -2986,13 +3030,12 @@ export function NewChatLandingScreen() {
           : "",
       );
     } else if (supportsApprovalMode) {
-      // Older builds persisted a fourth "bypass" choice. Fold it into Full
-      // access so both composers expose and remember the same three presets.
-      setApprovalMode(
-        stored.mode === CODEX_NATIVE_BYPASS_APPROVAL_VALUE
-          ? "full-access"
-          : resolve(CODEX_NATIVE_APPROVAL_MODES, CODEX_NATIVE_DEFAULT_APPROVAL_MODE),
+      setBypassSandbox(
+        !suppressBypassSeedRef.current &&
+          selectedNativeHarness === "codex-native" &&
+          stored.mode === CODEX_NATIVE_BYPASS_APPROVAL_VALUE,
       );
+      setApprovalMode(resolve(CODEX_NATIVE_APPROVAL_MODES, CODEX_NATIVE_DEFAULT_APPROVAL_MODE));
       // A remembered routing "on" outranks a remembered concrete model, and
       // also drops any model/effort left in the shared state (e.g. seeded for
       // Claude Code before the harness switch).
@@ -3769,8 +3812,13 @@ export function NewChatLandingScreen() {
       // Native terminal agents open terminal-first: `omnigent.ui: terminal`
       // tells the UI to render the terminal wrapper, and `omnigent.wrapper`
       // selects which CLI bridge the runner launches — the values are the
-      // registered wrapper ids the runner keys off, not the display name.
-      const baseLabels = nativeLabels;
+      // registered wrapper ids the runner keys off, not the display name. The
+      // launch-only Codex bypass rides as a label that the runner converts to
+      // `--dangerously-bypass-approvals-and-sandbox`.
+      const baseLabels =
+        nativeAgent?.harness === "codex-native" && bypassSandbox
+          ? { ...(nativeLabels ?? {}), [CODEX_NATIVE_BYPASS_SANDBOX_LABEL_KEY]: "1" }
+          : nativeLabels;
       // When filing into a project, stamp its legacy `omni_project` label at
       // create so the session is BORN FILED. The sidebar dual-reads project
       // membership from this label OR the first-class `project_id` the follow-up
@@ -3867,8 +3915,8 @@ export function NewChatLandingScreen() {
                       ? { branch_name: trimmedBranch, existing_worktree: true }
                       : undefined,
                 }),
-            // Native-wrapper labels + the born-filed project label (see
-            // `createLabels` above).
+            // Native-wrapper labels + Codex launch-only bypass + the born-filed
+            // project label (see `createLabels` above).
             // Smart Routing sends none of these: the bound agent is only a
             // placeholder, so the placeholder's wrapper labels, launch args and
             // model would all describe a CLI the router may not pick. The
@@ -3970,6 +4018,7 @@ export function NewChatLandingScreen() {
           supportsModelPicker: agentSupportsModelPicker || nativeAgent?.harness === "codex-native",
           permissionMode,
           approvalMode,
+          bypassSandbox,
           cursorExecMode,
           agySkipMode,
           pickedModel,
@@ -4492,6 +4541,7 @@ export function NewChatLandingScreen() {
                     approvalMode={approvalMode}
                     cursorExecMode={cursorExecMode}
                     agySkipMode={agySkipMode}
+                    bypassSandbox={bypassSandbox}
                     pickedModel={pickedModel}
                     claudeModelOptions={claudeModelOptions}
                     claudeModelsLoading={
@@ -4518,6 +4568,7 @@ export function NewChatLandingScreen() {
                     setApprovalMode={setApprovalMode}
                     setCursorExecMode={setCursorExecMode}
                     setAgySkipMode={setAgySkipMode}
+                    setBypassSandbox={setBypassSandbox}
                     setPickedModel={setPickedModel}
                     setPickedEffort={setPickedEffort}
                     setPickedHarness={handleSetPickedHarness}
