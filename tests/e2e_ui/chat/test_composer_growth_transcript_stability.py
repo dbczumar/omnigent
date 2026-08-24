@@ -284,26 +284,47 @@ def test_composer_hides_native_scrollbar_without_disabling_scroll(
     page: Page,
     seeded_session: tuple[str, str],
 ) -> None:
-    """A capped session draft scrolls internally without painting browser chrome."""
+    """A capped draft and transcript scroll without painting native browser chrome."""
     base_url, session_id = seeded_session
+    for i in range(6):
+        seed_committed_turn(
+            session_id,
+            prompt=f"Question {i}?",
+            reply=f"Paragraph {i}. " + ("filler sentence for height. " * 12),
+            response_id=f"scrollbar_probe_{i}",
+        )
     page.goto(f"{base_url}/c/{session_id}")
 
+    expect(page.locator(_TEXT_SECTION)).to_have_count(6, timeout=30_000)
     composer = page.get_by_label("Message the agent")
     expect(composer).to_be_visible(timeout=30_000)
     composer.fill("\n".join(f"Draft line {i}" for i in range(20)))
 
-    geometry = composer.evaluate(
-        """textarea => ({
-            clientHeight: textarea.clientHeight,
-            scrollHeight: textarea.scrollHeight,
-            scrollbarWidth: getComputedStyle(textarea).scrollbarWidth,
-            webkitScrollbarDisplay:
-                getComputedStyle(textarea, '::-webkit-scrollbar').display,
-        })"""
+    geometry = page.evaluate(
+        """() => {
+            const composer = document.querySelector(
+                'textarea[aria-label="Message the agent"]'
+            );
+            const transcript = document.querySelector('[role="log"] > div');
+            const probe = (element) => ({
+                clientHeight: element.clientHeight,
+                scrollHeight: element.scrollHeight,
+                scrollbarWidth: getComputedStyle(element).scrollbarWidth,
+                webkitScrollbarDisplay:
+                    getComputedStyle(element, '::-webkit-scrollbar').display,
+            });
+            return {
+                composer: probe(composer),
+                transcript: probe(transcript),
+                bodyOverflowY: getComputedStyle(document.body).overflowY,
+            };
+        }"""
     )
-    assert geometry["scrollHeight"] > geometry["clientHeight"], geometry
-    assert geometry["scrollbarWidth"] == "none", geometry
-    assert geometry["webkitScrollbarDisplay"] == "none", geometry
+    for surface in ("composer", "transcript"):
+        assert geometry[surface]["scrollHeight"] > geometry[surface]["clientHeight"], geometry
+        assert geometry[surface]["scrollbarWidth"] == "none", geometry
+        assert geometry[surface]["webkitScrollbarDisplay"] == "none", geometry
+    assert geometry["bodyOverflowY"] == "hidden", geometry
 
     composer.evaluate("textarea => { textarea.scrollTop = textarea.scrollHeight; }")
     assert composer.evaluate("textarea => textarea.scrollTop") > 0
