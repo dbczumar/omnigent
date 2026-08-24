@@ -39,6 +39,7 @@ import re
 import time
 from pathlib import Path
 
+import httpx
 from playwright.sync_api import Page, expect
 
 from tests.e2e_ui.conftest import open_right_rail
@@ -139,6 +140,36 @@ def test_new_shell_accepts_typed_command(page: Page, terminal_session: tuple[str
     # "terminal session ended". A regression that drops user input or kills
     # the PTY on first keystroke would flip this out of ``connected``.
     expect(terminal_view).to_have_attribute("data-state", "connected")
+
+
+def test_terminal_toggle_stays_disabled_when_only_a_shell_is_open(
+    page: Page, terminal_session: tuple[str, str]
+) -> None:
+    """A live rail shell does not enable or populate the agent Terminal view."""
+    base_url, session_id = terminal_session
+
+    terminal_first = httpx.patch(
+        f"{base_url}/v1/sessions/{session_id}",
+        json={"labels": {"omnigent.ui": "terminal"}},
+        timeout=10.0,
+    )
+    terminal_first.raise_for_status()
+
+    page.goto(f"{base_url}/c/{session_id}")
+    _open_new_shell(page)
+
+    rail = page.get_by_role("complementary", name="Workspace")
+    shell_view = rail.get_by_test_id("terminal-view").last
+    expect(shell_view).to_have_attribute("data-state", "connected", timeout=60_000)
+
+    # This is the cache window from the bug: the user shell is live while the
+    # session's agent terminal is absent.
+    terminal_button = page.get_by_test_id("view-mode-terminal")
+    expect(terminal_button).to_be_disabled()
+    expect(page.locator('[data-testid="main-terminal-view"][data-visible="true"]')).to_have_count(
+        0
+    )
+    expect(shell_view).to_be_visible()
 
 
 def test_shell_wheel_scroll_reaches_mouse_tracking_program(
