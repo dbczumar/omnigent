@@ -402,6 +402,9 @@ def test_response_failed_accepts_preallocation_failure_payload() -> None:
     assert parsed.response.created_at is None
     assert parsed.response.error is not None
     assert parsed.response.error.code == "connection_error"
+    assert "id" not in parsed.response.model_dump()
+    assert "model" not in parsed.response.model_dump()
+    assert "created_at" not in parsed.response.model_dump()
 
 
 @pytest.mark.parametrize(

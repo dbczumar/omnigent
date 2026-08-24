@@ -1139,11 +1139,11 @@ class FailedResponseObject(BaseModel):
     :param incomplete_details: Incomplete-response details, or ``None``.
     """
 
-    id: str | None = None
+    id: str | None = Field(default=None, exclude_if=lambda value: value is None)
     object: str = "response"
     status: str
-    model: str | None = None
-    created_at: int | None = None
+    model: str | None = Field(default=None, exclude_if=lambda value: value is None)
+    created_at: int | None = Field(default=None, exclude_if=lambda value: value is None)
     completed_at: int | None = None
     output: list[dict[str, Any]] = Field(default_factory=list)
     background: bool = False
