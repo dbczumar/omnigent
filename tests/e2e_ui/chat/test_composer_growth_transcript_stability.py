@@ -280,6 +280,35 @@ def _append_output_during_composer_reflow(
     )
 
 
+def test_composer_hides_native_scrollbar_without_disabling_scroll(
+    page: Page,
+    seeded_session: tuple[str, str],
+) -> None:
+    """A capped session draft scrolls internally without painting browser chrome."""
+    base_url, session_id = seeded_session
+    page.goto(f"{base_url}/c/{session_id}")
+
+    composer = page.get_by_label("Message the agent")
+    expect(composer).to_be_visible(timeout=30_000)
+    composer.fill("\n".join(f"Draft line {i}" for i in range(20)))
+
+    geometry = composer.evaluate(
+        """textarea => ({
+            clientHeight: textarea.clientHeight,
+            scrollHeight: textarea.scrollHeight,
+            scrollbarWidth: getComputedStyle(textarea).scrollbarWidth,
+            webkitScrollbarDisplay:
+                getComputedStyle(textarea, '::-webkit-scrollbar').display,
+        })"""
+    )
+    assert geometry["scrollHeight"] > geometry["clientHeight"], geometry
+    assert geometry["scrollbarWidth"] == "none", geometry
+    assert geometry["webkitScrollbarDisplay"] == "none", geometry
+
+    composer.evaluate("textarea => { textarea.scrollTop = textarea.scrollHeight; }")
+    assert composer.evaluate("textarea => textarea.scrollTop") > 0
+
+
 def test_composer_growth_reflows_transcript_without_covering_output(
     page: Page,
     seeded_session: tuple[str, str],
