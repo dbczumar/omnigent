@@ -630,6 +630,32 @@ def test_compacted_fork_remaps_boundary_and_continues_with_claude(
                 f"resumed compacted fork should answer exactly {marker!r}, got {text!r}"
             )
 
+            # Resuming the compacted transcript must consume its existing
+            # boundary, not run compaction again because older audit items
+            # remain stored on the fork.
+            resumed_items_resp = http_client.get(
+                f"/v1/sessions/{fork_id}/items",
+                params={"limit": 100, "order": "asc"},
+                timeout=30.0,
+            )
+            resumed_items_resp.raise_for_status()
+            resumed_compactions = [
+                item
+                for item in resumed_items_resp.json()["data"]
+                if item.get("type") == "compaction"
+            ]
+            assert len(resumed_compactions) == 1, (
+                "resuming the compacted fork unexpectedly persisted another compaction; "
+                f"got {len(resumed_compactions)}"
+            )
+            resumed_compaction = resumed_compactions[0]
+            assert resumed_compaction["id"] == fork_compaction["id"], (
+                "resume replaced the fork's original compaction record"
+            )
+            assert resumed_compaction.get("last_item_id") == fork_boundary_id, (
+                "resume changed the fork's remapped compaction boundary"
+            )
+
 
 def test_fork_resume_worktree_carries_history(
     live_server: str,
