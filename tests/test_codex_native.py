@@ -793,6 +793,64 @@ def test_preload_codex_thread_for_resume_resumes_and_closes(
     assert fake_client.closed is True
 
 
+@pytest.mark.parametrize(
+    ("exc", "expected"),
+    [
+        (
+            codex_native_app_server.CodexAppServerResponseError(
+                {
+                    "code": -32603,
+                    "message": (
+                        "failed to read thread: thread-store internal error: failed to "
+                        "load thread history /codex-home/sessions/rollout.jsonl: stream "
+                        "did not contain valid UTF-8"
+                    ),
+                }
+            ),
+            True,
+        ),
+        (
+            codex_native_app_server.CodexAppServerResponseError(
+                {
+                    "code": -32603,
+                    "message": (
+                        "error resuming thread: Fatal error: Failed to initialize "
+                        "session: thread-store internal error: failed to resume local "
+                        "thread recorder: final paginated rollout record at "
+                        "/codex-home/sessions/rollout.jsonl is missing an ordinal"
+                    ),
+                }
+            ),
+            True,
+        ),
+        (
+            codex_native_app_server.CodexAppServerResponseError(
+                {"code": -32603, "message": "internal error: something unrelated"}
+            ),
+            False,
+        ),
+        (
+            codex_native_app_server.CodexAppServerResponseError(
+                {"code": -32600, "message": "thread 019e already has an active writer"}
+            ),
+            False,
+        ),
+        (RuntimeError("thread-store internal error: not an app-server error"), False),
+    ],
+)
+def test_is_unreadable_thread_error(exc: BaseException, expected: bool) -> None:
+    """
+    Only codex's thread-store read failure counts as an unreadable thread.
+
+    A refused resume (another writer holds the thread) and a plain runtime
+    error must keep failing loud rather than silently starting a fresh thread.
+
+    :param exc: Exception raised by the resume request.
+    :param expected: Whether it classifies as an unreadable thread.
+    """
+    assert codex_native_app_server.is_unreadable_thread_error(exc) is expected
+
+
 def test_codex_resume_permission_params_parse_legacy_flags() -> None:
     """Legacy approval and sandbox flags become preload overrides."""
     assert codex_native_app_server._codex_resume_permission_params(
