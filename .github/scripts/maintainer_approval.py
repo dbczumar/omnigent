@@ -201,9 +201,7 @@ def pull_request_target_pushers(
                 page_runs = runs.get("workflow_runs") or []
                 # `actor` is the original pusher; `triggering_actor` becomes whoever
                 # re-ran the check, e.g. the approval relay.
-                actors |= {
-                    str((run.get("actor") or {}).get("login") or "") for run in page_runs
-                }
+                actors |= {str((run.get("actor") or {}).get("login") or "") for run in page_runs}
                 if len(page_runs) < 100:
                     break
                 page += 1

@@ -170,7 +170,9 @@ def test_pushers_come_from_every_page_of_pull_request_target_run_actors():
     pushers = pull_request_target_pushers(REPOSITORY, request)
     assert pushers("abc") == {"omni-resolve-agent[bot]", "contributor"}
     assert pushers("abc") == {"omni-resolve-agent[bot]", "contributor"}
-    endpoint = f"repos/{REPOSITORY}/actions/runs?head_sha=abc&event=pull_request_target&per_page=100"
+    endpoint = (
+        f"repos/{REPOSITORY}/actions/runs?head_sha=abc&event=pull_request_target&per_page=100"
+    )
     assert calls == [f"{endpoint}&page=1", f"{endpoint}&page=2"]
 
 
