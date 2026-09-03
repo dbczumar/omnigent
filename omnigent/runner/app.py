@@ -22,7 +22,7 @@ import tempfile
 import time
 import urllib.parse
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, Protocol, TypeAlias, cast, overload
 
@@ -10025,7 +10025,10 @@ def create_runner_app(
         if harness == "opencode-native":
             try:
                 models = await _opencode_native_model_options(session_id)
-                return JSONResponse(status_code=200, content={"models": models})
+                return JSONResponse(
+                    status_code=200,
+                    content={"models": _with_model_configuration_source(session_id, models)},
+                )
             except _CodexNativeModelOptionsNotReady:
                 return JSONResponse(
                     status_code=503,
@@ -10051,9 +10054,10 @@ def create_runner_app(
                     },
                 )
         try:
+            models = await _codex_native_model_options(session_id)
             return JSONResponse(
                 status_code=200,
-                content={"models": await _codex_native_model_options(session_id)},
+                content={"models": _with_model_configuration_source(session_id, models)},
             )
         except _CodexNativeModelOptionsNotReady:
             return JSONResponse(
@@ -10100,7 +10104,10 @@ def create_runner_app(
                     "detail": _client_safe_error_detail(exc, context="kiro-native model options"),
                 },
             )
-        return JSONResponse(status_code=200, content={"models": models})
+        return JSONResponse(
+            status_code=200,
+            content={"models": _with_model_configuration_source(session_id, models)},
+        )
 
     @app.get("/v1/sessions/{session_id}/cursor-model-options")
     async def get_session_cursor_model_options(session_id: str) -> JSONResponse:
@@ -10131,7 +10138,10 @@ def create_runner_app(
             for option in models
             if option.get("id") and option.get("displayName")
         }
-        return JSONResponse(status_code=200, content={"models": models})
+        return JSONResponse(
+            status_code=200,
+            content={"models": _with_model_configuration_source(session_id, models)},
+        )
 
     # Claude's session listing IS the shared launch catalog: the same
     # fingerprint-keyed store file the launch resolved against and the
@@ -10142,6 +10152,25 @@ def create_runner_app(
     # (the server's fetch retries those) while the store's single-flight
     # probe completes in the background.
     _claude_model_options_rows: dict[str, list[dict[str, object]]] = {}
+
+    def _model_configuration_source(session_id: str) -> dict[str, str] | None:
+        """Return the session's non-secret model-provider coordinates."""
+        from omnigent.model_catalog import model_configuration_source, resolve_model_provider
+
+        spec_entry = _session_spec_cache.get(session_id)
+        if spec_entry is None:
+            return None
+        spec = spec_entry.spec if hasattr(spec_entry, "spec") else spec_entry
+        provider = resolve_model_provider(spec, _session_harness_name(session_id))
+        return model_configuration_source(provider)
+
+    def _with_model_configuration_source(
+        session_id: str, rows: Sequence[Mapping[str, object]]
+    ) -> list[dict[str, object]]:
+        source = _model_configuration_source(session_id)
+        if source is None:
+            return [dict(row) for row in rows]
+        return [{**row, "source": source} for row in rows]
 
     @app.get("/v1/sessions/{session_id}/claude-model-options")
     async def get_session_claude_model_options(session_id: str) -> JSONResponse:
@@ -10208,6 +10237,7 @@ def create_runner_app(
                     "detail": "the harness model probe failed; retrying",
                 },
             )
+        rows = _with_model_configuration_source(session_id, rows)
         _claude_model_options_rows[session_id] = rows
         return JSONResponse(status_code=200, content={"models": rows})
 

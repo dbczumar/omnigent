@@ -39,6 +39,7 @@ import subprocess
 import threading
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Literal, TypeAlias, cast
+from urllib.parse import urlsplit
 
 import click
 import httpx
@@ -248,6 +249,33 @@ class ResolvedModelProvider:
     auth_command: str | None = None
     cli: str | None = None
     detail: str = ""
+
+
+def model_configuration_source(provider: ResolvedModelProvider) -> dict[str, str] | None:
+    """Return non-secret coordinates describing how a model is reached."""
+    if provider.kind == NONE_KIND:
+        return None
+
+    source: dict[str, str] = {"kind": provider.kind}
+    if provider.kind == SUBSCRIPTION_KIND:
+        source.update(label="Subscription", name=provider.cli or "CLI login")
+    elif provider.kind == DATABRICKS_KIND:
+        source.update(label="Workspace", name=provider.profile or "DEFAULT")
+    elif provider.kind in {"gateway", "local"}:
+        source["label"] = "AI Gateway" if provider.kind == "gateway" else "Local"
+        name = provider.detail.removeprefix("provider '").removesuffix("'")
+        if name:
+            source["name"] = name
+    elif provider.kind == CLI_CONFIG_KIND:
+        source.update(label="CLI config", name=provider.detail or provider.cli or "Codex")
+    else:
+        source["label"] = "API key"
+        name = provider.family or provider.detail.removeprefix("provider '").removesuffix("'")
+        if name:
+            source["name"] = name
+    if provider.base_url:
+        source["host"] = urlsplit(provider.base_url).netloc or provider.base_url
+    return source
 
 
 def is_direct_openai_provider(provider: ResolvedModelProvider) -> bool:
