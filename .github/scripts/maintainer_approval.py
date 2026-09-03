@@ -188,17 +188,26 @@ def pull_request_target_pushers(
 
     def pushers(sha: str) -> set[str]:
         if sha not in cache:
-            runs = request(
-                [
-                    "api",
-                    f"repos/{repository}/actions/runs"
-                    f"?head_sha={sha}&event=pull_request_target&per_page=100",
-                ]
-            )
-            cache[sha] = {
-                str((run.get("actor") or {}).get("login") or "")
-                for run in runs.get("workflow_runs") or []
-            } - {""}
+            actors: set[str] = set()
+            page = 1
+            while True:
+                runs = request(
+                    [
+                        "api",
+                        f"repos/{repository}/actions/runs?head_sha={sha}"
+                        f"&event=pull_request_target&per_page=100&page={page}",
+                    ]
+                )
+                page_runs = runs.get("workflow_runs") or []
+                # `actor` is the original pusher; `triggering_actor` becomes whoever
+                # re-ran the check, e.g. the approval relay.
+                actors |= {
+                    str((run.get("actor") or {}).get("login") or "") for run in page_runs
+                }
+                if len(page_runs) < 100:
+                    break
+                page += 1
+            cache[sha] = actors - {""}
         return cache[sha]
 
     return pushers

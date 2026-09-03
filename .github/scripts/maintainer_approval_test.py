@@ -156,25 +156,22 @@ def test_dismissal_by_untrusted_actor_is_rejected_despite_bot_commit_identity():
     assert "not auto-dismissed by trusted automation" in decision.reason
 
 
-def test_pushers_come_from_pull_request_target_run_actors():
+def test_pushers_come_from_every_page_of_pull_request_target_run_actors():
     calls = []
+    pages = {
+        1: [{"actor": {"login": "omni-resolve-agent[bot]"}}] * 99 + [{"actor": None}],
+        2: [{"actor": {"login": "contributor"}}],
+    }
 
     def request(arguments):
         calls.append(arguments[1])
-        return {
-            "workflow_runs": [
-                {"actor": {"login": "omni-resolve-agent[bot]"}},
-                {"actor": {"login": "contributor"}},
-                {"actor": None},
-            ]
-        }
+        return {"workflow_runs": pages[int(arguments[1].rsplit("page=", 1)[1])]}
 
     pushers = pull_request_target_pushers(REPOSITORY, request)
     assert pushers("abc") == {"omni-resolve-agent[bot]", "contributor"}
     assert pushers("abc") == {"omni-resolve-agent[bot]", "contributor"}
-    assert calls == [
-        f"repos/{REPOSITORY}/actions/runs?head_sha=abc&event=pull_request_target&per_page=100"
-    ]
+    endpoint = f"repos/{REPOSITORY}/actions/runs?head_sha=abc&event=pull_request_target&per_page=100"
+    assert calls == [f"{endpoint}&page=1", f"{endpoint}&page=2"]
 
 
 def test_dismissed_approval_requires_a_trusted_matching_dismissal_event():
