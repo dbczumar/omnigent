@@ -1220,6 +1220,8 @@ async def test_auto_create_codex_terminal_unreadable_thread_starts_fresh(
     monkeypatch.delenv("DATABRICKS_CONFIG_PROFILE", raising=False)
     monkeypatch.setattr("omnigent.runner._entry._make_auth_token_factory", lambda: None)
 
+    posted: list[dict[str, Any]] = []
+
     class _SnapshotServerClient:
         """Server client whose snapshot carries a persisted resume thread."""
 
@@ -1242,6 +1244,21 @@ async def test_auto_create_codex_terminal_unreadable_thread_starts_fresh(
                 200,
                 json={"external_session_id": thread_id},
                 request=httpx.Request("GET", url),
+            )
+
+        async def post(self, url: str, **kwargs: Any) -> httpx.Response:
+            """
+            Record the notice the fallback posts and accept it.
+
+            :param url: Request path, e.g. ``"/v1/sessions/conv_.../events"``.
+            :param kwargs: Request keyword arguments (``json`` is the event body).
+            :returns: HTTP 202 acknowledgement.
+            """
+            posted.append({"url": url, "json": kwargs.get("json")})
+            return httpx.Response(
+                202,
+                json={"queued": False, "item_id": "notice_1"},
+                request=httpx.Request("POST", url),
             )
 
     closed: list[str] = []
@@ -1398,6 +1415,17 @@ async def test_auto_create_codex_terminal_unreadable_thread_starts_fresh(
         await asyncio.sleep(0)
 
         assert closed == [], "the fallback must keep the app-server for the fresh thread"
+        assert [p["url"] for p in posted] == [f"/v1/sessions/{session_id}/events"], (
+            "the fallback must surface exactly one notice into the session"
+        )
+        notice = posted[0]["json"]
+        assert notice["type"] == "external_conversation_item"
+        assert notice["data"]["item_type"] == "error"
+        assert notice["data"]["item_data"]["code"] == "codex_thread_reset"
+        assert notice["data"]["item_data"]["level"] == "info"
+        # The body names codex as the source and quotes its own error text.
+        assert "Codex reported an internal error" in notice["data"]["item_data"]["message"]
+        assert "stream did not contain valid UTF-8" in notice["data"]["item_data"]["message"]
         assert connected == ["omnigent-codex-native-auto"], (
             "the fresh-thread path must connect the discovery listener"
         )

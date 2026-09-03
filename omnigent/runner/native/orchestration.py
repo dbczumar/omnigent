@@ -2326,6 +2326,64 @@ async def _post_pi_native_credential_warning(
         )
 
 
+_CODEX_THREAD_RESET_NOTICE = (
+    "Codex reported an internal error while loading this session's saved transcript, "
+    "so Omnigent started a fresh Codex thread instead of failing the turn. The chat "
+    "history here is intact, but Codex's own memory of the earlier turns is not "
+    "restored."
+)
+
+
+async def _post_codex_thread_reset_notice(
+    *,
+    session_id: str,
+    server_client: httpx.AsyncClient | None,
+    codex_error: str,
+) -> None:
+    """Surface a codex fresh-thread fallback into the session as a notice.
+
+    Posts an ``error`` item with ``level: "info"`` via
+    ``external_conversation_item`` so the web UI renders a neutral notice pill
+    at the point the thread was reset, persists it across reload, and — because
+    ``error`` is a non-content item type — keeps it out of the next turn's
+    model context. The body quotes codex's own error so the cause is clearly
+    codex-side. Best-effort: a failed post only loses the notice.
+
+    :param session_id: Session/conversation identifier.
+    :param server_client: Runner Omnigent server client (``None`` in tests).
+    :param codex_error: The error text codex returned for ``thread/resume``,
+        e.g. ``"failed to read thread: thread-store internal error: …"``.
+    """
+    if server_client is None:
+        return
+    try:
+        resp = await server_client.post(
+            f"/v1/sessions/{urllib.parse.quote(session_id, safe='')}/events",
+            json={
+                "type": "external_conversation_item",
+                "data": {
+                    "item_type": "error",
+                    "item_data": {
+                        "source": "harness",
+                        "code": "codex_thread_reset",
+                        "message": (
+                            f"{_CODEX_THREAD_RESET_NOTICE}\n\nCodex reported: {codex_error}"
+                        ),
+                        "level": "info",
+                    },
+                },
+            },
+            timeout=30.0,
+        )
+        resp.raise_for_status()
+    except httpx.HTTPError:
+        _logger.warning(
+            "codex-native: failed to surface the fresh-thread notice for session %s",
+            session_id,
+            exc_info=True,
+        )
+
+
 async def _auto_create_cursor_terminal(
     session_id: str,
     resource_registry: SessionResourceRegistry,
@@ -3777,6 +3835,7 @@ async def _auto_create_codex_terminal(
     from omnigent.codex_native_app_server import (
         _MIN_BYPASS_HOOK_TRUST_CODEX_VERSION,
         CodexAppServerClient,
+        CodexAppServerResponseError,
         build_codex_native_server,
         build_codex_remote_args,
         codex_session_meta_model_provider,
@@ -4202,6 +4261,14 @@ async def _auto_create_codex_terminal(
                 session_id,
                 exc,
                 extra={"session_id": session_id},
+            )
+            codex_error = (
+                exc.message
+                if isinstance(exc, CodexAppServerResponseError) and exc.message
+                else str(exc)
+            )
+            await _post_codex_thread_reset_notice(
+                session_id=session_id, server_client=server_client, codex_error=codex_error
             )
             launch_config = dataclasses.replace(launch_config, external_session_id=None)
         else:
