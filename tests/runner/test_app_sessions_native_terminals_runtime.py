@@ -3352,14 +3352,19 @@ async def test_auto_create_codex_terminal_default_pin_requires_a_fresh_catalog(
     monkeypatch.setattr(codex_app_mod, "codex_launch_catalog", REAL_CODEX_LAUNCH_CATALOG)
     refreshed = [{"id": "gpt-5.6-terra", "model": "gpt-5.6-terra", "isDefault": True}]
 
-    async def _fake_probe(*, codex_path: str | None = None) -> list[dict[str, object]]:
+    async def _fake_probe(
+        *,
+        codex_path: str | None = None,
+        launch: codex_app_mod.NativeCodexLaunch | None = None,
+    ) -> list[dict[str, object]]:
         """
         Stand in for the real codex probe on the background refresh path.
 
         :param codex_path: Ignored executable override.
+        :param launch: Ignored provider launch shape.
         :returns: The refreshed catalog rows.
         """
-        del codex_path
+        del codex_path, launch
         return refreshed
 
     monkeypatch.setattr(codex_app_mod, "probe_codex_model_options", _fake_probe)
@@ -3593,9 +3598,13 @@ async def test_auto_create_codex_terminal_accepts_gateway_spelled_override(
     )
     monkeypatch.setattr(codex_app_mod, "codex_launch_catalog", REAL_CODEX_LAUNCH_CATALOG)
 
-    async def _fake_probe(*, codex_path: str | None = None) -> list[dict[str, object]]:
+    async def _fake_probe(
+        *,
+        codex_path: str | None = None,
+        launch: codex_app_mod.NativeCodexLaunch | None = None,
+    ) -> list[dict[str, object]]:
         """Stand in for the real codex probe; unused on a store hit."""
-        del codex_path
+        del codex_path, launch
         return [{"id": "gpt-5.6-sol", "model": "gpt-5.6-sol", "isDefault": True}]
 
     monkeypatch.setattr(codex_app_mod, "probe_codex_model_options", _fake_probe)

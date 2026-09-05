@@ -3869,15 +3869,16 @@ async def _auto_create_codex_terminal(
     # Resolved before the fork/cold-resume branches below so any rollout
     # synthesis can stamp session_meta.model_provider with the provider
     # this launch actually routes through.
-    default_model = launch_config.model_override or _codex_native_model_from_spec(agent_spec)
+    unpinned_model = _codex_native_model_from_spec(agent_spec)
+    default_model = launch_config.model_override or unpinned_model
     # Thread the spec so its executor.auth / legacy profile win over
     # machine-level config, parity with the in-process harness (#2744).
     _launch_spec = agent_spec.spec if isinstance(agent_spec, ResolvedSpec) else agent_spec
     _codex_launch = resolve_native_codex_launch(model=default_model, spec=_launch_spec)
-    _session_meta_provider = codex_session_meta_model_provider(_codex_launch)
     from omnigent.inner.codex_executor import _find_codex_cli
 
     _codex_cli_path = _find_codex_cli()
+    reset_pick_after_launch = False
     # Explicit launches (model-flows design §4): validate an explicit request
     # against the shared catalog, and give a Default launch on codex's own
     # login the ACCOUNT's real default — so the ``model =`` line copied from
@@ -3893,24 +3894,67 @@ async def _auto_create_codex_terminal(
         from omnigent.codex_native_app_server import (
             codex_launch_catalog,
             codex_launch_catalog_is_stale,
+            codex_reprobed_launch_catalog,
         )
         from omnigent.model_catalog_store import default_row
 
-        # Read staleness BEFORE the fetch — the fetch kicks the background
-        # re-probe, which could land between the two reads.
-        _codex_catalog_was_stale = await codex_launch_catalog_is_stale(codex_path=_codex_cli_path)
-        _codex_catalog = await codex_launch_catalog(codex_path=_codex_cli_path)
+        _codex_catalog: list[_JsonObject] | None = None
+        _codex_catalog_was_stale = False
+        _catalog_launch = None
+        try:
+            _catalog_launch = await asyncio.to_thread(
+                resolve_native_codex_launch, model=None, spec=_launch_spec
+            )
+            # Read staleness before the fetch can start a background probe.
+            # The fingerprint and probe must use this session's provider.
+            _codex_catalog_was_stale = await codex_launch_catalog_is_stale(
+                codex_path=_codex_cli_path, launch=_catalog_launch
+            )
+            _codex_catalog = await codex_launch_catalog(
+                codex_path=_codex_cli_path, launch=_catalog_launch
+            )
+        except Exception:  # noqa: BLE001 — discovery must not prevent a launch
+            _logger.warning(
+                "codex launch catalog unavailable for session=%s",
+                session_id,
+                exc_info=True,
+                extra={"session_id": session_id},
+            )
         if launch_config.model_override and _codex_catalog:
-            # Match by codex's vocabulary, not string equality: a persisted
-            # override carries the gateway spelling (``databricks-gpt-5-6-sol``)
-            # while the catalog lists codex's own slug (``gpt-5.6-sol``). The
-            # launch itself translates between the two, so the raw check refused
-            # a model this host serves.
-            if codex_reachable_model_slug(launch_config.model_override, _codex_catalog) is None:
-                raise click.ClickException(
-                    f"the requested model {launch_config.model_override!r} is not in "
-                    "this host's current model list — it may have changed since the "
-                    "pick. Pick again from the model menu."
+            pick = launch_config.model_override
+            reachable = codex_reachable_model_slug(pick, _codex_catalog)
+            fresh_rows = _codex_catalog
+            if reachable is None and _codex_catalog_was_stale:
+                fresh_rows = await codex_reprobed_launch_catalog(
+                    codex_path=_codex_cli_path, launch=_catalog_launch
+                )
+                if fresh_rows:
+                    _codex_catalog = fresh_rows
+                    _codex_catalog_was_stale = False
+                    reachable = codex_reachable_model_slug(pick, fresh_rows)
+            if reachable is None:
+                # Re-resolve so provider overrides cannot retain the old model.
+                # A failed probe permits fallback, but cannot retire the pick.
+                _codex_launch = resolve_native_codex_launch(
+                    model=unpinned_model, spec=_launch_spec
+                )
+                reset_pick_after_launch = bool(fresh_rows)
+                outcome = (
+                    "resetting the pick to Default after terminal launch"
+                    if reset_pick_after_launch
+                    else "keeping the pick because the catalog re-probe failed"
+                )
+                offered = ", ".join(
+                    str(row.get("id") or row.get("model") or "") for row in _codex_catalog
+                )
+                _logger.warning(
+                    "codex-native: model pick %r for session %s is not in the provider's "
+                    "model list (it offers: %s); launching on the default and %s",
+                    pick,
+                    session_id,
+                    offered,
+                    outcome,
+                    extra={"session_id": session_id},
                 )
         if _codex_launch.model is None and _codex_launch.profile is None and _codex_catalog:
             # Same staleness rule as the claude branch: never convert a stale
@@ -3930,6 +3974,7 @@ async def _auto_create_codex_terminal(
                 )
                 if _default_id:
                     _codex_launch = _dataclass_replace(_codex_launch, model=_default_id)
+    _session_meta_provider = codex_session_meta_model_provider(_codex_launch)
     # Cancel any surviving forwarder first so its teardown closes the OLD app-server,
     # not the one registered below — and so it can't mirror alongside the new one.
     await _cancel_auto_forwarder_task(session_id)
@@ -4454,6 +4499,9 @@ async def _auto_create_codex_terminal(
         name=f"codex-forwarder-{session_id}",
     )
     _register_auto_forwarder_task(session_id, _forwarder_task)
+
+    if reset_pick_after_launch and server_client is not None:
+        await _clear_session_model_override(session_id, server_client)
 
     # A prompt a previous launch blocked for routing but never got to replay
     # exists nowhere else: the block consumed it and the marker stops the hook
@@ -6391,7 +6439,7 @@ async def _clear_session_model_override(
         resp.raise_for_status()
     except httpx.HTTPError:
         _logger.warning(
-            "claude-native: could not reset the model pick for session %s",
+            "native terminal: could not reset the model pick for session %s",
             session_id,
             exc_info=True,
         )
