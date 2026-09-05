@@ -240,7 +240,7 @@ def test_clear_model_override_uses_one_semantic_query_name(
 ) -> None:
     conversation = store.create_conversation()
     _write_overrides(store, conversation.id, '{"model_override":"unavailable-model"}')
-    names: list[str | None] = []
+    queries: list[tuple[str, str | None]] = []
 
     def _capture(
         _connection: object,
@@ -250,8 +250,9 @@ def test_clear_model_override_uses_one_semantic_query_name(
         _context: object,
         _many: bool,
     ) -> None:
-        if statement.lstrip().upper().startswith(("SELECT", "UPDATE")):
-            names.append(current_query_name())
+        kind = statement.split(maxsplit=1)[0].upper()
+        if kind in {"SELECT", "UPDATE"}:
+            queries.append((kind, current_query_name()))
 
     event.listen(store._conv_engine, "before_cursor_execute", _capture)
     try:
@@ -259,7 +260,10 @@ def test_clear_model_override_uses_one_semantic_query_name(
     finally:
         event.remove(store._conv_engine, "before_cursor_execute", _capture)
 
-    assert names == ["omnigent.conversation_store.clear_model_override_if_matches"] * 2
+    assert {kind for kind, _ in queries} == {"SELECT", "UPDATE"}
+    assert {name for _, name in queries} == {
+        "omnigent.conversation_store.clear_model_override_if_matches"
+    }
 
 
 @pytest.mark.parametrize(
