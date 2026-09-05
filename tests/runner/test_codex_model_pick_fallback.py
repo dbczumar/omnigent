@@ -30,6 +30,7 @@ from tests.runner.conftest import (
 _CODEX_PATH = "/missing-test-bin/codex"
 _SESSION_ID = "c91a9d508b344ad59c65628ed80b5230"
 _PROVIDER_DEFAULT = "gpt-5.6-terra"
+_RETIRED_PICK = "gpt-5.4-retired"
 
 
 @dataclass
@@ -44,7 +45,7 @@ class _LaunchHarness:
     registry: SimpleNamespace
     events: list[str]
     builds: list[dict[str, Any]]
-    patches: list[dict[str, Any]]
+    resets: list[dict[str, Any]]
     probe: AsyncMock
     response_status: dict[str, int]
 
@@ -119,19 +120,27 @@ async def codex_launch_harness(
     monkeypatch.setattr(codex_app, "probe_codex_model_options", probe)
     events: list[str] = []
     builds: list[dict[str, Any]] = []
-    patches: list[dict[str, Any]] = []
-    snapshot: dict[str, Any] = {"model_override": "gpt-5.4-retired"}
-    response_status = {"PATCH": 200}
+    resets: list[dict[str, Any]] = []
+    snapshot: dict[str, Any] = {"model_override": _RETIRED_PICK}
+    response_status = {"reset": 200}
     initial_probes = set(model_catalog_store._inflight.values())
 
     def request(request: httpx.Request) -> httpx.Response:
-        assert request.url.path == f"/v1/sessions/{_SESSION_ID}"
-        if request.method == "PATCH":
-            events.append("patch")
-            patches.append(json.loads(request.content))
-            return httpx.Response(response_status["PATCH"], json=snapshot)
-        assert request.method == "GET"
-        return httpx.Response(200, json=snapshot)
+        if request.method == "GET":
+            assert request.url.path == f"/v1/sessions/{_SESSION_ID}"
+            return httpx.Response(200, json=snapshot)
+        assert request.method == "POST", "fallback must never unconditionally PATCH the pick"
+        assert request.url.path == f"/v1/sessions/{_SESSION_ID}/model-override/reset"
+        reset = json.loads(request.content)
+        assert set(reset) == {"expected_model_override"}
+        events.append("reset")
+        resets.append(reset)
+        if response_status["reset"] >= 400:
+            return httpx.Response(response_status["reset"], json={"error": "reset unavailable"})
+        applied = snapshot["model_override"] == reset["expected_model_override"]
+        if applied:
+            snapshot["model_override"] = None
+        return httpx.Response(200, json={"reset": applied})
 
     app_server = SimpleNamespace(
         codex_path=_CODEX_PATH,
@@ -165,9 +174,14 @@ async def codex_launch_harness(
         )
 
     event_client = SimpleNamespace(connect=AsyncMock(), close=AsyncMock())
+    forwarder_release = asyncio.Event()
+
+    async def forwarder(**_kwargs: Any) -> None:
+        await forwarder_release.wait()
+
     monkeypatch.setattr(codex_app, "build_codex_native_server", build_server)
     monkeypatch.setattr(codex_app, "CodexAppServerClient", lambda **_kwargs: event_client)
-    monkeypatch.setattr(runner_native, "_codex_discover_thread_and_forward", AsyncMock())
+    monkeypatch.setattr(runner_native, "_codex_discover_thread_and_forward", forwarder)
     registry = SimpleNamespace(launch_auxiliary_terminal=AsyncMock(side_effect=launch_terminal))
     async with httpx.AsyncClient(
         transport=httpx.MockTransport(request), base_url="http://runner.test"
@@ -185,7 +199,7 @@ async def codex_launch_harness(
             registry=registry,
             events=events,
             builds=builds,
-            patches=patches,
+            resets=resets,
             probe=probe,
             response_status=response_status,
         )
@@ -211,7 +225,7 @@ async def test_equivalent_gateway_pick_launches_without_reset(
     await harness.launch()
 
     assert harness.builds[0]["model"] == pick
-    assert harness.patches == []
+    assert harness.resets == []
     harness.probe.assert_not_awaited()
 
 
@@ -237,8 +251,9 @@ async def test_unavailable_pick_resets_only_after_fallback_terminal_launch(
     await harness.launch()
 
     assert harness.builds[0]["model"] == (agent_model or _PROVIDER_DEFAULT)
-    assert harness.patches == [{"model_override": "default"}]
-    assert harness.events.index("terminal-launch") < harness.events.index("patch")
+    assert harness.resets == [{"expected_model_override": _RETIRED_PICK}]
+    assert harness.snapshot["model_override"] is None
+    assert harness.events.index("terminal-launch") < harness.events.index("reset")
 
 
 @pytest.mark.asyncio
@@ -272,14 +287,14 @@ async def test_stale_miss_awaits_reprobe_before_deciding_fallback(
         await asyncio.wait_for(probe_started.wait(), timeout=2.0)
         assert not launch.done(), "the launch must join the stale catalog's pending re-probe"
         assert harness.builds == []
-        assert harness.patches == []
+        assert harness.resets == []
     finally:
         release_probe.set()
         await launch
 
     assert harness.builds[0]["model"] == (pick if refresh == "hit" else _PROVIDER_DEFAULT)
-    expected_patches = [{"model_override": "default"}] if refresh == "miss" else []
-    assert harness.patches == expected_patches
+    expected_resets = [{"expected_model_override": pick}] if refresh == "miss" else []
+    assert harness.resets == expected_resets
     harness.probe.assert_awaited_once()
     assert model_catalog_store.read_catalog("codex-native", fingerprint) == (
         fresh_rows if refresh in {"hit", "miss"} else stale_rows
@@ -303,7 +318,7 @@ async def test_stale_catalog_hit_does_not_wait_for_background_refresh(
     try:
         await asyncio.wait_for(harness.launch(), timeout=2.0)
         assert harness.builds[0]["model"] == harness.snapshot["model_override"]
-        assert harness.patches == []
+        assert harness.resets == []
     finally:
         release_probe.set()
 
@@ -321,7 +336,7 @@ async def test_no_catalog_keeps_explicit_pick(
     await harness.launch()
 
     assert harness.builds[0]["model"] == harness.snapshot["model_override"]
-    assert harness.patches == []
+    assert harness.resets == []
     harness.probe.assert_awaited_once_with(codex_path=_CODEX_PATH, launch=harness.catalog_shape())
 
 
@@ -344,7 +359,7 @@ async def test_failed_fallback_launch_does_not_reset_pick(
         await harness.launch()
 
     assert harness.builds[0]["model"] == _PROVIDER_DEFAULT
-    assert harness.patches == []
+    assert harness.resets == []
     if failure != "app-server":
         harness.app_server.close.assert_awaited_once()
 
@@ -378,7 +393,7 @@ async def test_spec_catalog_is_not_replaced_by_ambient_provider_catalog(
 
     assert harness.builds[0]["model"] == (pick if spec_serves_pick else _PROVIDER_DEFAULT)
     assert harness.builds[0]["profile"] == "session-provider"
-    assert harness.patches == ([] if spec_serves_pick else [{"model_override": "default"}])
+    assert harness.resets == ([] if spec_serves_pick else [{"expected_model_override": pick}])
     if stale:
         task = model_catalog_store._inflight.get(("codex-native", fingerprint))
         if task is not None:
@@ -396,6 +411,7 @@ async def test_generic_provider_fallback_rebuilds_model_config_overrides(
 ) -> None:
     """Fallback replaces the resolved launch, including its embedded model config."""
     harness = codex_launch_harness
+    pick = harness.snapshot["model_override"]
 
     def resolve_launch(
         *, model: str | None, spec: AgentSpec | None = None
@@ -419,28 +435,75 @@ async def test_generic_provider_fallback_rebuilds_model_config_overrides(
 
     assert harness.builds[0]["model"] == _PROVIDER_DEFAULT
     assert f'model="{_PROVIDER_DEFAULT}"' in harness.builds[0]["extra_config_overrides"]
-    assert all(
-        harness.snapshot["model_override"] not in override
-        for override in harness.builds[0]["extra_config_overrides"]
-    )
-    assert harness.patches == [{"model_override": "default"}]
+    assert all(pick not in override for override in harness.builds[0]["extra_config_overrides"])
+    assert harness.resets == [{"expected_model_override": pick}]
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("status", [404, 500])
 async def test_failed_pick_reset_keeps_successfully_launched_terminal(
+    status: int,
     codex_launch_harness: _LaunchHarness,
 ) -> None:
-    """A server-side persistence failure must not tear down a working fallback."""
+    """An old or failing server keeps the terminal and pick; never retry with PATCH."""
     harness = codex_launch_harness
     harness.seed_catalog([{"id": _PROVIDER_DEFAULT, "isDefault": True}])
-    harness.response_status["PATCH"] = 503
+    harness.response_status["reset"] = status
 
     resource = await harness.launch()
 
     assert resource.id == "terminal_codex_main"
-    assert harness.patches == [{"model_override": "default"}]
+    assert harness.resets == [{"expected_model_override": _RETIRED_PICK}]
+    assert harness.snapshot["model_override"] == _RETIRED_PICK
     assert harness.builds[0]["model"] == _PROVIDER_DEFAULT
+    await asyncio.sleep(0)
+    forwarder = runner_native._AUTO_FORWARDER_TASKS[_SESSION_ID]
+    assert not forwarder.done()
     harness.app_server.close.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_closed_reset_client_keeps_successfully_launched_terminal(
+    codex_launch_harness: _LaunchHarness,
+) -> None:
+    """A client closed during terminal startup cannot turn bookkeeping into launch failure."""
+    harness = codex_launch_harness
+    harness.seed_catalog([{"id": _PROVIDER_DEFAULT, "isDefault": True}])
+    launch_terminal = harness.registry.launch_auxiliary_terminal.side_effect
+
+    async def launch_and_close_client(**kwargs: Any) -> SessionResourceView:
+        resource = await launch_terminal(**kwargs)
+        await harness.server_client.aclose()
+        return resource
+
+    harness.registry.launch_auxiliary_terminal.side_effect = launch_and_close_client
+
+    resource = await harness.launch()
+
+    assert resource.id == "terminal_codex_main"
+    assert harness.resets == []
+    assert harness.snapshot["model_override"] == _RETIRED_PICK
+    assert harness.builds[0]["model"] == _PROVIDER_DEFAULT
+    await asyncio.sleep(0)
+    assert not runner_native._AUTO_FORWARDER_TASKS[_SESSION_ID].done()
+    harness.app_server.close.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_conditional_reset_still_propagates_cancellation(
+    codex_launch_harness: _LaunchHarness,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Best-effort metadata handling must not swallow cancellation of its caller."""
+    harness = codex_launch_harness
+    monkeypatch.setattr(
+        harness.server_client, "post", AsyncMock(side_effect=asyncio.CancelledError)
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await runner_native._clear_session_model_override(
+            _SESSION_ID, harness.server_client, expected_model_override=_RETIRED_PICK
+        )
 
 
 @pytest.mark.asyncio
@@ -470,7 +533,7 @@ async def test_subscription_fallback_pins_only_fresh_account_default(
     assert harness.builds[0]["model"] == (None if stale else "gpt-5.6-sol")
     assert harness.builds[0]["profile"] is None
     assert 'model_provider="openai"' in harness.builds[0]["extra_config_overrides"]
-    assert harness.patches == ([] if stale else [{"model_override": "default"}])
+    assert harness.resets == ([] if stale else [{"expected_model_override": _RETIRED_PICK}])
 
 
 @pytest.mark.asyncio
@@ -500,7 +563,9 @@ async def test_resumed_fallback_resets_pick_only_if_preload_and_terminal_succeed
 
     preload.assert_awaited_once()
     assert harness.builds[0]["model"] == _PROVIDER_DEFAULT
-    assert harness.patches == ([] if preload_fails else [{"model_override": "default"}])
+    assert harness.resets == (
+        [] if preload_fails else [{"expected_model_override": _RETIRED_PICK}]
+    )
 
 
 @pytest.mark.asyncio
@@ -537,6 +602,49 @@ async def test_first_message_does_not_reintroduce_retired_prelaunch_override(
     request = MessageEvent.model_validate(message).to_create_request()
 
     assert harness.builds[0]["model"] == _PROVIDER_DEFAULT
-    assert harness.patches == [{"model_override": "default"}]
+    assert harness.resets == [{"expected_model_override": _RETIRED_PICK}]
     assert "model_override" not in message
     assert request.model_override is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("pause_at", ["reprobe", "terminal"])
+async def test_newer_pick_survives_reset_after_slow_fallback_launch(
+    pause_at: str, codex_launch_harness: _LaunchHarness
+) -> None:
+    """Fallback only retires its original rejected pick, never a newer user selection."""
+    harness = codex_launch_harness
+    new_pick = "gpt-5.6-sol"
+    rows = [{"id": _PROVIDER_DEFAULT, "isDefault": True}, {"id": new_pick}]
+    harness.seed_catalog(rows, stale=pause_at == "reprobe")
+    paused = asyncio.Event()
+    release = asyncio.Event()
+
+    async def delayed_probe(**_kwargs: Any) -> list[dict[str, Any]]:
+        paused.set()
+        await release.wait()
+        return rows
+
+    original_terminal_launch = harness.registry.launch_auxiliary_terminal.side_effect
+
+    async def delayed_terminal(**kwargs: Any) -> SessionResourceView:
+        paused.set()
+        await release.wait()
+        return await original_terminal_launch(**kwargs)
+
+    if pause_at == "reprobe":
+        harness.probe.side_effect = delayed_probe
+    else:
+        harness.registry.launch_auxiliary_terminal.side_effect = delayed_terminal
+    launch = asyncio.create_task(harness.launch())
+    try:
+        await asyncio.wait_for(paused.wait(), timeout=2.0)
+        assert not launch.done()
+        harness.snapshot["model_override"] = new_pick
+    finally:
+        release.set()
+        await launch
+
+    assert harness.snapshot["model_override"] == new_pick
+    assert harness.resets == [{"expected_model_override": _RETIRED_PICK}]
+    assert harness.builds[0]["model"] == _PROVIDER_DEFAULT

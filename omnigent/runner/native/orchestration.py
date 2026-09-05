@@ -3878,7 +3878,7 @@ async def _auto_create_codex_terminal(
     from omnigent.inner.codex_executor import _find_codex_cli
 
     _codex_cli_path = _find_codex_cli()
-    reset_pick_after_launch = False
+    pick_to_reset: str | None = None
     # Explicit launches (model-flows design §4): validate an explicit request
     # against the shared catalog, and give a Default launch on codex's own
     # login the ACCOUNT's real default — so the ``model =`` line copied from
@@ -3938,10 +3938,10 @@ async def _auto_create_codex_terminal(
                 _codex_launch = resolve_native_codex_launch(
                     model=unpinned_model, spec=_launch_spec
                 )
-                reset_pick_after_launch = bool(fresh_rows)
+                pick_to_reset = pick if fresh_rows else None
                 outcome = (
                     "resetting the pick to Default after terminal launch"
-                    if reset_pick_after_launch
+                    if pick_to_reset is not None
                     else "keeping the pick because the catalog re-probe failed"
                 )
                 offered = ", ".join(
@@ -4500,8 +4500,12 @@ async def _auto_create_codex_terminal(
     )
     _register_auto_forwarder_task(session_id, _forwarder_task)
 
-    if reset_pick_after_launch and server_client is not None:
-        await _clear_session_model_override(session_id, server_client)
+    if pick_to_reset is not None and server_client is not None:
+        await _clear_session_model_override(
+            session_id,
+            server_client,
+            expected_model_override=pick_to_reset,
+        )
 
     # A prompt a previous launch blocked for routing but never got to replay
     # exists nowhere else: the block consumed it and the marker stops the hook
@@ -6419,25 +6423,36 @@ async def _load_claude_launch_metadata(
 async def _clear_session_model_override(
     session_id: str,
     server_client: httpx.AsyncClient,
+    *,
+    expected_model_override: str | None = None,
 ) -> None:
     """
     Reset a session's persisted model pick to Default.
 
-    The server clears the pick only for its explicit ``"default"`` alias; a
-    JSON ``null`` leaves it unchanged. Best-effort: a failed reset keeps the
-    pick, and the next relaunch repeats the fallback.
+    Conditional resets preserve a selection made during launch. An older
+    server rejects the conditional endpoint, retaining the pick for retry.
+    Legacy callers use the explicit ``"default"`` alias; JSON null is a no-op.
 
     :param session_id: Session/conversation identifier.
     :param server_client: Runner Omnigent server client.
+    :param expected_model_override: Only clear this original launch-time pick.
     """
     try:
-        resp = await server_client.patch(
-            f"/v1/sessions/{urllib.parse.quote(session_id, safe='')}",
-            json={"model_override": "default"},
-            timeout=10.0,
-        )
+        session_path = f"/v1/sessions/{urllib.parse.quote(session_id, safe='')}"
+        if expected_model_override is not None:
+            resp = await server_client.post(
+                f"{session_path}/model-override/reset",
+                json={"expected_model_override": expected_model_override},
+                timeout=10.0,
+            )
+        else:
+            resp = await server_client.patch(
+                session_path,
+                json={"model_override": "default"},
+                timeout=10.0,
+            )
         resp.raise_for_status()
-    except httpx.HTTPError:
+    except (httpx.HTTPError, RuntimeError):
         _logger.warning(
             "native terminal: could not reset the model pick for session %s",
             session_id,
