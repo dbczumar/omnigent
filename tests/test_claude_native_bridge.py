@@ -11607,13 +11607,16 @@ def test_http_ingress_refuses_symlinked_socket_root(
 def test_http_ingress_advertises_absolute_socket_path(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, _short_harness_socket_root: Path
 ) -> None:
-    """A relative socket root is advertised absolute, so a runner in another cwd connects.
+    """A relative, not-yet-created socket root is created and advertised absolute.
 
-    The runner reads ``server.json`` from its own working directory; a relative
-    path there would fail with ENOENT everywhere but the serve-mcp cwd.
+    ``OMNIGENT_HARNESS_TMP_PARENT=.tmp/oa`` is a documented shape: nested under a
+    parent that may not exist yet, and relative to whatever directory
+    ``serve-mcp`` starts in. The runner reads ``server.json`` from its own working
+    directory, so the advertised path has to be absolute to resolve there.
     """
-    relative_root = os.path.relpath(_short_harness_socket_root)
+    relative_root = os.path.relpath(_short_harness_socket_root / "nested" / "oa")
     assert not os.path.isabs(relative_root)
+    assert not (_short_harness_socket_root / "nested").exists()
     monkeypatch.setenv("OMNIGENT_HARNESS_TMP_PARENT", relative_root)
     bridge_dir = prepare_bridge_dir("conv_ingress_abs", workspace=tmp_path)
     notifications: queue.Queue[dict[str, object] | None] = queue.Queue()

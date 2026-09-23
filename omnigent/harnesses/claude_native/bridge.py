@@ -6128,6 +6128,9 @@ def _start_unix_control_server(
     from omnigent.runtime.harnesses.paths import resolve_harness_tmp_parent
 
     root = resolve_harness_tmp_parent()
+    # A configured root may be nested (``OMNIGENT_HARNESS_TMP_PARENT=.tmp/oa``);
+    # only the leaf must be owner-only.
+    root.parent.mkdir(parents=True, exist_ok=True)
     _ensure_private_dir(root, os.getuid())
     for stale in root.glob(f"{_MCP_SOCKET_PREFIX}*{_MCP_SOCKET_SUFFIX}"):
         try:
