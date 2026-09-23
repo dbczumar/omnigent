@@ -11628,7 +11628,10 @@ def test_http_ingress_advertises_absolute_socket_path(
         assert Path(info["socket"]) == Path(os.path.abspath(relative_root)) / (
             f"mcp-{os.getpid()}.sock"
         )
-        monkeypatch.chdir(tmp_path)
+        elsewhere = tmp_path / "a" / "b" / "c" / "d"
+        elsewhere.mkdir(parents=True)
+        monkeypatch.chdir(elsewhere)
+        assert not Path(relative_root).exists()
         post_tools_changed(bridge_dir, timeout_s=5.0)
         assert notifications.get(timeout=5.0)["method"] == "notifications/tools/list_changed"
     finally:
@@ -11661,11 +11664,16 @@ def test_http_ingress_authenticates_before_draining_a_bounded_body(tmp_path: Pat
                 (bridge_dir / claude_native_bridge._SERVER_FILE).read_text(encoding="utf-8")
             )["socket"]
         )
-        unauthorized = (
+        # Declare a body but withhold it: a handler that drained before
+        # authenticating would block here instead of answering 401.
+        unauthorized_headers_only = (
             b"POST /tools-changed HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer wrong\r\n"
-            b"Content-Length: 2\r\n\r\n{}"
+            b"Content-Length: 2\r\n\r\n"
         )
-        assert _raw_unix_http_status(socket_path, unauthorized) == b"HTTP/1.0 401 Unauthorized"
+        assert (
+            _raw_unix_http_status(socket_path, unauthorized_headers_only)
+            == b"HTTP/1.0 401 Unauthorized"
+        )
         oversized_body = b"x" * (claude_native_bridge._TOOLS_CHANGED_BODY_MAX_BYTES + 1)
         oversized = (
             b"POST /tools-changed HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer test-token\r\n"
