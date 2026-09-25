@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { copyText } from "@/lib/clipboard";
 import { ErrorBanner, RoutingDecisionCard } from "./StatusBlocks";
@@ -252,6 +252,57 @@ describe("ErrorBanner", () => {
   ])("describes a %s failure in plain English", (code, sentence) => {
     render(<ErrorBanner message="raw diagnostics" source="execution" code={code} />);
     expect(screen.getByText(sentence)).toBeInTheDocument();
+  });
+
+  it("offers the sign-in link and code from the remediation on the card face", () => {
+    render(
+      <ErrorBanner
+        message="Codex is waiting for a sign-in in this session's terminal."
+        source="harness"
+        code="codex_startup_pending_sign_in"
+        title="Codex is waiting for a sign-in"
+        remediation={
+          "Open https://signin.example.com/device and enter code HQ7M-2KPD. " +
+          "Codex continues on its own once the sign-in completes; then send your message again."
+        }
+      />,
+    );
+    const link = screen.getByRole("link", { name: "Open sign-in link" });
+    expect(link).toHaveAttribute("href", "https://signin.example.com/device");
+    expect(link).toHaveAttribute("target", "_blank");
+    fireEvent.click(screen.getByRole("button", { name: "Copy code HQ7M-2KPD" }));
+    expect(copyText).toHaveBeenCalledWith("HQ7M-2KPD");
+    // The actions sit on the collapsed face and must not toggle the pill open.
+    expect(screen.queryByText("Message")).not.toBeInTheDocument();
+  });
+
+  it("links addresses inside the expanded remediation text", () => {
+    render(
+      <ErrorBanner
+        message="raw diagnostics"
+        source="harness"
+        code="codex_startup_pending_sign_in"
+        remediation="Open https://signin.example.com/device and enter code HQ7M-2KPD."
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /Codex is waiting for a sign-in/i }));
+    const content = screen.getByTestId("error-message-content");
+    expect(within(content).getByRole("link")).toHaveAttribute(
+      "href",
+      "https://signin.example.com/device",
+    );
+  });
+
+  it("shows no sign-in actions when the remediation has no address", () => {
+    render(
+      <ErrorBanner
+        message="raw diagnostics"
+        source="harness"
+        code="codex_startup_pending"
+        remediation="Finish any sign-in shown in the session terminal, then send your message again."
+      />,
+    );
+    expect(screen.queryByTestId("error-remediation-actions")).not.toBeInTheDocument();
   });
 
   it("separates terminal diagnostics and last output into tabs", () => {

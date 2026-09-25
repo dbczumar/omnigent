@@ -13,6 +13,7 @@ import {
   CheckIcon,
   ChevronRightIcon,
   CopyIcon,
+  ExternalLinkIcon,
   Loader2Icon,
   RotateCcwIcon,
   RotateCwIcon,
@@ -21,6 +22,7 @@ import {
   XIcon,
 } from "lucide-react";
 import { useEffect, useId, useMemo, useRef, useState } from "react";
+import type { ReactNode } from "react";
 import { CodeBlock, CodeBlockHeader, CodeBlockTitle } from "@/components/ai-elements/code-block";
 import { DatabricksIcon } from "@/components/icons/DatabricksIcon";
 import { Badge } from "@/components/ui/badge";
@@ -117,6 +119,56 @@ function errorHeadline(error: RenderErrorDetails): string {
   );
 }
 
+// An address the user can open, as printed by a launcher or a harness.
+const ADDRESS_PATTERN = /https?:\/\/[^\s<>"'`)\]]+/g;
+// A device code next to it: hyphenated groups, or one 6-9 character group mixing
+// letters and digits. Plain words and short numbers never match.
+const DEVICE_CODE_PATTERN =
+  /\b(?:[A-Z0-9]{4,8}-[A-Z0-9]{4,8}|(?=[A-Z0-9]*\d)(?=[A-Z0-9]*[A-Z])[A-Z0-9]{6,9})\b/;
+
+interface RemediationLink {
+  url: string;
+  code: string | null;
+}
+
+/**
+ * Lift an address (and any device code) out of a remediation so the card can
+ * offer them as actions instead of sending the user to the terminal.
+ */
+function remediationLink(remediation: string | undefined): RemediationLink | null {
+  if (!remediation) return null;
+  const match = remediation.match(ADDRESS_PATTERN);
+  if (!match) return null;
+  const url = match[0].replace(/[.,;:]+$/, "");
+  const code = remediation.replace(ADDRESS_PATTERN, " ").match(DEVICE_CODE_PATTERN);
+  return { url, code: code ? code[0] : null };
+}
+
+/** Render text with each address as a link that opens in a new tab. */
+function linkify(text: string): ReactNode[] {
+  const nodes: ReactNode[] = [];
+  let last = 0;
+  for (const match of text.matchAll(ADDRESS_PATTERN)) {
+    const start = match.index ?? 0;
+    const address = match[0].replace(/[.,;:]+$/, "");
+    if (start > last) nodes.push(text.slice(last, start));
+    nodes.push(
+      <a
+        key={`${start}:${address}`}
+        href={address}
+        target="_blank"
+        rel="noreferrer noopener"
+        className="underline underline-offset-2 hover:text-foreground"
+      >
+        {address}
+      </a>,
+    );
+    last = start + address.length;
+  }
+  if (last < text.length) nodes.push(text.slice(last));
+  return nodes;
+}
+
 function relatedErrorText(error: RenderErrorDetails): string {
   const parts = [
     error.cause,
@@ -208,6 +260,7 @@ export function ErrorBanner({
     if (parts.length === 0) parts.push(parsed.message || code || headline);
     return parts.join("\n\n");
   }, [cause, code, headline, parsed.message, remediation]);
+  const signIn = useMemo(() => remediationLink(remediation), [remediation]);
   const diagnostics = useMemo(
     () =>
       [
@@ -387,6 +440,43 @@ export function ErrorBanner({
             <XIcon className="size-4" aria-hidden="true" />
           </Button>
         </div>
+        {signIn ? (
+          <div
+            data-testid="error-remediation-actions"
+            onClick={(event) => event.stopPropagation()}
+            className="mx-[4px] mt-[6px] flex flex-wrap items-center gap-[6px]"
+          >
+            <Button
+              asChild
+              variant="outline"
+              size="xs"
+              style={{ fontSize: "var(--text-13, 13px)" }}
+              className="h-6 gap-1 rounded-[var(--control-radius,var(--radius-lg))] px-2 leading-5"
+            >
+              <a href={signIn.url} target="_blank" rel="noreferrer noopener">
+                <ExternalLinkIcon className="size-3.5" aria-hidden="true" />
+                Open sign-in link
+              </a>
+            </Button>
+            {signIn.code ? (
+              <Button
+                type="button"
+                variant="ghost"
+                size="xs"
+                onClick={() => void copy("code", signIn.code ?? "")}
+                style={{ fontSize: "var(--text-13, 13px)" }}
+                className="h-6 gap-1 rounded-[var(--control-radius,var(--radius-lg))] px-2 leading-5 text-muted-foreground hover:bg-muted hover:text-foreground"
+              >
+                {copiedTarget === "code" ? (
+                  <CheckIcon className="size-3.5" aria-hidden="true" />
+                ) : (
+                  <CopyIcon className="size-3.5" aria-hidden="true" />
+                )}
+                {copiedTarget === "code" ? "Copied" : `Copy code ${signIn.code}`}
+              </Button>
+            ) : null}
+          </div>
+        ) : null}
         {retryError ? (
           <div
             role="status"
@@ -434,7 +524,7 @@ export function ErrorBanner({
                 data-testid="error-message-content"
                 className="mx-[4px] mt-[4px] max-w-full min-w-0 font-mono text-sm leading-6 break-words whitespace-pre-wrap text-foreground [overflow-wrap:anywhere] [text-wrap:wrap]"
               >
-                {messageText}
+                {linkify(messageText)}
               </div>
             </section>
             {relatedDetails.length > 0 ? (
