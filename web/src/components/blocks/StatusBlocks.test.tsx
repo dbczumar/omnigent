@@ -245,6 +245,15 @@ describe("ErrorBanner", () => {
     );
   });
 
+  it.each([
+    ["codex_startup_pending_sign_in", "Codex is waiting for a sign-in."],
+    ["codex_startup_pending", "Codex is still starting in the session terminal."],
+    ["codex_thread_not_started", "Codex stopped before it could start, so this turn never ran."],
+  ])("describes a %s failure in plain English", (code, sentence) => {
+    render(<ErrorBanner message="raw diagnostics" source="execution" code={code} />);
+    expect(screen.getByText(sentence)).toBeInTheDocument();
+  });
+
   it("separates terminal diagnostics and last output into tabs", () => {
     render(
       <ErrorBanner message={TERMINAL_ERROR} source="execution" code="required_terminal_exited" />,

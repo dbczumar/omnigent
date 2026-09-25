@@ -81,6 +81,7 @@ from omnigent.runner.app import (
     _evaluate_policy_via_omnigent,
     _forward_harness_response,
     _harness_error_response_error,
+    _normalize_turn_error,
     _resolve_harness_config,
 )
 from omnigent.runtime.harnesses import _HARNESS_MODULES
@@ -1614,6 +1615,40 @@ def test_harness_error_response_error_parses_runner_error_bodies(
     :returns: None.
     """
     assert _harness_error_response_error(response) == expected
+
+
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    [
+        # A harness failure names itself: the status edge keeps that code so the
+        # web UI can de-duplicate it against the persisted error item.
+        (
+            {
+                "code": "codex_startup_pending_sign_in",
+                "message": "Codex is waiting for a sign-in.",
+            },
+            {
+                "code": "codex_startup_pending_sign_in",
+                "message": "Codex is waiting for a sign-in.",
+            },
+        ),
+        # The legacy ``type`` spelling still wins over the generic fallback.
+        (
+            {"type": "_ContextWindowOverflow", "message": "too long"},
+            {"code": "_ContextWindowOverflow", "message": "too long"},
+        ),
+        (
+            {"message": "turn setup failed: boom"},
+            {"code": "runner_error", "message": "turn setup failed: boom"},
+        ),
+        ({"status": 503}, {"code": "runner_error", "message": "turn failed (status 503)"}),
+        ({}, {"code": "runner_error", "message": "turn failed"}),
+    ],
+)
+def test_normalize_turn_error_keeps_the_failure_code(
+    error: dict[str, object], expected: dict[str, str]
+) -> None:
+    assert _normalize_turn_error(error) == expected
 
 
 class _SpawnFailingProcessManager(_FakeProcessManager):
