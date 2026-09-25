@@ -3492,7 +3492,10 @@ async def test_codex_discover_thread_and_forward_records_accurate_startup_error(
     stream ended) must NOT be mislabeled as a timeout.
     """
     from omnigent.harnesses.codex_native import forwarder as codex_native_forwarder
-    from omnigent.harnesses.codex_native.bridge import read_bridge_startup_error
+    from omnigent.harnesses.codex_native.bridge import (
+        read_bridge_startup_error,
+        read_bridge_startup_failure,
+    )
     from omnigent.runner.app import (
         _AUTO_CODEX_APP_SERVERS,
         _codex_discover_thread_and_forward,
@@ -3534,6 +3537,137 @@ async def test_codex_discover_thread_and_forward_records_accurate_startup_error(
     # A RuntimeError must never be described as a timeout.
     if not isinstance(exc, TimeoutError):
         assert "timed out" not in recorded
+    # A hard startup failure carries its own code so the turn error is not a
+    # bare exception class name.
+    failure = read_bridge_startup_failure(tmp_path)
+    assert failure is not None
+    assert failure.code == "codex_thread_not_started"
+
+
+@pytest.mark.parametrize(
+    ("screen", "expected_code", "expected_title"),
+    [
+        (
+            "dbexec: launcher 1.2.3\nSign in to continue:\n"
+            "  https://signin.example.com/device\n  code: HQ7M-2KPD\nwaiting for sign-in...\n",
+            "codex_startup_pending_sign_in",
+            "Codex is waiting for a sign-in",
+        ),
+        ("Loading configuration...\n", "codex_startup_pending", "Codex is still starting"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_codex_discover_thread_and_forward_waits_while_terminal_alive(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    screen: str,
+    expected_code: str,
+    expected_title: str,
+) -> None:
+    """
+    A thread-start deadline with a live pane records a pending cause and keeps waiting.
+
+    A launcher wrapper can park the pane on a sign-in prompt for longer than
+    the thread-start budget. Tearing the backend down there strands the user:
+    the pane cannot connect once the sign-in completes, and every send fails
+    fast on the saved error until the terminal is recreated. Instead the
+    runner records why chat turns cannot run yet (lifting the sign-in link
+    from the pane when it shows one), waits without a deadline, and clears the
+    record once the thread starts.
+    """
+    from omnigent.harnesses.codex_native import forwarder as codex_native_forwarder
+    from omnigent.runner.app import (
+        _AUTO_CODEX_APP_SERVERS,
+        _codex_discover_thread_and_forward,
+    )
+
+    thread_id = "019e96aa-abcd-7343-8d3b-6f914d60936b"
+    timeline: list[str] = []
+    wait_calls: list[dict[str, object]] = []
+    pending_seen: list[codex_native_bridge.CodexStartupFailure | None] = []
+    real_async_client = httpx.AsyncClient
+
+    def _mock_client(**kwargs: Any) -> httpx.AsyncClient:
+        return real_async_client(
+            transport=httpx.MockTransport(lambda _request: httpx.Response(200, json={})),
+            **kwargs,
+        )
+
+    async def _fake_wait(*_args: object, **kwargs: object) -> str:
+        wait_calls.append(kwargs)
+        if len(wait_calls) == 1:
+            raise TimeoutError
+        pending_seen.append(codex_native_bridge.read_bridge_startup_failure(tmp_path))
+        timeline.append("thread_started")
+        return thread_id
+
+    async def _fake_supervise(**_kwargs: object) -> None:
+        return None
+
+    class _Client:
+        async def close(self) -> None:
+            return None
+
+    class _AppServer:
+        async def close(self) -> None:
+            timeline.append("app_server_closed")
+
+    class _Terminal:
+        diagnostic_id = "terminal-1"
+        reads = 0
+
+        async def is_alive(self) -> bool:
+            return True
+
+        async def read(self, scrollback: int = 0) -> dict[str, object]:
+            del scrollback
+            self.reads += 1
+            return {"screen": screen}
+
+    monkeypatch.setattr(codex_native_forwarder, "wait_for_thread_started", _fake_wait)
+    monkeypatch.setattr(codex_native_forwarder, "supervise_forwarder", _fake_supervise)
+    monkeypatch.setenv("RUNNER_SERVER_URL", "http://ap.example")
+    monkeypatch.setattr("omnigent.runner._entry._make_auth_token_factory", lambda: None)
+    monkeypatch.setattr(httpx, "AsyncClient", _mock_client)
+
+    session_id = "3c0a9d4e6b8f4a2c9e1d7b5a3f6c8e0d"
+    app_server = _AppServer()
+    terminal = _Terminal()
+    _AUTO_CODEX_APP_SERVERS[session_id] = app_server  # type: ignore[assignment]
+    try:
+        await _codex_discover_thread_and_forward(
+            session_id=session_id,
+            bridge_dir=tmp_path,
+            codex_ws_url="ws://127.0.0.1:1",
+            codex_home=tmp_path / "codex-home",
+            workspace=str(tmp_path / "workspace"),
+            event_client=_Client(),  # type: ignore[arg-type]
+            routing_summary="Databricks ucode profile 'oss'",
+            app_server=app_server,  # type: ignore[arg-type]
+            terminal_instance=terminal,  # type: ignore[arg-type]
+            thread_start_timeout_seconds=120.0,
+        )
+    finally:
+        _AUTO_CODEX_APP_SERVERS.pop(session_id, None)
+
+    # One bounded wait, then an open-ended one once the pending cause is recorded.
+    assert wait_calls == [{"timeout": 120.0}, {"timeout": None}]
+    assert terminal.reads == 1
+    (pending,) = pending_seen
+    assert pending is not None
+    assert pending.code == expected_code
+    assert pending.title == expected_title
+    assert pending.remediation is not None
+    if expected_code == "codex_startup_pending_sign_in":
+        assert "https://signin.example.com/device" in pending.remediation
+        assert "HQ7M-2KPD" in pending.remediation
+    # The backend outlived the deadline and closed only after forwarding ended.
+    assert timeline == ["thread_started", "app_server_closed"]
+    # The thread start cleared the pending record and published bridge state.
+    assert codex_native_bridge.read_bridge_startup_error(tmp_path) is None
+    state = codex_native_bridge.read_bridge_state(tmp_path)
+    assert state is not None
+    assert state.thread_id == thread_id
 
 
 @pytest.mark.asyncio

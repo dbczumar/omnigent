@@ -23,9 +23,11 @@ from omnigent.cli_invocation import cli_invocation
 
 __all__ = [
     "FailureDiagnosis",
+    "SignInPrompt",
     "classify_native_turn_error",
     "classify_terminal_failure",
     "describe_failure_code",
+    "detect_sign_in_prompt",
 ]
 
 
@@ -175,6 +177,63 @@ def classify_terminal_failure(
     return None
 
 
+@dataclass(frozen=True)
+class SignInPrompt:
+    """A sign-in prompt a launcher printed to the terminal before the agent started.
+
+    :param url: The address the user must open, e.g.
+        ``"https://dbcert.example.com/device"``.
+    :param code: The one-time code shown next to it, e.g. ``"HQ7M-2KPD"``, or
+        ``None`` when the prompt shows only an address.
+    """
+
+    url: str
+    code: str | None = None
+
+
+_SIGN_IN_URL = re.compile(r"https?://[^\s<>\"'`)\]]+")
+_SIGN_IN_CODE_LINE = re.compile(r"\bcode\b", re.IGNORECASE)
+# A device code: hyphenated groups, or one 6-9 character group mixing letters
+# and digits. Pure words ("CODE", "ENTER") and short numbers never match.
+_SIGN_IN_CODE = re.compile(
+    r"\b(?:[A-Z0-9]{4,8}-[A-Z0-9]{4,8}|(?=[A-Z0-9]*\d)(?=[A-Z0-9]*[A-Z])[A-Z0-9]{6,9})\b"
+)
+
+
+def detect_sign_in_prompt(screen: str | None) -> SignInPrompt | None:
+    """Find a device-style sign-in prompt in terminal screen text.
+
+    A launcher wrapper can stop before the agent binary runs and print a
+    device-code sign-in: an address to open and a short code to enter. The
+    runner reads the pane while it waits for the agent to start; this lifts
+    that prompt so the chat can show the link instead of sending the user to
+    the terminal.
+
+    The address is the first ``http(s)://`` token on screen. The code is the
+    first device-code-shaped token on a line that mentions "code"; the address
+    itself is never taken as the code. An address wrapped across two pane
+    lines is truncated at the wrap, so callers should prefer a wide pane.
+
+    :param screen: ANSI-stripped terminal screen text, or ``None``.
+    :returns: The prompt, or ``None`` when no address is on screen.
+    """
+    if not screen:
+        return None
+    url_match = _SIGN_IN_URL.search(screen)
+    if url_match is None:
+        return None
+    url = url_match.group(0).rstrip(".,;:")
+    code: str | None = None
+    for line in screen.splitlines():
+        if not _SIGN_IN_CODE_LINE.search(line):
+            continue
+        candidates = _SIGN_IN_CODE.findall(_SIGN_IN_URL.sub(" ", line))
+        if candidates:
+            code = candidates[0]
+            break
+    return SignInPrompt(url=url, code=code)
+
+
 _RATE_LIMIT_ERROR = re.compile(
     r"\b(?:rate[ _-]limit[ _-](?:error|exceeded|reached)|request_limit_exceeded"
     r"|rate[ _-]limited|too many requests)\b",
@@ -243,6 +302,9 @@ _FAILURE_CODE_DESCRIPTIONS: dict[str, str] = {
         "Codex hit an error reloading the earlier transcript, so it started a fresh thread."
     ),
     "codex_turn_error": "Codex ran into an error during this turn.",
+    "codex_startup_pending_sign_in": "Codex is waiting for a sign-in.",
+    "codex_startup_pending": "Codex is still starting in the session terminal.",
+    "codex_thread_not_started": "Codex stopped before it could start, so this turn never ran.",
     "native_turn_error": "The agent ran into an error during this turn.",
     "rate_limit_exceeded": "The model's rate limit was reached. You can retry this turn.",
     "budget_exhausted": (
