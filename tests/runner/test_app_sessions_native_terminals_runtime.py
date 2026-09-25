@@ -3670,6 +3670,60 @@ async def test_codex_discover_thread_and_forward_waits_while_terminal_alive(
     assert state.thread_id == thread_id
 
 
+@pytest.mark.parametrize(
+    ("role", "backend_alive", "startup_error", "expected"),
+    [
+        # A healthy runner-owned pane is reused as before.
+        ("codex-native", True, False, True),
+        ("codex-native", False, False, True),
+        # Backend alive but startup still pending (e.g. a sign-in prompt): reuse.
+        ("codex-native", True, True, True),
+        # Backend gone after a recorded startup failure: replace on the next ensure.
+        ("codex-native", False, True, False),
+        # A generic terminal that merely shares the id is never the native TUI.
+        ("generic", True, False, False),
+    ],
+)
+def test_codex_terminal_reuse_requires_a_live_backend_after_a_startup_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    role: str,
+    backend_alive: bool,
+    startup_error: bool,
+    expected: bool,
+) -> None:
+    """
+    After a recorded startup failure, a registered Codex pane with no live
+    app-server is not reusable: every send would fail fast on the saved error,
+    so the ensure must close it and launch again (which clears the record).
+    """
+    from omnigent.runner.app import _AUTO_CODEX_APP_SERVERS
+    from omnigent.runner.native.orchestration import _is_runner_owned_codex_terminal
+    from omnigent.runner.resource_registry import CODEX_NATIVE_TERMINAL_ROLE
+
+    session_id = "6f2e1d0c9b8a47f6a5e4d3c2b1a09f8e"
+    monkeypatch.setattr(codex_native_bridge, "_BRIDGE_ROOT", tmp_path / "codex-bridge")
+    bridge_dir = codex_native_bridge.prepare_bridge_dir(session_id)
+    if startup_error:
+        codex_native_bridge.write_bridge_startup_error(
+            bridge_dir, "Codex stopped before it could start.", code="codex_thread_not_started"
+        )
+
+    class _Registry:
+        def terminal_resource_role(self, _session_id: str, _terminal_id: str) -> str | None:
+            return CODEX_NATIVE_TERMINAL_ROLE if role == "codex-native" else None
+
+    view = SessionResourceView(
+        id="terminal_codex_main", type="terminal", session_id=session_id, name="Codex"
+    )
+    if backend_alive:
+        _AUTO_CODEX_APP_SERVERS[session_id] = object()  # type: ignore[assignment]
+    try:
+        assert _is_runner_owned_codex_terminal(_Registry(), view) is expected  # type: ignore[arg-type]
+    finally:
+        _AUTO_CODEX_APP_SERVERS.pop(session_id, None)
+
+
 @pytest.mark.asyncio
 async def test_codex_discover_thread_and_forward_persists_workspace_as_bridge_cwd(
     monkeypatch: pytest.MonkeyPatch,

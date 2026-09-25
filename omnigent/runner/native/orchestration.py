@@ -7089,15 +7089,32 @@ def _is_runner_owned_codex_terminal(
     ``_auto_create_codex_terminal`` without leaking launch argv in public
     metadata.
 
+    A runner-owned pane is still not reusable once its launch has failed and
+    its app-server is gone: the pane cannot carry chat turns, so every send
+    would fail fast on the saved startup error until the terminal is recreated.
+    Reporting it as not owned makes the ensure close it and launch again,
+    which also clears the saved error. A pane whose backend is alive (for
+    example one still waiting on a sign-in prompt) stays reusable.
+
     :param resource_registry: Runner resource registry that owns private
         terminal role markers.
     :param resource: Existing terminal resource view.
-    :returns: ``True`` when the resource is marked as Codex native.
+    :returns: ``True`` when the resource is marked as Codex native and can
+        still carry chat turns.
     """
-    return (
-        resource_registry.terminal_resource_role(resource.session_id, resource.id)
-        == CODEX_NATIVE_TERMINAL_ROLE
+    from omnigent.harnesses.codex_native.bridge import (
+        bridge_dir_for_bridge_id,
+        read_bridge_startup_error,
     )
+
+    if (
+        resource_registry.terminal_resource_role(resource.session_id, resource.id)
+        != CODEX_NATIVE_TERMINAL_ROLE
+    ):
+        return False
+    if resource.session_id in _AUTO_CODEX_APP_SERVERS:
+        return True
+    return read_bridge_startup_error(bridge_dir_for_bridge_id(resource.session_id)) is None
 
 
 def _is_runner_owned_antigravity_terminal(
