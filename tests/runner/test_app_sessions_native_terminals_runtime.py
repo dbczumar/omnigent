@@ -3615,13 +3615,17 @@ async def test_codex_discover_thread_and_forward_waits_while_terminal_alive(
     class _Terminal:
         diagnostic_id = "terminal-1"
         reads = 0
+        joined_reads = 0
 
         async def is_alive(self) -> bool:
             return True
 
-        async def read(self, scrollback: int = 0) -> dict[str, object]:
+        async def read(
+            self, scrollback: int = 0, *, join_wrapped: bool = False
+        ) -> dict[str, object]:
             del scrollback
             self.reads += 1
+            self.joined_reads += int(join_wrapped)
             return {"screen": screen}
 
     monkeypatch.setattr(codex_native_forwarder, "wait_for_thread_started", _fake_wait)
@@ -3652,7 +3656,8 @@ async def test_codex_discover_thread_and_forward_waits_while_terminal_alive(
 
     # One bounded wait, then an open-ended one once the pending cause is recorded.
     assert wait_calls == [{"timeout": 120.0}, {"timeout": None}]
-    assert terminal.reads == 1
+    # Read once, with wrapped rows joined so a wide address comes back whole.
+    assert (terminal.reads, terminal.joined_reads) == (1, 1)
     (pending,) = pending_seen
     assert pending is not None
     assert pending.code == expected_code

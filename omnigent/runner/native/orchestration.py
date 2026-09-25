@@ -5517,7 +5517,9 @@ async def _record_codex_startup_pending(
 
     screen = ""
     try:
-        result = await terminal_instance.read()
+        # A sign-in address is far wider than the 80-column pane the runner
+        # creates, so read wrapped rows joined back into their original lines.
+        result = await terminal_instance.read(join_wrapped=True)
         raw_screen = result.get("screen") if isinstance(result, dict) else None
         screen = raw_screen if isinstance(raw_screen, str) else ""
     except Exception:  # noqa: BLE001 — the pending record must land without the screen
