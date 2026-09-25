@@ -5513,7 +5513,7 @@ async def _record_native_startup_pending(
     :param timeout_seconds: The thread-start budget that just expired.
     """
     from omnigent.harnesses.codex_native.bridge import write_bridge_startup_error
-    from omnigent.harnesses.diagnostics import detect_sign_in_prompt
+    from omnigent.harnesses.diagnostics import detect_sign_in_prompt, sign_in_next_step
 
     screen = ""
     try:
@@ -5529,11 +5529,7 @@ async def _record_native_startup_pending(
         code = "native_startup_pending_sign_in"
         title = "Codex is waiting for a sign-in"
         message = "Codex is waiting for a sign-in in this session's terminal."
-        step = f"Open {prompt.url}" + (f" and enter code {prompt.code}" if prompt.code else "")
-        remediation = (
-            f"{step}. Codex continues on its own once the sign-in completes; "
-            "then send your message again."
-        )
+        remediation = sign_in_next_step(prompt, "Codex")
     else:
         code = "native_startup_pending"
         title = "Codex is still starting"

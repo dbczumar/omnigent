@@ -86,6 +86,13 @@ class SignInPrompt:
 
 
 _SIGN_IN_URL = re.compile(r"https?://[^\s<>\"'`)\]]+")
+# Words a sign-in prompt uses around its address. A welcome screen or a docs
+# link also shows addresses, so an address alone is not a prompt.
+_SIGN_IN_CONTEXT = re.compile(
+    r"sign[- ]?in|log(?:ging)?[- ]?in|authenticat|browser|open the following|"
+    r"device code|verification code|enter (?:the |this )?code",
+    re.IGNORECASE,
+)
 _SIGN_IN_CODE_LINE = re.compile(r"\bcode\b", re.IGNORECASE)
 # A device code: hyphenated groups, or one 6-9 character group mixing letters
 # and digits. Pure words ("CODE", "ENTER") and short numbers never match.
@@ -103,15 +110,18 @@ def detect_sign_in_prompt(screen: str | None) -> SignInPrompt | None:
     that prompt so the chat can show the link instead of sending the user to
     the terminal.
 
-    The address is the first ``http(s)://`` token on screen. The code is the
-    first device-code-shaped token on a line that mentions "code"; the address
-    itself is never taken as the code. An address wrapped across two pane
+    The screen must also carry sign-in language (sign in, log in, authenticate,
+    browser, "open the following", a device or verification code): a docs link
+    on a welcome screen is not a prompt. The address is then the first
+    ``http(s)://`` token on screen. The code is the first device-code-shaped
+    token on a line that mentions "code"; the address itself is never taken as
+    the code. An address wrapped across two pane
     lines is truncated at the wrap, so callers should prefer a wide pane.
 
     :param screen: ANSI-stripped terminal screen text, or ``None``.
     :returns: The prompt, or ``None`` when no address is on screen.
     """
-    if not screen:
+    if not screen or not _SIGN_IN_CONTEXT.search(screen):
         return None
     url_match = _SIGN_IN_URL.search(screen)
     if url_match is None:
@@ -126,3 +136,18 @@ def detect_sign_in_prompt(screen: str | None) -> SignInPrompt | None:
             code = candidates[0]
             break
     return SignInPrompt(url=url, code=code)
+
+
+def sign_in_next_step(prompt: SignInPrompt, agent: str) -> str:
+    """Phrase a lifted sign-in prompt as the next step for the error card.
+
+    :param prompt: The prompt lifted from the pane.
+    :param agent: The harness's display name, e.g. ``"Codex"`` or ``"Claude Code"``.
+    :returns: e.g. ``"Open https://... and enter code AB12-CD34. Codex continues on
+        its own once the sign-in completes; then send your message again."``
+    """
+    step = f"Open {prompt.url}" + (f" and enter code {prompt.code}" if prompt.code else "")
+    return (
+        f"{step}. {agent} continues on its own once the sign-in completes; "
+        "then send your message again."
+    )
