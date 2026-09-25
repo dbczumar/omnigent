@@ -6013,6 +6013,17 @@ async def test_relay_settles_queued_native_message_on_failed_turn(
                     },
                 }
             ),
+            _sse_frame(
+                {
+                    "type": "session.status",
+                    "status": "failed",
+                    "response_id": "resp_fail",
+                    "error": {
+                        "code": "native_startup_pending_sign_in",
+                        "message": "Codex is waiting for a sign-in in the terminal.",
+                    },
+                }
+            ),
             "data: [DONE]\n\n",
         ]
     )
@@ -6022,6 +6033,14 @@ async def test_relay_settles_queued_native_message_on_failed_turn(
 
         types = [i.type for i in store.appended_items]
         assert types == ["message", "error"], types
+        # The runner's failed edge names its turn; the relay keeps that id so the
+        # web folds the edge into the response's own error card.
+        failed_edges = [
+            e
+            for e in published
+            if e.get("type") == "session.status" and e.get("status") == "failed"
+        ]
+        assert [e.get("response_id") for e in failed_edges] == ["resp_fail"]
         message, error = store.appended_items
         assert message.data.role == "user"
         assert "".join(b["text"] for b in message.data.content) == "set up the worktree"

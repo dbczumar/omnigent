@@ -2441,6 +2441,9 @@ async def test_runner_publishes_terminal_failed_when_harness_stream_fails(
         f"response.failed was dropped at stream end."
     )
     if until == "failed":
+        # The failed edge names the turn it closes (the harness's response id)
+        # so the web folds it into that response's own error card.
+        assert events[-1].get("response_id") == "resp_sf_1"
         error = events[-1].get("error")
         # The terminal failed edge must carry the harness's real error so
         # clients can render it — a bare ``failed`` with no payload would

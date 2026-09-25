@@ -5729,6 +5729,7 @@ def create_runner_app(
         error: Mapping[str, object] | None = None,
         *,
         source_error: Mapping[str, object] | None = None,
+        response_id: str | None = None,
     ) -> None:
         if status == "waiting" and not (
             _server_version is not None and _version_supports_waiting_status(_server_version)
@@ -5751,6 +5752,11 @@ def create_runner_app(
         event: _JsonObject = {"type": "session.status", "status": status}
         if error is not None:
             event["error"] = error
+        if response_id is not None:
+            # Name the turn this edge closes. The web UI already rendered the
+            # response's own terminal error; the id lets it recognise this edge
+            # as the same failure instead of adding a second card.
+            event["response_id"] = response_id
         if status == "failed":
             source = source_error if source_error is not None else (error or {})
             dimensions: dict[str, str] = {}
@@ -7602,7 +7608,11 @@ def create_runner_app(
         elif error is not None:
             if not _suppress_status:
                 _publish_turn_status(
-                    conv_id, "failed", error=_normalize_turn_error(error), source_error=error
+                    conv_id,
+                    "failed",
+                    error=_normalize_turn_error(error),
+                    source_error=error,
+                    response_id=owner_response_id,
                 )
         else:
             if not has_buffered and not _suppress_status:

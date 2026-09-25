@@ -7132,10 +7132,18 @@ async def _relay_runner_stream_once(
                             # — the PTY idle oscillates on mid-turn lulls and
                             # would deliver a premature, lock-out completion.
                             raw_blocked_on = event.get("blocked_on")
+                            raw_response_id = event.get("response_id")
                             _publish_status(
                                 session_id,
                                 status,
                                 status_error,
+                                # The runner names the turn a failed edge closes so
+                                # the web can fold it into that turn's error card.
+                                response_id=(
+                                    raw_response_id
+                                    if isinstance(raw_response_id, str) and raw_response_id
+                                    else None
+                                ),
                                 failure_origin="relayed_runner_status",
                                 blocked_on=(
                                     raw_blocked_on
