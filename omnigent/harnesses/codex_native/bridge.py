@@ -135,7 +135,7 @@ class CodexStartupFailure:
     :param message: Human-readable cause, e.g. ``"Codex is waiting for a
         sign-in in this session's terminal."``.
     :param code: Semantic failure code for the turn error, e.g.
-        ``"codex_startup_pending_sign_in"``; ``None`` for records written
+        ``"native_startup_pending_sign_in"``; ``None`` for records written
         without one.
     :param title: Short headline for the error card, or ``None``.
     :param remediation: Concrete next step, e.g. the sign-in link and
@@ -1006,7 +1006,7 @@ def write_bridge_startup_error(
     :param bridge_dir: Native Codex bridge directory.
     :param message: Human-readable failure cause.
     :param code: Semantic failure code the turn error should carry, e.g.
-        ``"codex_startup_pending_sign_in"``. ``None`` leaves the turn's
+        ``"native_startup_pending_sign_in"``. ``None`` leaves the turn's
         generic code in place.
     :param title: Short headline for the error card, e.g. ``"Codex is
         waiting for a sign-in"``.

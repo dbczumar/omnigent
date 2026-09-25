@@ -541,13 +541,13 @@ def test_build_error_detail_keeps_inner_executor_error_fields() -> None:
     adapter = ExecutorAdapter(executor_factory=lambda: _StubExecutor())
     error = InnerExecutorError(
         "Codex is waiting for a sign-in in this session's terminal.",
-        code="codex_startup_pending_sign_in",
+        code="native_startup_pending_sign_in",
         title="Codex is waiting for a sign-in",
         remediation="Open https://signin.example.com/device and enter code HQ7M-2KPD.",
     )
     detail = adapter._build_error_detail(error)
 
-    assert detail.code == "codex_startup_pending_sign_in"
+    assert detail.code == "native_startup_pending_sign_in"
     assert detail.message == "Codex is waiting for a sign-in in this session's terminal."
     assert detail.title == "Codex is waiting for a sign-in"
     assert detail.remediation is not None
@@ -577,7 +577,7 @@ async def test_coded_executor_error_is_raised_with_its_code() -> None:
         [
             ExecutorError(
                 message="Codex is waiting for a sign-in in this session's terminal.",
-                code="codex_startup_pending_sign_in",
+                code="native_startup_pending_sign_in",
                 title="Codex is waiting for a sign-in",
                 remediation="Open https://signin.example.com/device and enter code HQ7M-2KPD.",
             )
@@ -593,7 +593,7 @@ async def test_coded_executor_error_is_raised_with_its_code() -> None:
         await adapter.run_turn(request, ctx)
 
     assert str(raised.value) == "Codex is waiting for a sign-in in this session's terminal."
-    assert raised.value.code == "codex_startup_pending_sign_in"
+    assert raised.value.code == "native_startup_pending_sign_in"
     assert raised.value.title == "Codex is waiting for a sign-in"
     assert raised.value.remediation is not None
     assert "HQ7M-2KPD" in raised.value.remediation

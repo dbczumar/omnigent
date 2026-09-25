@@ -121,7 +121,7 @@ class InnerExecutorError(RuntimeError):
     headline and next step instead of the exception class name.
 
     :param message: Human-readable failure text shown to the user.
-    :param code: Semantic failure code, e.g. ``"codex_startup_pending_sign_in"``.
+    :param code: Semantic failure code, e.g. ``"native_startup_pending_sign_in"``.
     :param title: Short headline for the error card, or ``None``.
     :param remediation: Concrete next step for the user, or ``None``.
     """

@@ -246,8 +246,8 @@ describe("ErrorBanner", () => {
   });
 
   it.each([
-    ["codex_startup_pending_sign_in", "Codex is waiting for a sign-in."],
-    ["codex_startup_pending", "Codex is still starting in the session terminal."],
+    ["native_startup_pending_sign_in", "The agent is waiting for a sign-in."],
+    ["native_startup_pending", "The agent is still starting in the session terminal."],
     ["codex_thread_not_started", "Codex stopped before it could start, so this turn never ran."],
   ])("describes a %s failure in plain English", (code, sentence) => {
     render(<ErrorBanner message="raw diagnostics" source="execution" code={code} />);
@@ -259,7 +259,7 @@ describe("ErrorBanner", () => {
       <ErrorBanner
         message="Codex is waiting for a sign-in in this session's terminal."
         source="harness"
-        code="codex_startup_pending_sign_in"
+        code="native_startup_pending_sign_in"
         title="Codex is waiting for a sign-in"
         remediation={
           "Open https://signin.example.com/device and enter code HQ7M-2KPD. " +
@@ -281,11 +281,11 @@ describe("ErrorBanner", () => {
       <ErrorBanner
         message="raw diagnostics"
         source="harness"
-        code="codex_startup_pending_sign_in"
+        code="native_startup_pending_sign_in"
         remediation="Open https://signin.example.com/device and enter code HQ7M-2KPD."
       />,
     );
-    fireEvent.click(screen.getByRole("button", { name: /Codex is waiting for a sign-in/i }));
+    fireEvent.click(screen.getByRole("button", { name: /waiting for a sign-in/i }));
     const content = screen.getByTestId("error-message-content");
     expect(within(content).getByRole("link")).toHaveAttribute(
       "href",
@@ -298,7 +298,7 @@ describe("ErrorBanner", () => {
       <ErrorBanner
         message="raw diagnostics"
         source="harness"
-        code="codex_startup_pending"
+        code="native_startup_pending"
         remediation="Finish any sign-in shown in the session terminal, then send your message again."
       />,
     );

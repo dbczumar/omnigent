@@ -6007,7 +6007,7 @@ async def test_relay_settles_queued_native_message_on_failed_turn(
                         "id": "resp_fail",
                         "model": "codex",
                         "error": {
-                            "code": "codex_startup_pending_sign_in",
+                            "code": "native_startup_pending_sign_in",
                             "message": "Codex is waiting for a sign-in in the terminal.",
                         },
                     },
@@ -6029,7 +6029,7 @@ async def test_relay_settles_queued_native_message_on_failed_turn(
         # Both items share the failed turn's id so they group in one bubble.
         assert message.response_id == "resp_fail"
         assert error.response_id == "resp_fail"
-        assert error.data.code == "codex_startup_pending_sign_in"
+        assert error.data.code == "native_startup_pending_sign_in"
         assert not pending_inputs.has_pending(sid)
         consumed = [e for e in published if e.get("type") == "session.input.consumed"]
         assert len(consumed) == 1

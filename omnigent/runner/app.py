@@ -2634,7 +2634,7 @@ def _normalize_turn_error(error: Mapping[str, object]) -> dict[str, str]:
 
     :param error: Raw error dict from a ``_on_proxy_stream_end`` call,
         e.g. ``{"message": "turn setup failed: ..."}``,
-        ``{"code": "codex_startup_pending", "message": "..."}`` or
+        ``{"code": "native_startup_pending", "message": "..."}`` or
         ``{"status": 502}``.
     :returns: A dict with ``code`` and ``message`` string keys, e.g.
         ``{"code": "runner_error", "message": "turn setup failed: ..."}``.

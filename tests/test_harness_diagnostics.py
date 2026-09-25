@@ -6,7 +6,11 @@ import time
 
 import pytest
 
-from omnigent.harnesses.diagnostics import bounded_diagnostic_tail, sanitize_diagnostic_text
+from omnigent.harnesses.diagnostics import (
+    bounded_diagnostic_tail,
+    detect_sign_in_prompt,
+    sanitize_diagnostic_text,
+)
 
 
 @pytest.mark.parametrize(
@@ -153,3 +157,37 @@ def test_cookie_redaction_precedes_diagnostic_tail_clipping() -> None:
     snapshot = bounded_diagnostic_tail([raw])
     assert snapshot["tail"] == 'headers={"set-cookie": "[REDACTED]"}'
     assert snapshot["truncated"] is False
+
+
+@pytest.mark.parametrize(
+    ("screen", "expected_url", "expected_code"),
+    [
+        (
+            "dbexec: launcher 1.2.3\nSign in to continue:\n"
+            "  https://signin.example.com/device\n  code: HQ7M-2KPD\nwaiting for sign-in...",
+            "https://signin.example.com/device",
+            "HQ7M-2KPD",
+        ),
+        (
+            "Visit https://login.example.com/activate?user_code=ABCD1234 "
+            "and enter the code ABCD1234.",
+            "https://login.example.com/activate?user_code=ABCD1234",
+            "ABCD1234",
+        ),
+        # A numeric-only token is not a device code; the address alone is still useful.
+        ("Enter code 123456 at https://x.example/verify.", "https://x.example/verify", None),
+    ],
+)
+def test_detect_sign_in_prompt_lifts_url_and_code(
+    screen: str, expected_url: str, expected_code: str | None
+) -> None:
+    prompt = detect_sign_in_prompt(screen)
+    assert prompt is not None
+    assert prompt.url == expected_url
+    assert prompt.code == expected_code
+
+
+@pytest.mark.parametrize("screen", [None, "", "Starting MCP servers: omnigent", "code: HQ7M-2KPD"])
+def test_detect_sign_in_prompt_requires_an_address(screen: str | None) -> None:
+    """A code without a link gives the user nothing to open, so it is not a prompt."""
+    assert detect_sign_in_prompt(screen) is None

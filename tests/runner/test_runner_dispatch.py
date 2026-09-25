@@ -1624,11 +1624,11 @@ def test_harness_error_response_error_parses_runner_error_bodies(
         # web UI can de-duplicate it against the persisted error item.
         (
             {
-                "code": "codex_startup_pending_sign_in",
+                "code": "native_startup_pending_sign_in",
                 "message": "Codex is waiting for a sign-in.",
             },
             {
-                "code": "codex_startup_pending_sign_in",
+                "code": "native_startup_pending_sign_in",
                 "message": "Codex is waiting for a sign-in.",
             },
         ),

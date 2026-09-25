@@ -81,8 +81,8 @@ const FAILURE_CODE_DESCRIPTIONS: Record<string, string> = {
   codex_thread_reset:
     "Codex hit an error reloading the earlier transcript, so it started a fresh thread.",
   codex_turn_error: "Codex ran into an error during this turn.",
-  codex_startup_pending_sign_in: "Codex is waiting for a sign-in.",
-  codex_startup_pending: "Codex is still starting in the session terminal.",
+  native_startup_pending_sign_in: "The agent is waiting for a sign-in.",
+  native_startup_pending: "The agent is still starting in the session terminal.",
   codex_thread_not_started: "Codex stopped before it could start, so this turn never ran.",
   native_turn_error: "The agent ran into an error during this turn.",
   rate_limit_exceeded: "The model's rate limit was reached. You can retry this turn.",

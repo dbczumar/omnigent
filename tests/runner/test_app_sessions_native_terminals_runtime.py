@@ -3550,10 +3550,10 @@ async def test_codex_discover_thread_and_forward_records_accurate_startup_error(
         (
             "dbexec: launcher 1.2.3\nSign in to continue:\n"
             "  https://signin.example.com/device\n  code: HQ7M-2KPD\nwaiting for sign-in...\n",
-            "codex_startup_pending_sign_in",
+            "native_startup_pending_sign_in",
             "Codex is waiting for a sign-in",
         ),
-        ("Loading configuration...\n", "codex_startup_pending", "Codex is still starting"),
+        ("Loading configuration...\n", "native_startup_pending", "Codex is still starting"),
     ],
 )
 @pytest.mark.asyncio
@@ -3663,7 +3663,7 @@ async def test_codex_discover_thread_and_forward_waits_while_terminal_alive(
     assert pending.code == expected_code
     assert pending.title == expected_title
     assert pending.remediation is not None
-    if expected_code == "codex_startup_pending_sign_in":
+    if expected_code == "native_startup_pending_sign_in":
         assert "https://signin.example.com/device" in pending.remediation
         assert "HQ7M-2KPD" in pending.remediation
     # The backend outlived the deadline and closed only after forwarding ended.

@@ -9,7 +9,6 @@ from omnigent.runner.launch_failure import (
     classify_native_turn_error,
     classify_terminal_failure,
     describe_failure_code,
-    detect_sign_in_prompt,
 )
 
 # The tail Claude Code prints when refusing --dangerously-skip-permissions as
@@ -227,8 +226,8 @@ def test_genuine_reauth_codex_reauth_required_is_preserved() -> None:
         ("context_length_exceeded", "context window"),
         ("rate_limit_exceeded", "You can retry this turn"),
         ("budget_exhausted", "budget"),
-        ("codex_startup_pending_sign_in", "sign-in"),
-        ("codex_startup_pending", "still starting"),
+        ("native_startup_pending_sign_in", "sign-in"),
+        ("native_startup_pending", "still starting"),
         ("codex_thread_not_started", "never ran"),
     ],
 )
@@ -241,37 +240,3 @@ def test_describe_failure_code_known(code: str, expected_substring: str) -> None
 @pytest.mark.parametrize("code", [None, "", "some_unknown_code"])
 def test_describe_failure_code_unknown(code: str | None) -> None:
     assert describe_failure_code(code) is None
-
-
-@pytest.mark.parametrize(
-    ("screen", "expected_url", "expected_code"),
-    [
-        (
-            "dbexec: launcher 1.2.3\nSign in to continue:\n"
-            "  https://signin.example.com/device\n  code: HQ7M-2KPD\nwaiting for sign-in...",
-            "https://signin.example.com/device",
-            "HQ7M-2KPD",
-        ),
-        (
-            "Visit https://login.example.com/activate?user_code=ABCD1234 "
-            "and enter the code ABCD1234.",
-            "https://login.example.com/activate?user_code=ABCD1234",
-            "ABCD1234",
-        ),
-        # A numeric-only token is not a device code; the address alone is still useful.
-        ("Enter code 123456 at https://x.example/verify.", "https://x.example/verify", None),
-    ],
-)
-def test_detect_sign_in_prompt_lifts_url_and_code(
-    screen: str, expected_url: str, expected_code: str | None
-) -> None:
-    prompt = detect_sign_in_prompt(screen)
-    assert prompt is not None
-    assert prompt.url == expected_url
-    assert prompt.code == expected_code
-
-
-@pytest.mark.parametrize("screen", [None, "", "Starting MCP servers: omnigent", "code: HQ7M-2KPD"])
-def test_detect_sign_in_prompt_requires_an_address(screen: str | None) -> None:
-    """A code without a link gives the user nothing to open, so it is not a prompt."""
-    assert detect_sign_in_prompt(screen) is None
