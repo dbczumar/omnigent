@@ -5962,6 +5962,84 @@ async def test_relay_fences_cancelled_turn_and_resumes_on_next_turn(
 
 
 @pytest.mark.asyncio
+async def test_relay_settles_queued_native_message_on_failed_turn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed native turn commits the queued web message ahead of its error item.
+
+    Native sessions do not persist a web message at POST time; the transcript
+    forwarder mirrors it back and drains its queued entry. When the runner
+    reports the turn failed, the harness never received the message, so the
+    relay commits the queued entry as the user message (sender intact),
+    publishes the consumed event that swaps the optimistic bubble, and leaves
+    nothing queued for a later mirrored message to drain by mistake.
+    """
+    from omnigent.runtime import pending_inputs
+    from omnigent.server.routes.sessions import _relay_runner_stream
+
+    pending_inputs.reset_for_tests()
+    sid = "64a784c3aa907d1774f44313546947c6"
+    store = _ConversationStore()
+    content = [{"type": "input_text", "text": "set up the worktree"}]
+    pending_id = pending_inputs.record(
+        sid,
+        content,
+        created_by="alice@example.com",
+        stable_id="7f3a9c1e5b2d4f6a8c0e1d2b3a4f5c6d",
+    )
+    published: list[dict[str, Any]] = []
+    real_publish = session_stream.publish
+
+    def _capture(session_id: str, event: dict[str, Any]) -> None:
+        published.append(event)
+        real_publish(session_id, event)
+
+    monkeypatch.setattr("omnigent.server.routes.sessions.session_stream.publish", _capture)
+    client = _ScriptedStreamingRunnerClient(
+        [
+            _sse_frame(
+                {"type": "response.in_progress", "response": {"id": "resp_fail", "model": "codex"}}
+            ),
+            _sse_frame(
+                {
+                    "type": "response.failed",
+                    "response": {
+                        "id": "resp_fail",
+                        "model": "codex",
+                        "error": {
+                            "code": "codex_startup_pending_sign_in",
+                            "message": "Codex is waiting for a sign-in in the terminal.",
+                        },
+                    },
+                }
+            ),
+            "data: [DONE]\n\n",
+        ]
+    )
+
+    try:
+        await _relay_runner_stream(sid, client, store)  # type: ignore[arg-type]
+
+        types = [i.type for i in store.appended_items]
+        assert types == ["message", "error"], types
+        message, error = store.appended_items
+        assert message.data.role == "user"
+        assert "".join(b["text"] for b in message.data.content) == "set up the worktree"
+        assert message.created_by == "alice@example.com"
+        # Both items share the failed turn's id so they group in one bubble.
+        assert message.response_id == "resp_fail"
+        assert error.response_id == "resp_fail"
+        assert error.data.code == "codex_startup_pending_sign_in"
+        assert not pending_inputs.has_pending(sid)
+        consumed = [e for e in published if e.get("type") == "session.input.consumed"]
+        assert len(consumed) == 1
+        assert consumed[0]["data"]["cleared_pending_id"] == pending_id
+        assert consumed[0]["data"]["created_by"] == "alice@example.com"
+    finally:
+        pending_inputs.reset_for_tests()
+
+
+@pytest.mark.asyncio
 async def test_relay_flushes_partial_text_on_failed_turn_before_error_item() -> None:
     """A failed turn persists its streamed narration, ordered before the error.
 
