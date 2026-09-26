@@ -177,6 +177,14 @@ def test_cookie_redaction_precedes_diagnostic_tail_clipping() -> None:
         ),
         # A numeric-only token is not a device code; the address alone is still useful.
         ("Enter code 123456 at https://x.example/verify.", "https://x.example/verify", None),
+        # Keys echoed into the pane while the launcher waits are not its output.
+        (
+            "dbcert: If the browser does not open automatically, please open the following URL:\n"
+            "\n\thttps://databricks.okta.com/oauth2/v1/authorize?client_id=0oa1&state=T4IU\n\n"
+            "^[^[^[^[\n^[[A\n",
+            "https://databricks.okta.com/oauth2/v1/authorize?client_id=0oa1&state=T4IU",
+            None,
+        ),
         # dbcert's real prompt: the address is the last thing printed while it waits.
         (
             "dbcert: Certificate requested by: omnigent\n"

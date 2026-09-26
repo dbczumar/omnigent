@@ -108,6 +108,9 @@ _SIGN_IN_TRAILER = re.compile(
     r"\bcode\b|waiting|wait for|press |browser|expire|sign[ -]?in|log[ -]?in|authenticat",
     re.IGNORECASE,
 )
+# Keys echoed into a waiting launcher's pane (Escape shows as ``^[``, arrows as
+# ``^[[A``) are not output the launcher printed.
+_ECHOED_CONTROL = re.compile(r"\^\[(?:\[[0-9;?]*[A-Za-z~]?)?")
 # A device code: hyphenated groups, or one 6-9 character group mixing letters
 # and digits. Pure words ("CODE", "ENTER") and short numbers never match.
 _SIGN_IN_CODE = re.compile(
@@ -154,7 +157,10 @@ def detect_sign_in_prompt(screen: str | None) -> SignInPrompt | None:
             break
     if url is None:
         return None
-    if any(line.strip() and not _SIGN_IN_TRAILER.search(line) for line in lines[index + 1 :]):
+    if any(
+        re.search(r"\w", _ECHOED_CONTROL.sub("", line)) and not _SIGN_IN_TRAILER.search(line)
+        for line in lines[index + 1 :]
+    ):
         return None
     code: str | None = None
     for line in lines:
