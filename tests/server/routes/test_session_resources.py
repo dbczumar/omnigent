@@ -128,10 +128,20 @@ class _ConversationStore:
             ),
         }
         self.appended_items: list[Any] = []
+        # Items appended with a stable_id, keyed by it — the real store uses the
+        # stable_id as the row id, which ``get_item`` looks up.
+        self.persisted_by_stable_id: dict[str, Any] = {}
 
     def get_conversation(self, conversation_id: str) -> Conversation | None:
         """Return the conversation or None."""
         return self._conversations.get(conversation_id)
+
+    def get_item(self, conversation_id: str, item_id: str) -> Any:
+        """Return an appended item by stable id or fake id, else ``None``."""
+        del conversation_id
+        if item_id in self.persisted_by_stable_id:
+            return self.persisted_by_stable_id[item_id]
+        return next((item for item in self.appended_items if item.id == item_id), None)
 
     def list_conversations(
         self,
@@ -234,6 +244,8 @@ class _ConversationStore:
                 created_by=getattr(item, "created_by", None),
             )
             self.appended_items.append(persisted)
+            if getattr(item, "stable_id", None):
+                self.persisted_by_stable_id[item.stable_id] = persisted
             result.append(persisted)
         return result
 
@@ -5118,6 +5130,109 @@ async def test_claude_native_mirror_matches_text_behind_attachment_markers() -> 
         assert image in matched_user.data.content
         assert {"type": "input_text", "text": mirrored_text} in matched_user.data.content
         assert pending_inputs.snapshot_for(sid) == []
+    finally:
+        pending_inputs.reset_for_tests()
+
+
+@pytest.mark.asyncio
+async def test_claude_native_retried_mirror_leaves_the_queue_alone() -> None:
+    """A forwarder retry of an already-persisted mirror must not drain anything.
+
+    The retried text can match a NEWER identical queued message; draining that
+    would skip everything queued in between and mark it undelivered although
+    it may still be on its way. The store already holds the item under its
+    source-derived id, so the retry returns that id and changes nothing.
+    """
+    from omnigent.runtime import pending_inputs
+    from omnigent.server.routes.sessions import _persist_external_conversation_item
+
+    pending_inputs.reset_for_tests()
+    store = _ConversationStore()
+    sid = "64a784c3aa907d1774f44313546947c6"
+    conv = store.get_conversation(sid)
+    assert conv is not None
+    body = SessionEventInput(
+        type="external_conversation_item",
+        data={
+            "item_type": "message",
+            "item_data": {"role": "user", "content": [{"type": "input_text", "text": "yes"}]},
+            "response_id": "resp_yes",
+            "source_id": "claude:yes:0",
+        },
+    )
+
+    try:
+        first_id = await _persist_external_conversation_item(
+            sid,
+            conv,
+            body,
+            store,  # type: ignore[arg-type]
+        )
+        assert [item.type for item in store.appended_items] == ["message"]
+        # Meanwhile the person queues a message still on its way, then "yes" again.
+        in_flight = pending_inputs.record(sid, [{"type": "input_text", "text": "continue"}])
+        again = pending_inputs.record(sid, [{"type": "input_text", "text": "yes"}])
+
+        retried_id = await _persist_external_conversation_item(
+            sid,
+            conv,
+            body,
+            store,  # type: ignore[arg-type]
+        )
+
+        assert retried_id == first_id
+        assert [item.type for item in store.appended_items] == ["message"]
+        assert [entry["pending_id"] for entry in pending_inputs.snapshot_for(sid)] == [
+            in_flight,
+            again,
+        ]
+    finally:
+        pending_inputs.reset_for_tests()
+
+
+@pytest.mark.asyncio
+async def test_claude_native_mirrored_slash_command_drains_its_queued_entry() -> None:
+    """A web-typed command mirrored as a slash_command clears its own queued entry.
+
+    Without this the entry outlives the executed command and the next ordinary
+    message would skip it, persisting a false "not delivered" error for a
+    command Claude ran. Older entries are left in place.
+    """
+    from omnigent.runtime import pending_inputs
+    from omnigent.server.routes.sessions import _persist_external_conversation_item
+
+    pending_inputs.reset_for_tests()
+    store = _ConversationStore()
+    sid = "64a784c3aa907d1774f44313546947c6"
+    conv = store.get_conversation(sid)
+    assert conv is not None
+    older = pending_inputs.record(sid, [{"type": "input_text", "text": "still on its way"}])
+    pending_inputs.record(sid, [{"type": "input_text", "text": "/model sonnet"}])
+    body = SessionEventInput(
+        type="external_conversation_item",
+        data={
+            "item_type": "slash_command",
+            "item_data": {
+                "agent": "claude-native-ui",
+                "kind": "command",
+                "name": "model",
+                "arguments": "sonnet",
+            },
+            "response_id": "resp_model",
+            "source_id": "claude:model:0",
+        },
+    )
+
+    try:
+        await _persist_external_conversation_item(
+            sid,
+            conv,
+            body,
+            store,  # type: ignore[arg-type]
+        )
+
+        assert [item.type for item in store.appended_items] == ["slash_command"]
+        assert [entry["pending_id"] for entry in pending_inputs.snapshot_for(sid)] == [older]
     finally:
         pending_inputs.reset_for_tests()
 

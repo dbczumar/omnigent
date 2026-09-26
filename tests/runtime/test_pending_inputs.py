@@ -421,3 +421,14 @@ def test_stable_id_dedup_scoped_per_conversation() -> None:
     id_a = pending_inputs.record("conv_scope_a", [_text_block("x")], stable_id=stable)
     id_b = pending_inputs.record("conv_scope_b", [_text_block("x")], stable_id=stable)
     assert id_a != id_b
+
+
+def test_record_evicts_the_oldest_entry_beyond_the_per_conversation_cap() -> None:
+    """The queue is bounded: recording past the cap drops the oldest entry."""
+    cap = pending_inputs._MAX_ENTRIES_PER_CONVERSATION
+    ids = [pending_inputs.record("conv_a", [_text_block(f"m{i}")]) for i in range(cap + 2)]
+
+    snapshot = pending_inputs.snapshot_for("conv_a")
+
+    assert len(snapshot) == cap
+    assert [entry["pending_id"] for entry in snapshot] == ids[2:]

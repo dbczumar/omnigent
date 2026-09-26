@@ -61,6 +61,8 @@ Limitations (identical to :mod:`pending_elicitations`):
   subscribers live on one process), so this rides the same affinity.
 * Entries do not survive an AP-server restart — acceptable, the loss
   is one in-flight message, same as every other AP-side transient.
+* At most :data:`_MAX_ENTRIES_PER_CONVERSATION` entries per conversation;
+  :func:`record` evicts the oldest beyond that.
 
 A forwarded message the vendor TUI never accepts (runner crash, dropped
 keystrokes) is never persisted, so no mirror drains its entry. The next
@@ -87,6 +89,12 @@ from omnigent.db.workspace_cache import WorkspaceScopedCache
 # vendor-TUI-never-accepted-the-message ghost; long enough that a slow
 # transcript round-trip on a busy session still drains normally.
 _TTL_S: float = 600.0
+
+# Hard cap on queued entries per conversation; the oldest entry is evicted
+# when a new one would exceed it. Bounds the snapshot replay and the persist
+# site's append (each skipped entry becomes two rows). Far above any real
+# queue: nobody sends this many messages within the TTL with none echoed back.
+_MAX_ENTRIES_PER_CONVERSATION = 64
 
 
 def _now() -> float:
@@ -234,6 +242,9 @@ def record(
         idempotent across client retries. ``None`` for clients that do not
         send one.
     :returns: The index-assigned pending id, e.g. ``"pending_a1b2c3"``.
+
+    Beyond :data:`_MAX_ENTRIES_PER_CONVERSATION` live entries the oldest one
+    is evicted, so the queue (and everything sized by it) stays bounded.
     """
     with _lock:
         _evict_stale_locked(conversation_id, _now())
@@ -252,7 +263,10 @@ def record(
             stable_id=stable_id,
             background_titles_enabled=background_titles_enabled,
         )
-        _pending.setdefault(conversation_id, {})[pending_id] = entry
+        entries = _pending.setdefault(conversation_id, {})
+        entries[pending_id] = entry
+        while len(entries) > _MAX_ENTRIES_PER_CONVERSATION:
+            entries.pop(next(iter(entries)))
     return pending_id
 
 

@@ -40,6 +40,7 @@ from omnigent.entities import (
     MessageData,
     NewConversationItem,
     ResourceEventData,
+    SlashCommandData,
 )
 from omnigent.entities.conversation import (
     FunctionCallData,
@@ -2568,6 +2569,14 @@ async def _persist_external_conversation_item(
     :returns: Store-assigned conversation item id.
     """
     item = _new_external_conversation_item(session_id, body)
+    if item.stable_id is not None:
+        # A forwarder retry of an item already persisted under its source-derived
+        # id: nothing to drain, persist or publish. Draining again could match a
+        # NEWER identical queued message and mark everything queued in between
+        # as undelivered.
+        existing = await asyncio.to_thread(conversation_store.get_item, session_id, item.stable_id)
+        if existing is not None:
+            return existing.id
     # A native user message round-tripping back from the transcript:
     # drain its optimistic pending-input entry and fold the entry's file
     # blocks (image / file) into the item BEFORE persisting. The transcript
@@ -2617,13 +2626,24 @@ async def _persist_external_conversation_item(
             # No pending entry — direct terminal input. Fall back to the
             # identity authenticated on the forwarder's own request.
             item = item.model_copy(update={"created_by": created_by})
+    elif item.type == "slash_command" and isinstance(item.data, SlashCommandData):
+        # A command typed in the web composer was queued as plain text but comes
+        # back as a slash_command item. Drain its own entry so it is not later
+        # mistaken for a lost message; older entries stay in place.
+        command_line = f"/{item.data.name} {item.data.arguments}".strip()
+        matched = pending_inputs.resolve_matching_text(session_id, command_line)
+        if matched.matched is not None:
+            cleared_pending_id = matched.matched.pending_id
+        for entry in reversed(matched.skipped):
+            pending_inputs.restore(session_id, entry)
     # Build the batch: skipped entries first (their positions must precede
     # the matched item to match broadcast order), then the anchor. Each
     # skipped entry gets a pair of items (user message + error) with stable
     # IDs derived from pending_id, so the whole batch is idempotent under the
-    # append lock — no separate has_item probe needed. When the anchor is
-    # already persisted (a forwarder retry), append returns every item as
-    # deduplicated and the queue entries are restored below.
+    # append lock. The queue is capped per conversation
+    # (``pending_inputs._MAX_ENTRIES_PER_CONVERSATION``), so one append writes
+    # at most ``2 * cap + 1`` rows. A concurrent retry that slipped past the
+    # probe above comes back deduplicated and its queue entries are restored.
     skipped_new_items = _build_skipped_native_items(session_id, conv, skipped_pending)
     batch = [*skipped_new_items, item]
     pending_background_title = prepare_background_session_title(
@@ -2766,6 +2786,8 @@ def _build_skipped_native_items(
     :param skipped_entries: Older queue entries skipped by a text-matched drain.
     :returns: The item pairs in queue order, empty when nothing was skipped.
     """
+    if not skipped_entries:
+        return []
     if _is_kiro_native_session(conv):
         harness_key = "kiro"
         code = "kiro_native_prompt_not_recorded"
