@@ -3678,6 +3678,134 @@ async def test_codex_discover_thread_and_forward_waits_while_terminal_alive(
 
 
 @pytest.mark.parametrize(
+    ("screen", "expect_early"),
+    [
+        (
+            "dbcert: Logging in via SSO...\n"
+            "dbcert: If the browser does not open automatically, please open the following URL:\n"
+            "https://databricks.okta.com/oauth2/v1/authorize?client_id=abc&state=xyz\n",
+            True,
+        ),
+        ("Codex requirements updated at /etc/codex/requirements.toml\n", False),
+    ],
+)
+@pytest.mark.asyncio
+async def test_codex_discover_thread_and_forward_records_a_sign_in_prompt_before_the_budget(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    screen: str,
+    expect_early: bool,
+) -> None:
+    """
+    A stable sign-in prompt on the pane is recorded as soon as it is seen, not at the budget.
+
+    The chat turn fails fast on the record, so the card with the sign-in step
+    appears seconds after the send instead of two minutes later. Ordinary
+    startup output is never mistaken for a prompt: that pane still waits for
+    the full budget before the generic pending cause is recorded.
+    """
+    from omnigent.harnesses.codex_native import forwarder as codex_native_forwarder
+    from omnigent.runner.app import (
+        _AUTO_CODEX_APP_SERVERS,
+        _codex_discover_thread_and_forward,
+    )
+    from omnigent.runner.native import orchestration
+
+    thread_id = "019e96aa-abcd-7343-8d3b-6f914d60936b"
+    wait_calls: list[dict[str, object]] = []
+    at_deadline: list[codex_native_bridge.CodexStartupFailure | None] = []
+    pending_seen: list[codex_native_bridge.CodexStartupFailure | None] = []
+    real_async_client = httpx.AsyncClient
+
+    def _mock_client(**kwargs: Any) -> httpx.AsyncClient:
+        return real_async_client(
+            transport=httpx.MockTransport(lambda _request: httpx.Response(200, json={})),
+            **kwargs,
+        )
+
+    async def _fake_wait(*_args: object, **kwargs: object) -> str:
+        wait_calls.append(kwargs)
+        if len(wait_calls) == 1:
+            # The budgeted wait: a prompt must interrupt it, anything else runs
+            # it out (shortened here) with no record made in the meantime.
+            await asyncio.sleep(3600.0 if expect_early else 0.2)
+            at_deadline.append(codex_native_bridge.read_bridge_startup_failure(tmp_path))
+            raise TimeoutError
+        pending_seen.append(codex_native_bridge.read_bridge_startup_failure(tmp_path))
+        return thread_id
+
+    async def _fake_supervise(**_kwargs: object) -> None:
+        return None
+
+    class _Client:
+        async def close(self) -> None:
+            return None
+
+    class _AppServer:
+        async def close(self) -> None:
+            return None
+
+    class _Terminal:
+        diagnostic_id = "terminal-1"
+        reads = 0
+
+        async def is_alive(self) -> bool:
+            return True
+
+        async def read(
+            self, scrollback: int = 0, *, join_wrapped: bool = False
+        ) -> dict[str, object]:
+            del scrollback, join_wrapped
+            self.reads += 1
+            return {"screen": screen}
+
+    monkeypatch.setattr(orchestration, "_CODEX_SIGN_IN_POLL_INTERVAL_S", 0.01)
+    monkeypatch.setattr(codex_native_forwarder, "wait_for_thread_started", _fake_wait)
+    monkeypatch.setattr(codex_native_forwarder, "supervise_forwarder", _fake_supervise)
+    monkeypatch.setenv("RUNNER_SERVER_URL", "http://ap.example")
+    monkeypatch.setattr("omnigent.runner._entry._make_auth_token_factory", lambda: None)
+    monkeypatch.setattr(httpx, "AsyncClient", _mock_client)
+
+    session_id = "4d1b0e5f7c9a4b3d8f2e6c0a1b3d5f7e"
+    app_server = _AppServer()
+    terminal = _Terminal()
+    _AUTO_CODEX_APP_SERVERS[session_id] = app_server  # type: ignore[assignment]
+    try:
+        await asyncio.wait_for(
+            _codex_discover_thread_and_forward(
+                session_id=session_id,
+                bridge_dir=tmp_path,
+                codex_ws_url="ws://127.0.0.1:1",
+                codex_home=tmp_path / "codex-home",
+                workspace=str(tmp_path / "workspace"),
+                event_client=_Client(),  # type: ignore[arg-type]
+                routing_summary="Databricks ucode profile 'oss'",
+                app_server=app_server,  # type: ignore[arg-type]
+                terminal_instance=terminal,  # type: ignore[arg-type]
+                thread_start_timeout_seconds=120.0,
+            ),
+            timeout=10.0,
+        )
+    finally:
+        _AUTO_CODEX_APP_SERVERS.pop(session_id, None)
+
+    # The budgeted wait, then the open-ended one once the cause is recorded.
+    assert wait_calls == [{"timeout": 120.0}, {"timeout": None}]
+    (pending,) = pending_seen
+    assert pending is not None
+    if expect_early:
+        # Two matching reads of the prompt, then the record's own read.
+        assert terminal.reads >= 3
+        assert at_deadline == []
+        assert pending.code == "databricks_sign_in_pending"
+    else:
+        assert at_deadline == [None]
+        assert pending.code == "agent_startup_pending"
+    # The thread start cleared the record either way.
+    assert codex_native_bridge.read_bridge_startup_error(tmp_path) is None
+
+
+@pytest.mark.parametrize(
     ("role", "backend_alive", "startup_error", "expected"),
     [
         # A healthy runner-owned pane is reused as before.

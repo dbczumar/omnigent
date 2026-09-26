@@ -341,6 +341,8 @@ _TERMINAL_INTERACTIVE_TIMEOUT_S = 180.0
 _TERMINAL_INTERACTIVE_POLL_INTERVAL_S = 0.15
 # Sign-in may stay open indefinitely; limit its liveness subprocess rate.
 _CODEX_LOGIN_EXIT_POLL_INTERVAL_S = 1.0
+# How often a starting pane is read for a launcher sign-in prompt.
+_CODEX_SIGN_IN_POLL_INTERVAL_S = 2.0
 
 # Background Codex app-server instances for host-spawned codex-native
 # runners, kept referenced so they aren't garbage-collected mid-run.
@@ -5456,25 +5458,73 @@ class _CodexTerminalExited(RuntimeError):
         super().__init__(_codex_terminal_exit_summary(instance, before_thread=True))
 
 
+class _CodexSignInPromptSeen(RuntimeError):
+    """The live pane shows a stable launcher sign-in prompt before any thread started."""
+
+    def __init__(self, instance: TerminalInstance) -> None:
+        self.instance = instance
+        super().__init__("Codex pane is parked on a sign-in prompt")
+
+
+async def _codex_pane_screen(instance: TerminalInstance) -> str:
+    """Return the pane's screen with wrapped rows joined, or ``""`` when it cannot be read."""
+    try:
+        # A sign-in address is far wider than the 80-column pane the runner
+        # creates, so read wrapped rows joined back into their original lines.
+        result = await instance.read(join_wrapped=True)
+    except Exception:  # noqa: BLE001 — an unreadable pane simply shows nothing yet
+        _logger.debug(
+            "Codex startup pane read failed for %s", instance.diagnostic_id, exc_info=True
+        )
+        return ""
+    raw_screen = result.get("screen") if isinstance(result, dict) else None
+    return raw_screen if isinstance(raw_screen, str) else ""
+
+
 async def _wait_for_codex_thread_or_terminal_exit(
     thread_started: Awaitable[str],
     instance: TerminalInstance,
     *,
     poll_interval_s: float = _TERMINAL_INTERACTIVE_POLL_INTERVAL_S,
+    watch_sign_in: bool = False,
 ) -> str:
-    """Stop startup discovery promptly without following a replacement terminal."""
+    """
+    Stop startup discovery promptly without following a replacement terminal.
+
+    With *watch_sign_in* the pane is also read every
+    ``_CODEX_SIGN_IN_POLL_INTERVAL_S`` for a launcher sign-in prompt; the same
+    address on two consecutive reads raises :class:`_CodexSignInPromptSeen` so
+    the caller can record it well before the thread-start budget expires.
+    """
+    from omnigent.harnesses.diagnostics import detect_sign_in_prompt
 
     async def wait_for_exit() -> None:
         while await instance.is_alive():
             await asyncio.sleep(poll_interval_s)
 
+    async def wait_for_sign_in_prompt() -> None:
+        previous_url: str | None = None
+        while True:
+            await asyncio.sleep(_CODEX_SIGN_IN_POLL_INTERVAL_S)
+            prompt = detect_sign_in_prompt(await _codex_pane_screen(instance))
+            if prompt is not None and prompt.url == previous_url:
+                return
+            previous_url = prompt.url if prompt is not None else None
+
     thread_task = asyncio.ensure_future(thread_started)
     exit_task = asyncio.create_task(wait_for_exit())
+    sign_in_task = asyncio.create_task(wait_for_sign_in_prompt()) if watch_sign_in else None
+    tasks: list[asyncio.Future[Any]] = [thread_task, exit_task]
+    if sign_in_task is not None:
+        tasks.append(sign_in_task)
     try:
-        done, _ = await asyncio.wait((thread_task, exit_task), return_when=asyncio.FIRST_COMPLETED)
+        done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
         # A discovered thread remains usable through the app-server after TUI exit.
         if thread_task in done:
             return await thread_task
+        if sign_in_task is not None and sign_in_task in done:
+            await sign_in_task
+            raise _CodexSignInPromptSeen(instance)
         # Propagate probe failures instead of reporting a normal terminal exit.
         await exit_task
         # Let an already-queued notification reach the discovery waiter.
@@ -5483,10 +5533,10 @@ async def _wait_for_codex_thread_or_terminal_exit(
             return await thread_task
         raise _CodexTerminalExited(instance)
     finally:
-        for task in (thread_task, exit_task):
+        for task in tasks:
             if not task.done():
                 task.cancel()
-        await asyncio.gather(thread_task, exit_task, return_exceptions=True)
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 
 async def _record_agent_startup_pending(
@@ -5495,36 +5545,28 @@ async def _record_agent_startup_pending(
     bridge_dir: Path,
     terminal_instance: TerminalInstance,
     routing_summary: str,
-    timeout_seconds: float,
+    waited_seconds: float,
 ) -> None:
     """
-    Record that Codex is still starting behind a live pane, with any sign-in link it shows.
+    Record that Codex is still starting behind a live pane, noting a sign-in prompt it shows.
 
-    A launcher wrapper can park the pane on a sign-in prompt for longer than the
-    thread-start budget. Chat turns read this record and fail fast with the
-    next step instead of the generic "thread never started"; the discovery wait
-    then continues without a deadline and clears the record once the thread
-    starts.
+    A launcher wrapper can park the pane on a sign-in prompt. The wait records
+    this as soon as the prompt is stable on screen, or at the thread-start
+    budget when the pane shows something else. Chat turns read the record and
+    fail fast with the next step instead of the generic "thread never
+    started"; the discovery wait then continues without a deadline and clears
+    the record once the thread starts.
 
     :param session_id: Omnigent session/conversation id.
     :param bridge_dir: Native Codex bridge directory for this session.
     :param terminal_instance: The live TUI pane, read once for its screen text.
     :param routing_summary: One-line description of the resolved launch routing.
-    :param timeout_seconds: The thread-start budget that just expired.
+    :param waited_seconds: How long discovery has waited for the thread so far.
     """
     from omnigent.harnesses.codex_native.bridge import write_bridge_startup_error
     from omnigent.harnesses.diagnostics import detect_sign_in_prompt, sign_in_next_step
 
-    screen = ""
-    try:
-        # A sign-in address is far wider than the 80-column pane the runner
-        # creates, so read wrapped rows joined back into their original lines.
-        result = await terminal_instance.read(join_wrapped=True)
-        raw_screen = result.get("screen") if isinstance(result, dict) else None
-        screen = raw_screen if isinstance(raw_screen, str) else ""
-    except Exception:  # noqa: BLE001 — the pending record must land without the screen
-        _logger.debug("Codex startup pane read failed for %s", session_id, exc_info=True)
-    prompt = detect_sign_in_prompt(screen)
+    prompt = detect_sign_in_prompt(await _codex_pane_screen(terminal_instance))
     if prompt is not None:
         code = "databricks_sign_in_pending"
         title = "Codex is waiting for a sign-in"
@@ -5551,7 +5593,7 @@ async def _record_agent_startup_pending(
     pending_event["attributes"] = {
         "harness": "codex-native",
         "phase": "thread_discovery",
-        "timeout_s": timeout_seconds,
+        "waited_s": round(waited_seconds, 1),
         "sign_in_prompt_detected": prompt is not None,
         "code": code,
     }
@@ -5559,7 +5601,7 @@ async def _record_agent_startup_pending(
         "Codex TUI for %s has not started a thread after %.0fs but its pane is alive; "
         "recorded %s and waiting without a deadline%s",
         session_id,
-        timeout_seconds,
+        waited_seconds,
         code,
         f" (sign-in prompt: {prompt.url})" if prompt is not None else "",
         extra=pending_event,
@@ -5621,10 +5663,11 @@ async def _codex_discover_thread_and_forward(
         session.
     :param thread_start_timeout_seconds: Configured-command thread-start
         allowance. ``None`` preserves the forwarder's ordinary 30-second
-        default. When the budget expires while *terminal_instance* is still
-        running, the wait records a pending cause (see
-        :func:`_record_agent_startup_pending`) and continues without a
-        deadline; only a pane exit or an ended event stream tears down.
+        default. While *terminal_instance* is running, a stable sign-in
+        prompt on its screen, or the budget expiring, records a pending
+        cause (see :func:`_record_agent_startup_pending`) and the wait
+        continues without a deadline; only a pane exit or an ended event
+        stream tears down.
     :param subagent_router: Router this terminal launch started, torn down
         in the ``finally``. Passed so a late teardown cannot close the
         endpoint a re-created terminal has since installed.
@@ -5699,29 +5742,31 @@ async def _codex_discover_thread_and_forward(
                             if login_required or startup_pending_recorded
                             else _TERMINAL_INTERACTIVE_POLL_INTERVAL_S
                         ),
+                        # Once the cause is recorded there is nothing more to
+                        # learn from the pane until the thread starts.
+                        watch_sign_in=not (login_required or startup_pending_recorded),
                     )
                 )
                 break
             except (TimeoutError, RuntimeError) as exc:
                 if (
-                    isinstance(exc, TimeoutError)
+                    terminal_instance is not None
                     and not startup_pending_recorded
-                    and terminal_instance is not None
-                    and await terminal_instance.is_alive()
+                    and (
+                        isinstance(exc, _CodexSignInPromptSeen)
+                        or (isinstance(exc, TimeoutError) and await terminal_instance.is_alive())
+                    )
                 ):
-                    # The pane is still running (e.g. parked on a launcher
-                    # sign-in prompt). Record why chat turns cannot run yet and
-                    # keep listening; a pane exit still ends discovery below.
+                    # The pane is still running: parked on a launcher sign-in
+                    # prompt, or slow past its budget. Record why chat turns
+                    # cannot run yet and keep listening; a pane exit still ends
+                    # discovery below.
                     await _record_agent_startup_pending(
                         session_id=session_id,
                         bridge_dir=bridge_dir,
                         terminal_instance=terminal_instance,
                         routing_summary=routing_summary,
-                        timeout_seconds=(
-                            thread_start_timeout_seconds
-                            if thread_start_timeout_seconds is not None
-                            else CODEX_NATIVE_DIRECT_THREAD_START_TIMEOUT_SECONDS
-                        ),
+                        waited_seconds=time.monotonic() - discovery_started_at,
                     )
                     startup_pending_recorded = True
                     continue
