@@ -6009,6 +6009,13 @@ async def test_relay_settles_queued_native_message_on_failed_turn(
         created_by="alice@example.com",
         stable_id="7f3a9c1e5b2d4f6a8c0e1d2b3a4f5c6d",
     )
+    # A second message the runner is still holding for the next turn.
+    queued_next = pending_inputs.record(
+        sid,
+        [{"type": "input_text", "text": "then run the tests"}],
+        created_by="alice@example.com",
+        stable_id="8a4b0d2f6c3e5a7b9d1f2e3c4b5a6d7e",
+    )
     published: list[dict[str, Any]] = []
     real_publish = session_stream.publish
 
@@ -6025,6 +6032,8 @@ async def test_relay_settles_queued_native_message_on_failed_turn(
             _sse_frame(
                 {
                     "type": "response.failed",
+                    # The runner names the message this turn carried.
+                    "input_stable_id": "7f3a9c1e5b2d4f6a8c0e1d2b3a4f5c6d",
                     "response": {
                         "id": "resp_fail",
                         "model": "codex",
@@ -6071,11 +6080,91 @@ async def test_relay_settles_queued_native_message_on_failed_turn(
         assert message.response_id == "resp_fail"
         assert error.response_id == "resp_fail"
         assert error.data.code == "databricks_sign_in_pending"
-        assert not pending_inputs.has_pending(sid)
+        # Only the failed turn's own message settled; the next one stays queued.
+        assert [e["pending_id"] for e in pending_inputs.snapshot_for(sid)] == [queued_next]
         consumed = [e for e in published if e.get("type") == "session.input.consumed"]
         assert len(consumed) == 1
         assert consumed[0]["data"]["cleared_pending_id"] == pending_id
         assert consumed[0]["data"]["created_by"] == "alice@example.com"
+    finally:
+        pending_inputs.reset_for_tests()
+
+
+@pytest.mark.asyncio
+async def test_relay_leaves_later_queued_messages_when_a_delivered_turn_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    A turn that fails after its message was mirrored settles nothing.
+
+    Message A reached the harness and was mirrored back (its entry drained);
+    B and C are still queued because the runner holds them for later turns.
+    When A then fails mid-turn, settling by queue order would commit B under
+    A's response and let B's own mirror consume C. Settlement is by the id
+    the runner stamps on the failure, so B and C stay queued, in order.
+    """
+    from omnigent.runtime import pending_inputs
+    from omnigent.server.routes.sessions import _relay_runner_stream
+
+    pending_inputs.reset_for_tests()
+    sid = "75b895d4bb018e2885055424657058d7"
+    store = _ConversationStore()
+    a_stable = "1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a"
+    a_pending = pending_inputs.record(
+        sid,
+        [{"type": "input_text", "text": "A"}],
+        created_by="alice@example.com",
+        stable_id=a_stable,
+    )
+    b_pending = pending_inputs.record(
+        sid,
+        [{"type": "input_text", "text": "B"}],
+        created_by="alice@example.com",
+        stable_id="2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
+    )
+    c_pending = pending_inputs.record(
+        sid,
+        [{"type": "input_text", "text": "C"}],
+        created_by="alice@example.com",
+        stable_id="3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c",
+    )
+    # A's mirror already drained its entry before the turn failed.
+    assert pending_inputs.resolve(sid, a_pending) is not None
+    published: list[dict[str, Any]] = []
+    real_publish = session_stream.publish
+
+    def _capture(session_id: str, event: dict[str, Any]) -> None:
+        published.append(event)
+        real_publish(session_id, event)
+
+    monkeypatch.setattr("omnigent.server.routes.sessions.session_stream.publish", _capture)
+    client = _ScriptedStreamingRunnerClient(
+        [
+            _sse_frame(
+                {"type": "response.in_progress", "response": {"id": "resp_a", "model": "codex"}}
+            ),
+            _sse_frame(
+                {
+                    "type": "response.failed",
+                    "input_stable_id": a_stable,
+                    "response": {
+                        "id": "resp_a",
+                        "model": "codex",
+                        "error": {"code": "codex_turn_error", "message": "Codex crashed."},
+                    },
+                }
+            ),
+            "data: [DONE]\n\n",
+        ]
+    )
+    try:
+        await _relay_runner_stream(sid, client, store)  # type: ignore[arg-type]
+        assert [i.type for i in store.appended_items] == ["error"]
+        assert [e["pending_id"] for e in pending_inputs.snapshot_for(sid)] == [
+            b_pending,
+            c_pending,
+        ]
+        assert not any(e.get("type") == "session.input.consumed" for e in published)
     finally:
         pending_inputs.reset_for_tests()
 

@@ -270,26 +270,29 @@ def pending_id_for_stable_id(conversation_id: str, stable_id: str) -> str | None
     return None
 
 
-def resolve(conversation_id: str, pending_id: str) -> None:
+def resolve(conversation_id: str, pending_id: str) -> DrainedInput | None:
     """
-    Drop a pending entry by id.
+    Drop a pending entry by id and return it.
 
-    Called to roll back a :func:`record` whose runner forward failed
-    (so a never-delivered message doesn't replay as a ghost bubble).
-    Idempotent: dropping an unknown id is a no-op.
+    Called to roll back a :func:`record` whose runner forward failed (so a
+    never-delivered message doesn't replay as a ghost bubble), and to settle
+    the exact entry a failed native turn named. Idempotent: dropping an
+    unknown id is a no-op.
 
     :param conversation_id: Conversation/session id, e.g.
         ``"conv_abc123"``.
     :param pending_id: The id returned by :func:`record`, e.g.
         ``"pending_a1b2c3"``.
+    :returns: The dropped entry, or ``None`` when no entry had that id.
     """
     with _lock:
         entries = _pending.get(conversation_id)
         if entries is None:
-            return
-        entries.pop(pending_id, None)
+            return None
+        entry = entries.pop(pending_id, None)
         if not entries:
             _pending.pop(conversation_id, None)
+        return _drained_input(entry) if entry is not None else None
 
 
 def resolve_oldest(conversation_id: str) -> DrainedInput | None:

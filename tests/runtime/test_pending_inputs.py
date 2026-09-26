@@ -234,10 +234,12 @@ def test_resolve_removes_entry_idempotently() -> None:
     keep = pending_inputs.record("conv_a", [_text_block("keep")])
     drop = pending_inputs.record("conv_a", [_text_block("drop")])
 
-    pending_inputs.resolve("conv_a", drop)
+    dropped = pending_inputs.resolve("conv_a", drop)
+    assert dropped is not None
+    assert (dropped.pending_id, dropped.content) == (drop, [_text_block("drop")])
     assert [e["pending_id"] for e in pending_inputs.snapshot_for("conv_a")] == [keep]
-    # Idempotent — resolving an already-removed id does nothing.
-    pending_inputs.resolve("conv_a", drop)
+    # Idempotent — resolving an already-removed id does nothing and returns None.
+    assert pending_inputs.resolve("conv_a", drop) is None
     assert [e["pending_id"] for e in pending_inputs.snapshot_for("conv_a")] == [keep]
 
 

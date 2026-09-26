@@ -705,6 +705,11 @@ async def test_native_message_repeat_with_same_stable_id_forwards_once(
             first = await client.post(f"/v1/sessions/{session_id}/events", json=message)
             assert first.status_code == 202, first.text
             assert message_forwards() == 1
+            # The runner learns the message's id so a failed turn can name it.
+            forwarded_body = json.loads(
+                next(r for r in forwarded if r.url.path.endswith("/events")).content
+            )
+            assert forwarded_body["stable_id"] == "7f3a9c1e5b2d4f6a8c0e1d2b3a4f5c6d"
 
             second = await client.post(f"/v1/sessions/{session_id}/events", json=message)
             assert second.status_code == 202, second.text

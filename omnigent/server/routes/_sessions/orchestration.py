@@ -2742,26 +2742,35 @@ async def _settle_undelivered_native_input(
     conversation_store: ConversationStore | None,
     session_id: str,
     response_id: str | None,
+    input_stable_id: str | None,
 ) -> None:
     """
-    Commit the oldest queued web message as a user item after a failed native turn.
+    Commit a failed native turn's own queued web message as a user item.
 
     Only native-terminal sessions queue web messages: the transcript forwarder
-    normally mirrors each one back and drains its entry. A queued entry at the
-    moment the runner reports the turn failed is a message the harness never
-    received. Left in the queue it lingers for the TTL and the next mirrored
-    message drains it instead of its own, so the transcript shows the reply
-    above a still-queued bubble and the failed message vanishes on reload.
-    Draining is FIFO, matching the mirror path.
+    normally mirrors each one back and drains its entry. When the runner
+    reports the turn failed and names the message it carried
+    (``input_stable_id``), an entry still queued under that id is a message the
+    harness never received. Left in the queue it lingers for the TTL and the
+    next mirrored message drains it instead of its own, so the transcript shows
+    the reply above a still-queued bubble and the failed message vanishes on
+    reload. Settlement is by identity, never by queue order: a turn that fails
+    after its message was mirrored (entry already drained) settles nothing, so
+    a later message still buffered in the runner keeps its own entry.
 
     :param conversation_store: Store to append to; ``None`` skips persistence.
     :param session_id: Session/conversation id, e.g. ``"conv_abc123"``.
     :param response_id: The failed turn's response id, so the message groups
         with the error item persisted right after it; ``None`` mints one.
+    :param input_stable_id: The web stable id the runner stamped on the failed
+        turn; ``None`` (an API client without one) settles nothing.
     """
-    if conversation_store is None or not pending_inputs.has_pending(session_id):
+    if conversation_store is None or input_stable_id is None:
         return
-    drained = pending_inputs.resolve_oldest(session_id)
+    pending_id = pending_inputs.pending_id_for_stable_id(session_id, input_stable_id)
+    if pending_id is None:
+        return
+    drained = pending_inputs.resolve(session_id, pending_id)
     if drained is None:
         return
     item = NewConversationItem(
@@ -4957,6 +4966,12 @@ def _build_native_terminal_message_event(
         # which always includes it.
         "agent_id": conv.agent_id,
     }
+    # The web's stable id for this message rides along so the runner can name
+    # it on a turn that fails before the harness receives it; the relay then
+    # settles exactly that queued entry (see _settle_undelivered_native_input).
+    raw_stable_id = body.data.get("stable_id")
+    if isinstance(raw_stable_id, str) and re.fullmatch(r"[0-9a-f]{32}", raw_stable_id):
+        event["stable_id"] = raw_stable_id
     # Carry the persisted override in-band like the non-native forwards: a
     # runner whose session cache is cold (fresh process, missed init) must
     # not resolve this turn from the spec and evict the override harness.
@@ -7329,8 +7344,12 @@ async def _relay_runner_stream_once(
                         # The runner could not hand this turn to a native
                         # harness, so the web message it carried was never
                         # mirrored back: commit it ahead of the error item.
+                        raw_input_stable_id = event.get("input_stable_id")
                         await _settle_undelivered_native_input(
-                            conversation_store, session_id, current_response_id
+                            conversation_store,
+                            session_id,
+                            current_response_id,
+                            raw_input_stable_id if isinstance(raw_input_stable_id, str) else None,
                         )
                     error_item = _error_item_from_sse(
                         event,

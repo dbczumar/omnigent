@@ -12569,3 +12569,57 @@ async def test_sign_in_pending_failure_posts_a_notice_once_the_agent_is_ready(
     assert item["message"] == f"{agent} is ready. Send your message again."
     # The prompt screen was seen (and ignored) before the agent came up.
     assert reads >= 3
+
+
+@pytest.mark.asyncio
+async def test_failed_turn_event_names_the_web_message_it_carried() -> None:
+    """
+    ``response.failed`` carries the web message's stable id.
+
+    The server settles a failed native turn's queued web message by this id,
+    so a turn that fails must say which message it carried; the id rides in on
+    the forwarded message as ``stable_id`` and leaves as ``input_stable_id``.
+    """
+    conv = "conv_stable_id_on_failure"
+
+    async def _spec_resolver(agent_id: str, session_id: str | None = None) -> AgentSpec:
+        del agent_id, session_id
+        return AgentSpec(
+            spec_version=1,
+            name="stable-id-agent",
+            executor=ExecutorSpec(type="omnigent", config={"harness": "codex-native"}),
+        )
+
+    published: list[dict[str, Any]] = []
+    app = create_runner_app(
+        process_manager=cast(
+            HarnessProcessManager,
+            _FakeProcessManager(_FakeHarnessClient([_SSE_RESPONSE_CREATED, _SSE_RESPONSE_FAILED])),
+        ),
+        spec_resolver=_spec_resolver,
+        server_client=NullServerClient(),  # type: ignore[arg-type]
+    )
+    async with _runner_test_client(app) as http:
+        response = await http.post(
+            f"/v1/sessions/{conv}/events",
+            json={
+                "type": "message",
+                "role": "user",
+                "agent_id": "ag_stable",
+                "model": "x",
+                "content": [{"role": "user", "content": "hi"}],
+                "stable_id": "7f3a9c1e5b2d4f6a8c0e1d2b3a4f5c6d",
+            },
+        )
+        assert response.status_code == 202
+        await _await_bg_turn_task(conv)
+        queue = app.state.session_event_queues.get(conv)
+        for _ in range(100):
+            while queue is not None and not queue.empty():
+                published.append(queue.get_nowait())
+            if any(e.get("type") == "response.failed" for e in published):
+                break
+            await asyncio.sleep(0.02)
+    failed = [e for e in published if e.get("type") == "response.failed"]
+    assert failed, "response.failed was not published"
+    assert failed[0]["input_stable_id"] == "7f3a9c1e5b2d4f6a8c0e1d2b3a4f5c6d"
