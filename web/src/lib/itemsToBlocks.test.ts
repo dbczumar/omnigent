@@ -326,7 +326,7 @@ describe("itemsToBlocks — flat shape", () => {
         type: "error",
         status: "completed",
         source: "harness",
-        code: "native_startup_pending_sign_in",
+        code: "databricks_sign_in_pending",
         message: "Codex is waiting for a sign-in in this session's terminal.",
         title: "Codex is waiting for a sign-in",
         remediation: "Open https://signin.example.com/device and enter code HQ7M-2KPD.",

@@ -83,8 +83,8 @@ const FAILURE_CODE_DESCRIPTIONS: Record<string, string> = {
   codex_thread_reset:
     "Codex hit an error reloading the earlier transcript, so it started a fresh thread.",
   codex_turn_error: "Codex ran into an error during this turn.",
-  native_startup_pending_sign_in: "The agent is waiting for a sign-in.",
-  native_startup_pending: "The agent is still starting in the session terminal.",
+  databricks_sign_in_pending: "The agent is waiting for a Databricks sign-in.",
+  agent_startup_pending: "The agent is still starting in the session terminal.",
   codex_thread_not_started: "Codex stopped before it could start, so this turn never ran.",
   native_turn_error: "The agent ran into an error during this turn.",
   rate_limit_exceeded: "The model's rate limit was reached. You can retry this turn.",
@@ -127,7 +127,7 @@ const ADDRESS_PATTERN = /https?:\/\/[^\s<>"'`)\]]+/g;
 // Failures whose next step is a launcher sign-in. The card offers to open the
 // live link, fetched from the host on click: the link is a one-time URL bound
 // to the launcher process, so no copy of it is kept in the transcript.
-const SIGN_IN_PENDING_CODES = new Set(["native_startup_pending_sign_in"]);
+const SIGN_IN_PENDING_CODES = new Set(["databricks_sign_in_pending"]);
 
 /** Render text with each address as a link that opens in a new tab. */
 function linkify(text: string): ReactNode[] {

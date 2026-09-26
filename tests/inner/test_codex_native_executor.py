@@ -1603,7 +1603,7 @@ def test_run_turn_surfaces_coded_startup_failure(
     write_bridge_startup_error(
         tmp_path,
         "Codex is waiting for a sign-in in this session's terminal.",
-        code="native_startup_pending_sign_in",
+        code="databricks_sign_in_pending",
         title="Codex is waiting for a sign-in",
         remediation="Open https://signin.example.com/device and enter code HQ7M-2KPD.",
     )
@@ -1615,7 +1615,7 @@ def test_run_turn_surfaces_coded_startup_failure(
     error = events[0]
     assert isinstance(error, ExecutorError)
     assert error.message == "Codex is waiting for a sign-in in this session's terminal."
-    assert error.code == "native_startup_pending_sign_in"
+    assert error.code == "databricks_sign_in_pending"
     assert error.title == "Codex is waiting for a sign-in"
     assert error.remediation is not None
     assert "HQ7M-2KPD" in error.remediation

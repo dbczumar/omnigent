@@ -586,13 +586,13 @@ def test_bridge_startup_failure_round_trips_structured_fields(bridge_dir: Path) 
     write_bridge_startup_error(
         bridge_dir,
         "Codex is waiting for a sign-in in this session's terminal.",
-        code="native_startup_pending_sign_in",
+        code="databricks_sign_in_pending",
         title="Codex is waiting for a sign-in",
         remediation="Open https://signin.example.com/device and enter code HQ7M-2KPD.",
     )
     failure = read_bridge_startup_failure(bridge_dir)
     assert failure is not None
-    assert failure.code == "native_startup_pending_sign_in"
+    assert failure.code == "databricks_sign_in_pending"
     assert failure.title == "Codex is waiting for a sign-in"
     assert failure.remediation is not None
     assert "HQ7M-2KPD" in failure.remediation

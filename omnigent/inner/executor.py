@@ -350,7 +350,7 @@ class ExecutorError(ExecutorEvent):
         failure. Set only when no prompt or tool work remains in progress.
         Defaults to ``False`` so failed turns receive normal teardown.
     :param code: Semantic failure code the turn error should carry, e.g.
-        ``"native_startup_pending_sign_in"``. ``None`` lets the harness adapter
+        ``"databricks_sign_in_pending"``. ``None`` lets the harness adapter
         fall back to its generic classification of the failure.
     :param title: Short headline for the error card, e.g. ``"Codex is waiting
         for a sign-in"``, or ``None``.

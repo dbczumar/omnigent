@@ -119,7 +119,7 @@ def test_response_failed_keeps_title_cause_and_remediation() -> None:
             "source": "harness",
             "response": {
                 "error": {
-                    "code": "native_startup_pending_sign_in",
+                    "code": "databricks_sign_in_pending",
                     "message": "Codex is waiting for a sign-in in this session's terminal.",
                     "title": "Codex is waiting for a sign-in",
                     "remediation": (

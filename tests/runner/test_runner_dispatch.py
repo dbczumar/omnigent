@@ -1624,11 +1624,11 @@ def test_harness_error_response_error_parses_runner_error_bodies(
         # web UI can de-duplicate it against the persisted error item.
         (
             {
-                "code": "native_startup_pending_sign_in",
+                "code": "databricks_sign_in_pending",
                 "message": "Codex is waiting for a sign-in.",
             },
             {
-                "code": "native_startup_pending_sign_in",
+                "code": "databricks_sign_in_pending",
                 "message": "Codex is waiting for a sign-in.",
             },
         ),

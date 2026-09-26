@@ -5489,7 +5489,7 @@ async def _wait_for_codex_thread_or_terminal_exit(
         await asyncio.gather(thread_task, exit_task, return_exceptions=True)
 
 
-async def _record_native_startup_pending(
+async def _record_agent_startup_pending(
     *,
     session_id: str,
     bridge_dir: Path,
@@ -5526,12 +5526,12 @@ async def _record_native_startup_pending(
         _logger.debug("Codex startup pane read failed for %s", session_id, exc_info=True)
     prompt = detect_sign_in_prompt(screen)
     if prompt is not None:
-        code = "native_startup_pending_sign_in"
+        code = "databricks_sign_in_pending"
         title = "Codex is waiting for a sign-in"
         message = "Codex is waiting for a sign-in in this session's terminal."
         remediation = sign_in_next_step("Codex")
     else:
-        code = "native_startup_pending"
+        code = "agent_startup_pending"
         title = "Codex is still starting"
         message = (
             "Codex is still starting in this session's terminal and may be waiting "
@@ -5547,7 +5547,7 @@ async def _record_native_startup_pending(
         title=title,
         remediation=remediation,
     )
-    pending_event = debug_event("native_startup_pending", session_id=session_id)
+    pending_event = debug_event("agent_startup_pending", session_id=session_id)
     pending_event["attributes"] = {
         "harness": "codex-native",
         "phase": "thread_discovery",
@@ -5623,7 +5623,7 @@ async def _codex_discover_thread_and_forward(
         allowance. ``None`` preserves the forwarder's ordinary 30-second
         default. When the budget expires while *terminal_instance* is still
         running, the wait records a pending cause (see
-        :func:`_record_native_startup_pending`) and continues without a
+        :func:`_record_agent_startup_pending`) and continues without a
         deadline; only a pane exit or an ended event stream tears down.
     :param subagent_router: Router this terminal launch started, torn down
         in the ``finally``. Passed so a late teardown cannot close the
@@ -5712,7 +5712,7 @@ async def _codex_discover_thread_and_forward(
                     # The pane is still running (e.g. parked on a launcher
                     # sign-in prompt). Record why chat turns cannot run yet and
                     # keep listening; a pane exit still ends discovery below.
-                    await _record_native_startup_pending(
+                    await _record_agent_startup_pending(
                         session_id=session_id,
                         bridge_dir=bridge_dir,
                         terminal_instance=terminal_instance,

@@ -3550,10 +3550,10 @@ async def test_codex_discover_thread_and_forward_records_accurate_startup_error(
         (
             "dbexec: launcher 1.2.3\nSign in to continue:\n"
             "  https://signin.example.com/device\n  code: HQ7M-2KPD\nwaiting for sign-in...\n",
-            "native_startup_pending_sign_in",
+            "databricks_sign_in_pending",
             "Codex is waiting for a sign-in",
         ),
-        ("Loading configuration...\n", "native_startup_pending", "Codex is still starting"),
+        ("Loading configuration...\n", "agent_startup_pending", "Codex is still starting"),
     ],
 )
 @pytest.mark.asyncio
@@ -3666,7 +3666,7 @@ async def test_codex_discover_thread_and_forward_waits_while_terminal_alive(
     # The transcript never carries the one-time address or code; the card
     # fetches the live link from the host when clicked.
     assert "http" not in pending.remediation
-    if expected_code == "native_startup_pending_sign_in":
+    if expected_code == "databricks_sign_in_pending":
         assert pending.remediation.startswith("Open the sign-in link and sign in. Codex continues")
     # The backend outlived the deadline and closed only after forwarding ended.
     assert timeline == ["thread_started", "app_server_closed"]

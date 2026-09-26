@@ -15334,7 +15334,7 @@ describe("beginLocalConversation — optimistic model seed", () => {
 
 describe("chatStore — one error card per failed turn", () => {
   const error = {
-    code: "native_startup_pending_sign_in",
+    code: "databricks_sign_in_pending",
     message: "Codex is waiting for a sign-in in this session's terminal.",
   };
   const errorBlocks = () => useChatStore.getState().blocks.filter((b) => b.type === "error");

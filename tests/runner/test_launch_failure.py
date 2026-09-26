@@ -226,8 +226,8 @@ def test_genuine_reauth_codex_reauth_required_is_preserved() -> None:
         ("context_length_exceeded", "context window"),
         ("rate_limit_exceeded", "You can retry this turn"),
         ("budget_exhausted", "budget"),
-        ("native_startup_pending_sign_in", "sign-in"),
-        ("native_startup_pending", "still starting"),
+        ("databricks_sign_in_pending", "Databricks sign-in"),
+        ("agent_startup_pending", "still starting"),
         ("codex_thread_not_started", "never ran"),
     ],
 )

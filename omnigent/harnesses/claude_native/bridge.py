@@ -581,7 +581,7 @@ class ClaudeSignInPending(RuntimeError):
     :param remediation: The link (and code) to open, phrased as the next step.
     """
 
-    code = "native_startup_pending_sign_in"
+    code = "databricks_sign_in_pending"
 
     def __init__(self, message: str, *, title: str, remediation: str) -> None:
         super().__init__(message)
