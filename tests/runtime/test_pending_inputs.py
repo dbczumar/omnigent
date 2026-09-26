@@ -432,3 +432,18 @@ def test_record_evicts_the_oldest_entry_beyond_the_per_conversation_cap() -> Non
 
     assert len(snapshot) == cap
     assert [entry["pending_id"] for entry in snapshot] == ids[2:]
+
+
+def test_restore_keeps_the_per_conversation_cap() -> None:
+    """Restoring into a queue that refilled meanwhile still honours the cap."""
+    cap = pending_inputs._MAX_ENTRIES_PER_CONVERSATION
+    ids = [pending_inputs.record("conv_a", [_text_block(f"m{i}")]) for i in range(cap)]
+    drained = pending_inputs.resolve_oldest("conv_a")
+    assert drained is not None and drained.pending_id == ids[0]
+    newest = pending_inputs.record("conv_a", [_text_block("newest")])
+
+    pending_inputs.restore("conv_a", drained)
+
+    snapshot = [entry["pending_id"] for entry in pending_inputs.snapshot_for("conv_a")]
+    assert len(snapshot) == cap
+    assert snapshot == [*ids[1:], newest]

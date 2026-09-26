@@ -62,7 +62,11 @@ Limitations (identical to :mod:`pending_elicitations`):
 * Entries do not survive an AP-server restart — acceptable, the loss
   is one in-flight message, same as every other AP-side transient.
 * At most :data:`_MAX_ENTRIES_PER_CONVERSATION` entries per conversation;
-  :func:`record` evicts the oldest beyond that.
+  :func:`record` and :func:`restore` evict the oldest beyond that.
+* An image-only message has no text to match (attachment markers are
+  stripped before matching), so it drains by position; behind a stale head
+  entry its image can land on the wrong message. This is the positional
+  behavior that predates text matching, kept as a known limitation.
 
 A forwarded message the vendor TUI never accepts (runner crash, dropped
 keystrokes) is never persisted, so no mirror drains its entry. The next
@@ -90,10 +94,11 @@ from omnigent.db.workspace_cache import WorkspaceScopedCache
 # transcript round-trip on a busy session still drains normally.
 _TTL_S: float = 600.0
 
-# Hard cap on queued entries per conversation; the oldest entry is evicted
-# when a new one would exceed it. Bounds the snapshot replay and the persist
-# site's append (each skipped entry becomes two rows). Far above any real
-# queue: nobody sends this many messages within the TTL with none echoed back.
+# Hard cap on queued entries per conversation, enforced by :func:`record` and
+# :func:`restore`: the oldest entries are evicted when either would exceed it.
+# Bounds the snapshot replay and the persist site's append (each skipped entry
+# becomes two rows). Far above any real queue: nobody sends this many messages
+# within the TTL with none echoed back.
 _MAX_ENTRIES_PER_CONVERSATION = 64
 
 
@@ -265,9 +270,21 @@ def record(
         )
         entries = _pending.setdefault(conversation_id, {})
         entries[pending_id] = entry
-        while len(entries) > _MAX_ENTRIES_PER_CONVERSATION:
-            entries.pop(next(iter(entries)))
+        _evict_beyond_cap(entries)
     return pending_id
+
+
+def _evict_beyond_cap(entries: dict[str, _Entry]) -> None:
+    """
+    Drop the oldest entries until ``entries`` fits the per-conversation cap.
+
+    Caller must hold :data:`_lock`. Insertion order is age order, so the first
+    keys go first.
+
+    :param entries: One conversation's ``{pending_id: entry}`` map.
+    """
+    while len(entries) > _MAX_ENTRIES_PER_CONVERSATION:
+        entries.pop(next(iter(entries)))
 
 
 def resolve(conversation_id: str, pending_id: str) -> None:
@@ -341,7 +358,9 @@ def restore(conversation_id: str, drained: DrainedInput) -> None:
     Compensation for a drain whose persist turned out to be a duplicate
     (an idempotent external-item append deduplicated the retry): the
     entry belongs to the NEXT user message, and it was the oldest when
-    drained, so it returns to the head to keep FIFO intact.
+    drained, so it returns to the head to keep FIFO intact. The cap still
+    holds: if the queue filled up meanwhile, the oldest entries are
+    evicted, which may be the restored one itself.
 
     :param conversation_id: Conversation/session id, e.g.
         ``"conv_abc123"``.
@@ -357,7 +376,9 @@ def restore(conversation_id: str, drained: DrainedInput) -> None:
     )
     with _lock:
         entries = _pending.get(conversation_id, {})
-        _pending[conversation_id] = {drained.pending_id: entry, **entries}
+        merged = {drained.pending_id: entry, **entries}
+        _evict_beyond_cap(merged)
+        _pending[conversation_id] = merged
 
 
 def resolve_matching_text(conversation_id: str, text: str) -> MatchedDrain:
