@@ -5569,7 +5569,7 @@ async def _record_agent_startup_pending(
     prompt = detect_sign_in_prompt(await _codex_pane_screen(terminal_instance))
     if prompt is not None:
         code = "databricks_sign_in_pending"
-        title = "Codex is waiting for a sign-in"
+        title = "Codex can't start until you sign in to Databricks"
         message = "Codex is waiting for a sign-in in this session's terminal."
         remediation = sign_in_next_step("Codex")
     else:

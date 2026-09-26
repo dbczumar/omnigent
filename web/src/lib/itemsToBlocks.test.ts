@@ -328,12 +328,12 @@ describe("itemsToBlocks — flat shape", () => {
         source: "harness",
         code: "databricks_sign_in_pending",
         message: "Codex is waiting for a sign-in in this session's terminal.",
-        title: "Codex is waiting for a sign-in",
+        title: "Codex can't start until you sign in to Databricks",
         remediation: "Open https://signin.example.com/device and enter code HQ7M-2KPD.",
       },
     ];
     const [error] = itemsToBlocks(items) as ErrorBlock[];
-    expect(error?.title).toBe("Codex is waiting for a sign-in");
+    expect(error?.title).toBe("Codex can't start until you sign in to Databricks");
     expect(error?.remediation).toContain("https://signin.example.com/device");
   });
 

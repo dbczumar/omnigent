@@ -267,7 +267,7 @@ describe("ErrorBanner", () => {
         message="Codex is waiting for a sign-in in this session's terminal."
         source="harness"
         code="databricks_sign_in_pending"
-        title="Codex is waiting for a sign-in"
+        title="Codex can't start until you sign in to Databricks"
         remediation={SIGN_IN_REMEDIATION}
       />,
     );

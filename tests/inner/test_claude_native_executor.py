@@ -1673,7 +1673,7 @@ async def test_run_turn_keeps_the_pane_when_a_sign_in_prompt_blocks_delivery(
         raise ClaudeSignInPending(
             "Claude Code is waiting for a sign-in in this session's terminal, "
             "so the message was not delivered.",
-            title="Claude Code is waiting for a sign-in",
+            title="Claude Code can't start until you sign in to Databricks",
             remediation="Open https://signin.example.com/device and enter code HQ7M-2KPD.",
         )
 
@@ -1699,7 +1699,7 @@ async def test_run_turn_keeps_the_pane_when_a_sign_in_prompt_blocks_delivery(
     error = events[0]
     assert isinstance(error, ExecutorError)
     assert error.code == "databricks_sign_in_pending"
-    assert error.title == "Claude Code is waiting for a sign-in"
+    assert error.title == "Claude Code can't start until you sign in to Databricks"
     assert error.remediation is not None
     assert "HQ7M-2KPD" in error.remediation
 

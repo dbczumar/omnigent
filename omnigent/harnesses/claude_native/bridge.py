@@ -577,7 +577,8 @@ class ClaudeSignInPending(RuntimeError):
     finished from the card's link, so delivery handlers must not reap it.
 
     :param message: Human-readable failure text.
-    :param title: Card headline, e.g. ``"Claude Code is waiting for a sign-in"``.
+    :param title: Card headline, e.g.
+        ``"Claude Code can't start until you sign in to Databricks"``.
     :param remediation: The link (and code) to open, phrased as the next step.
     """
 
@@ -5915,7 +5916,7 @@ def _wait_for_claude_prompt_ready(
             raise ClaudeSignInPending(
                 "Claude Code is waiting for a sign-in in this session's terminal, "
                 "so the message was not delivered.",
-                title="Claude Code is waiting for a sign-in",
+                title="Claude Code can't start until you sign in to Databricks",
                 remediation=sign_in_next_step("Claude Code"),
             )
         sign_in_url = sign_in.url if sign_in is not None else None

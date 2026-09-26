@@ -9008,7 +9008,7 @@ def test_wait_for_claude_prompt_ready_fails_fast_with_the_sign_in_link(
             timeout_s=30.0,
         )
     assert raised.value.code == "databricks_sign_in_pending"
-    assert raised.value.title == "Claude Code is waiting for a sign-in"
+    assert raised.value.title == "Claude Code can't start until you sign in to Databricks"
     # The one-time address stays out of the error text; the card fetches the
     # live link from the host when clicked.
     assert "http" not in raised.value.remediation
