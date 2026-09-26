@@ -977,8 +977,17 @@ class ExecutorAdapter(HarnessApp):
         Unknown types fall back to base class (``type(exception).__name__``).
         """
         from omnigent.errors import OmnigentError
+        from omnigent.inner.model_auth import ProviderAuthRequired
         from omnigent.server.schemas import ErrorDetail
 
+        if isinstance(exception, ProviderAuthRequired):
+            return ErrorDetail(
+                code=exception.code,
+                message=str(exception),
+                title=exception.title,
+                cause=exception.cause,
+                remediation=exception.remediation,
+            )
         if isinstance(exception, InnerExecutorError):
             return ErrorDetail(
                 code=exception.code,
