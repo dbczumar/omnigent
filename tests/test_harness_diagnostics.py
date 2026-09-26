@@ -10,6 +10,7 @@ from omnigent.harnesses.diagnostics import (
     bounded_diagnostic_tail,
     detect_sign_in_prompt,
     sanitize_diagnostic_text,
+    sign_in_next_step,
 )
 
 
@@ -191,3 +192,13 @@ def test_detect_sign_in_prompt_lifts_url_and_code(
 def test_detect_sign_in_prompt_requires_an_address(screen: str | None) -> None:
     """A code without a link gives the user nothing to open, so it is not a prompt."""
     assert detect_sign_in_prompt(screen) is None
+
+
+def test_sign_in_next_step_names_the_agent_and_carries_no_address() -> None:
+    """The next step never embeds the one-time link; the card fetches it live."""
+    step = sign_in_next_step("Codex")
+    assert step == (
+        "Open the sign-in link and sign in. Codex continues on its own once the "
+        "sign-in completes; then send your message again."
+    )
+    assert "http" not in step

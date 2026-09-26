@@ -138,16 +138,19 @@ def detect_sign_in_prompt(screen: str | None) -> SignInPrompt | None:
     return SignInPrompt(url=url, code=code)
 
 
-def sign_in_next_step(prompt: SignInPrompt, agent: str) -> str:
-    """Phrase a lifted sign-in prompt as the next step for the error card.
+def sign_in_next_step(agent: str) -> str:
+    """Phrase the next step for a card whose harness is waiting on a launcher sign-in.
 
-    :param prompt: The prompt lifted from the pane.
+    The address itself is deliberately left out: it is a one-time device-flow
+    URL bound to the launcher process that printed it, so a copy saved in the
+    transcript would go stale within minutes. The card fetches the live link
+    from the host when the person clicks.
+
     :param agent: The harness's display name, e.g. ``"Codex"`` or ``"Claude Code"``.
-    :returns: e.g. ``"Open https://... and enter code AB12-CD34. Codex continues on
-        its own once the sign-in completes; then send your message again."``
+    :returns: e.g. ``"Open the sign-in link and sign in. Codex continues on its
+        own once the sign-in completes; then send your message again."``
     """
-    step = f"Open {prompt.url}" + (f" and enter code {prompt.code}" if prompt.code else "")
     return (
-        f"{step}. {agent} continues on its own once the sign-in completes; "
-        "then send your message again."
+        f"Open the sign-in link and sign in. {agent} continues on its own once the "
+        "sign-in completes; then send your message again."
     )

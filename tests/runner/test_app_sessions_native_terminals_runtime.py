@@ -3663,9 +3663,11 @@ async def test_codex_discover_thread_and_forward_waits_while_terminal_alive(
     assert pending.code == expected_code
     assert pending.title == expected_title
     assert pending.remediation is not None
+    # The transcript never carries the one-time address or code; the card
+    # fetches the live link from the host when clicked.
+    assert "http" not in pending.remediation
     if expected_code == "native_startup_pending_sign_in":
-        assert "https://signin.example.com/device" in pending.remediation
-        assert "HQ7M-2KPD" in pending.remediation
+        assert pending.remediation.startswith("Open the sign-in link and sign in. Codex continues")
     # The backend outlived the deadline and closed only after forwarding ended.
     assert timeline == ["thread_started", "app_server_closed"]
     # The thread start cleared the pending record and published bridge state.

@@ -123,28 +123,11 @@ function errorHeadline(error: RenderErrorDetails): string {
 
 // An address the user can open, as printed by a launcher or a harness.
 const ADDRESS_PATTERN = /https?:\/\/[^\s<>"'`)\]]+/g;
-// A device code next to it: hyphenated groups, or one 6-9 character group mixing
-// letters and digits. Plain words and short numbers never match.
-const DEVICE_CODE_PATTERN =
-  /\b(?:[A-Z0-9]{4,8}-[A-Z0-9]{4,8}|(?=[A-Z0-9]*\d)(?=[A-Z0-9]*[A-Z])[A-Z0-9]{6,9})\b/;
 
-interface RemediationLink {
-  url: string;
-  code: string | null;
-}
-
-/**
- * Lift an address (and any device code) out of a remediation so the card can
- * offer them as actions instead of sending the user to the terminal.
- */
-function remediationLink(remediation: string | undefined): RemediationLink | null {
-  if (!remediation) return null;
-  const match = remediation.match(ADDRESS_PATTERN);
-  if (!match) return null;
-  const url = match[0].replace(/[.,;:]+$/, "");
-  const code = remediation.replace(ADDRESS_PATTERN, " ").match(DEVICE_CODE_PATTERN);
-  return { url, code: code ? code[0] : null };
-}
+// Failures whose next step is a launcher sign-in. The card offers to open the
+// live link, fetched from the host on click: the link is a one-time URL bound
+// to the launcher process, so no copy of it is kept in the transcript.
+const SIGN_IN_PENDING_CODES = new Set(["native_startup_pending_sign_in"]);
 
 /** Render text with each address as a link that opens in a new tab. */
 function linkify(text: string): ReactNode[] {
@@ -262,7 +245,7 @@ export function ErrorBanner({
     if (parts.length === 0) parts.push(parsed.message || code || headline);
     return parts.join("\n\n");
   }, [cause, code, headline, parsed.message, remediation]);
-  const signIn = useMemo(() => remediationLink(remediation), [remediation]);
+  const signIn = SIGN_IN_PENDING_CODES.has(code);
   const diagnostics = useMemo(
     () =>
       [
@@ -346,13 +329,12 @@ export function ErrorBanner({
   const openSignIn = async () => {
     if (signInBusy) return;
     const sessionId = useChatStore.getState().conversationId;
-    // Outside a live session (stories, history views) the saved link is all we
-    // have; open it directly. Otherwise pre-open the tab in the click so the
-    // navigation after the round trip is not treated as a popup.
     if (!sessionId) {
-      window.open(signIn?.url ?? "", "_blank", "noopener,noreferrer");
+      setSignInNote("Open this session to fetch the current sign-in link.");
       return;
     }
+    // Pre-open the tab in the click so the navigation after the round trip is
+    // not treated as a popup.
     const tab = window.open("", "_blank");
     setSignInBusy(true);
     setSignInNote(null);
@@ -500,12 +482,12 @@ export function ErrorBanner({
               <ExternalLinkIcon className="size-3.5" aria-hidden="true" />
               {signInBusy ? "Fetching link…" : "Open sign-in link"}
             </Button>
-            {(signInCode ?? signIn.code) ? (
+            {signInCode ? (
               <Button
                 type="button"
                 variant="ghost"
                 size="xs"
-                onClick={() => void copy("code", signInCode ?? signIn.code ?? "")}
+                onClick={() => void copy("code", signInCode)}
                 style={{ fontSize: "var(--text-13, 13px)" }}
                 className="h-6 gap-1 rounded-[var(--control-radius,var(--radius-lg))] px-2 leading-5 text-muted-foreground hover:bg-muted hover:text-foreground"
               >
@@ -514,7 +496,7 @@ export function ErrorBanner({
                 ) : (
                   <CopyIcon className="size-3.5" aria-hidden="true" />
                 )}
-                {copiedTarget === "code" ? "Copied" : `Copy code ${signInCode ?? signIn.code}`}
+                {copiedTarget === "code" ? "Copied" : `Copy code ${signInCode}`}
               </Button>
             ) : null}
             {signInNote ? (

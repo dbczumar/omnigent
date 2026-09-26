@@ -5529,7 +5529,7 @@ async def _record_native_startup_pending(
         code = "native_startup_pending_sign_in"
         title = "Codex is waiting for a sign-in"
         message = "Codex is waiting for a sign-in in this session's terminal."
-        remediation = sign_in_next_step(prompt, "Codex")
+        remediation = sign_in_next_step("Codex")
     else:
         code = "native_startup_pending"
         title = "Codex is still starting"
@@ -5557,10 +5557,11 @@ async def _record_native_startup_pending(
     }
     _logger.warning(
         "Codex TUI for %s has not started a thread after %.0fs but its pane is alive; "
-        "recorded %s and waiting without a deadline",
+        "recorded %s and waiting without a deadline%s",
         session_id,
         timeout_seconds,
         code,
+        f" (sign-in prompt: {prompt.url})" if prompt is not None else "",
         extra=pending_event,
     )
 

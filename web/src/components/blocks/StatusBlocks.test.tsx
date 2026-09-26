@@ -258,7 +258,7 @@ describe("ErrorBanner", () => {
   });
 
   const SIGN_IN_REMEDIATION =
-    "Open https://signin.example.com/device and enter code HQ7M-2KPD. " +
+    "Open the sign-in link and sign in. " +
     "Codex continues on its own once the sign-in completes; then send your message again.";
 
   function renderSignInCard() {
@@ -273,19 +273,20 @@ describe("ErrorBanner", () => {
     );
   }
 
-  it("offers the sign-in link and code from the remediation on the card face", () => {
+  it("offers the sign-in action by failure code, with no stored link or code", () => {
+    // The card text carries no address: the link is a one-time URL bound to the
+    // launcher process, so the button fetches the live one from the host.
     useChatStore.setState({ conversationId: null });
     const open = vi.spyOn(window, "open").mockReturnValue(null);
     renderSignInCard();
-    // Outside a live session the saved link is all there is; it opens directly.
+    expect(screen.getByRole("button", { name: "Open sign-in link" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Copy code/ })).not.toBeInTheDocument();
+    // Without a live session there is nothing to fetch, and nothing to open.
     fireEvent.click(screen.getByRole("button", { name: "Open sign-in link" }));
-    expect(open).toHaveBeenCalledWith(
-      "https://signin.example.com/device",
-      "_blank",
-      "noopener,noreferrer",
+    expect(open).not.toHaveBeenCalled();
+    expect(screen.getByTestId("error-sign-in-note")).toHaveTextContent(
+      "Open this session to fetch the current sign-in link.",
     );
-    fireEvent.click(screen.getByRole("button", { name: "Copy code HQ7M-2KPD" }));
-    expect(copyText).toHaveBeenCalledWith("HQ7M-2KPD");
     // The actions sit on the collapsed face and must not toggle the pill open.
     expect(screen.queryByText("Message")).not.toBeInTheDocument();
     open.mockRestore();
@@ -348,7 +349,7 @@ describe("ErrorBanner", () => {
     );
   });
 
-  it("shows no sign-in actions when the remediation has no address", () => {
+  it("shows no sign-in actions for failures that are not a pending sign-in", () => {
     render(
       <ErrorBanner
         message="raw diagnostics"

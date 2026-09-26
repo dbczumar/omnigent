@@ -9009,10 +9009,12 @@ def test_wait_for_claude_prompt_ready_fails_fast_with_the_sign_in_link(
         )
     assert raised.value.code == "native_startup_pending_sign_in"
     assert raised.value.title == "Claude Code is waiting for a sign-in"
-    assert "https://signin.example.com/oauth2/v1/authorize?client_id=abc&state=xyz" in (
-        raised.value.remediation
+    # The one-time address stays out of the error text; the card fetches the
+    # live link from the host when clicked.
+    assert "http" not in raised.value.remediation
+    assert raised.value.remediation.startswith(
+        "Open the sign-in link and sign in. Claude Code continues on its own"
     )
-    assert "Claude Code continues on its own" in raised.value.remediation
     # Two plain polls saw the address; each looked again with wrapped rows joined.
     assert captures == [False, True, False, True]
     assert not isinstance(raised.value, claude_native_bridge.ClaudePromptTimeout)

@@ -5916,7 +5916,7 @@ def _wait_for_claude_prompt_ready(
                 "Claude Code is waiting for a sign-in in this session's terminal, "
                 "so the message was not delivered.",
                 title="Claude Code is waiting for a sign-in",
-                remediation=sign_in_next_step(sign_in, "Claude Code"),
+                remediation=sign_in_next_step("Claude Code"),
             )
         sign_in_url = sign_in.url if sign_in is not None else None
         now = time.monotonic()
