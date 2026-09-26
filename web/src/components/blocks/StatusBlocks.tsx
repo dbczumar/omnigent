@@ -85,6 +85,7 @@ const FAILURE_CODE_DESCRIPTIONS: Record<string, string> = {
   codex_turn_error: "Codex ran into an error during this turn.",
   databricks_sign_in_pending: "The agent is waiting for a Databricks sign-in.",
   agent_startup_pending: "The agent is still starting in the session terminal.",
+  databricks_sign_in_completed: "The Databricks sign-in completed and the agent is ready.",
   codex_thread_not_started: "Codex stopped before it could start, so this turn never ran.",
   native_turn_error: "The agent ran into an error during this turn.",
   rate_limit_exceeded: "The model's rate limit was reached. You can retry this turn.",
@@ -128,6 +129,9 @@ const ADDRESS_PATTERN = /https?:\/\/[^\s<>"'`)\]]+/g;
 // live link, fetched from the host on click: the link is a one-time URL bound
 // to the launcher process, so no copy of it is kept in the transcript.
 const SIGN_IN_PENDING_CODES = new Set(["databricks_sign_in_pending"]);
+// A sign-in that completed. Its one line of body shows without a click: the
+// headline alone ("Signed in to Databricks") does not say what to do next.
+const SIGN_IN_COMPLETED_CODES = new Set(["databricks_sign_in_completed"]);
 
 /** Render text with each address as a link that opens in a new tab. */
 function linkify(text: string): ReactNode[] {
@@ -246,6 +250,7 @@ export function ErrorBanner({
     return parts.join("\n\n");
   }, [cause, code, headline, parsed.message, remediation]);
   const signIn = SIGN_IN_PENDING_CODES.has(code);
+  const signInComplete = notice && SIGN_IN_COMPLETED_CODES.has(code);
   const diagnostics = useMemo(
     () =>
       [
@@ -464,6 +469,15 @@ export function ErrorBanner({
             <XIcon className="size-4" aria-hidden="true" />
           </Button>
         </div>
+        {signInComplete && parsed.message ? (
+          <p
+            data-testid="error-notice-body"
+            onClick={(event) => event.stopPropagation()}
+            className="mt-[2px] ml-[22px] cursor-auto text-sm leading-6 text-muted-foreground"
+          >
+            {parsed.message}
+          </p>
+        ) : null}
         {signIn ? (
           <div
             data-testid="error-remediation-actions"

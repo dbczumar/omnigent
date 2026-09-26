@@ -2847,6 +2847,10 @@ def _require_full_native_lock_coverage(
     return dispatch
 
 
+# How often the pane behind a sign-in card is read for the sign-in to complete.
+_SIGN_IN_WATCH_INTERVAL_S = 3.0
+
+
 def create_runner_app(
     *,
     process_manager: HarnessProcessManager | None = None,
@@ -3120,6 +3124,8 @@ def create_runner_app(
     _desync_terminalized: dict[str, int] = {}
     app.state.desync_terminalized = _desync_terminalized
     _background_tasks: set[asyncio.Task[Any]] = set()
+    # One watcher per session for a pending Databricks sign-in (see _start_sign_in_watch).
+    _sign_in_watchers: dict[str, asyncio.Task[None]] = {}
     _subagent_recovery_tasks: dict[str, asyncio.Task[None]] = {}
     _subagent_wake_pending: set[str] = set()
     _last_rewake_notice: dict[str, str] = {}
@@ -5483,6 +5489,104 @@ def create_runner_app(
         _task.add_done_callback(_background_tasks.discard)
         _background_tasks.add(_task)
 
+    def _start_sign_in_watch(conv_id: str) -> None:
+        """Watch the pane behind a sign-in card so the chat learns when the sign-in worked."""
+        existing = _sign_in_watchers.get(conv_id)
+        if existing is not None and not existing.done():
+            return
+        task = asyncio.get_running_loop().create_task(
+            _watch_sign_in_completion(conv_id), name=f"sign-in-watch-{conv_id}"
+        )
+        _sign_in_watchers[conv_id] = task
+        task.add_done_callback(_background_tasks.discard)
+        _background_tasks.add(task)
+
+    async def _watch_sign_in_completion(conv_id: str) -> None:
+        """
+        Post one "Signed in to Databricks" notice once the agent behind a sign-in card is ready.
+
+        A turn failed because the session's launcher was parked on a sign-in
+        prompt. This reads the session's running panes until no prompt is on
+        screen and the agent can take a message, then posts the notice. It ends
+        silently when no pane is running any more: the launcher exited, which
+        the next send reports on its own.
+
+        :param conv_id: Session whose turn failed with ``databricks_sign_in_pending``.
+        """
+        from omnigent.harnesses.diagnostics import detect_sign_in_prompt
+
+        harness = _session_harness_name(conv_id)
+        while True:
+            await asyncio.sleep(_SIGN_IN_WATCH_INTERVAL_S)
+            registry = resource_registry.terminal_registry
+            entries = registry.list_for_conversation(conv_id) if registry is not None else []
+            screens: list[str] = []
+            for entry in entries:
+                if not entry.instance.running:
+                    continue
+                result = await entry.instance.read(join_wrapped=True)
+                screen = result.get("screen") if isinstance(result, dict) else None
+                screens.append(screen if isinstance(screen, str) else "")
+            if not screens:
+                return
+            if any(detect_sign_in_prompt(screen) is not None for screen in screens):
+                continue
+            if _sign_in_agent_ready(conv_id, harness, screens):
+                await _post_sign_in_completed_notice(conv_id, harness)
+                return
+
+    def _sign_in_agent_ready(conv_id: str, harness: str | None, screens: list[str]) -> bool:
+        """Return whether the agent can take a message now that no sign-in prompt is on screen."""
+        if harness == "codex-native":
+            from omnigent.harnesses.codex_native.bridge import (
+                bridge_dir_for_bridge_id,
+                read_bridge_state,
+            )
+
+            # Thread discovery publishes the bridge state the moment the TUI starts a thread.
+            return read_bridge_state(bridge_dir_for_bridge_id(conv_id)) is not None
+        if harness == "claude-native":
+            from omnigent.harnesses.claude_native.bridge import _claude_prompt_rendered
+
+            return any(_claude_prompt_rendered(screen) for screen in screens)
+        return True
+
+    async def _post_sign_in_completed_notice(conv_id: str, harness: str | None) -> None:
+        """Append the neutral "Signed in to Databricks" notice to the session transcript."""
+        agent = {"codex-native": "Codex", "claude-native": "Claude Code"}.get(
+            harness or "", "The agent"
+        )
+        try:
+            resp = await server_client.post(
+                f"/v1/sessions/{conv_id}/events",
+                json={
+                    "type": "external_conversation_item",
+                    "data": {
+                        "item_type": "error",
+                        "item_data": {
+                            "source": "harness",
+                            "code": "databricks_sign_in_completed",
+                            "title": "Signed in to Databricks",
+                            "message": f"{agent} is ready. Send your message again.",
+                            "level": "info",
+                        },
+                    },
+                },
+                timeout=10.0,
+            )
+            resp.raise_for_status()
+        except (httpx.HTTPError, RuntimeError):
+            _logger.warning(
+                "Failed to post the sign-in completed notice for %s", conv_id, exc_info=True
+            )
+            return
+        _logger.info(
+            "Databricks sign-in completed for %s; %s is ready",
+            conv_id,
+            agent,
+            extra={"session_id": conv_id},
+        )
+
     async def _persist_cancellation_items(
         conv_id: str,
         items: list[_JsonObject],
@@ -7606,14 +7710,17 @@ def create_runner_app(
             if not has_buffered and not _suppress_status:
                 _publish_turn_status(conv_id, "idle")
         elif error is not None:
+            normalized_error = _normalize_turn_error(error)
             if not _suppress_status:
                 _publish_turn_status(
                     conv_id,
                     "failed",
-                    error=_normalize_turn_error(error),
+                    error=normalized_error,
                     source_error=error,
                     response_id=owner_response_id,
                 )
+            if normalized_error.get("code") == "databricks_sign_in_pending":
+                _start_sign_in_watch(conv_id)
         else:
             if not has_buffered and not _suppress_status:
                 children = _subagent_work_by_parent.get(conv_id, set())

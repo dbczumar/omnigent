@@ -12426,3 +12426,146 @@ async def test_send_by_session_id_reuses_running_child_without_restamp() -> None
     assert len(event_posts) == 1
     assert event_posts[0]["created_by"] == "alice@example.com"
     assert event_posts[0]["data"]["content"][0]["text"] == "please stop and report"
+
+
+_SSE_RESPONSE_FAILED_SIGN_IN = (
+    "event: response.failed\ndata: "
+    '{"type":"response.failed","response":{"status":"failed"},'
+    '"error":{"message":"The agent is waiting for a sign-in in this session\'s terminal.",'
+    '"code":"databricks_sign_in_pending"}}\n\n'
+)
+_SIGN_IN_PROMPT_SCREEN = (
+    "dbcert: If the browser does not open automatically, please open the following URL:\n"
+    "\n\thttps://databricks.okta.com/oauth2/v1/authorize?client_id=0oa1&state=T4IU\n\n"
+)
+_SIGNED_IN_SCREENS = {
+    # Codex draws inline: dbcert's lines stay above its banner.
+    "codex-native": (
+        _SIGN_IN_PROMPT_SCREEN + "dbcert: All credentials successfully written\n"
+        "╭── OpenAI Codex (v0.156.1) ──╮\n"
+        "› Ask Codex to do anything\n"
+    ),
+    # Claude Code takes the alternate screen: only its composer is visible.
+    "claude-native": "─" * 16 + "\n❯ \n" + "─" * 16 + "\n  Opus 4.8\n",
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("harness", ["codex-native", "claude-native"])
+async def test_sign_in_pending_failure_posts_a_notice_once_the_agent_is_ready(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    harness: str,
+) -> None:
+    """
+    A turn that failed on a pending Databricks sign-in is followed by one "signed in" notice.
+
+    The runner watches the session's pane after the failure. While the sign-in
+    prompt is on screen nothing is posted. Once the prompt is gone and the
+    agent can take a message (Codex has published its bridge state, Claude Code
+    shows its composer), one neutral notice lands in the transcript so the
+    person knows the sign-in worked and can resend.
+    """
+    import omnigent.runner.app as runner_app
+    from omnigent.harnesses.codex_native import bridge as codex_bridge
+    from omnigent.terminals import TerminalRegistry
+    from tests.runner.helpers import NullServerClient, make_test_terminal_instance
+
+    conv = f"conv_signin_{harness.replace('-', '_')}"
+    monkeypatch.setattr(runner_app, "_SIGN_IN_WATCH_INTERVAL_S", 0.01)
+    monkeypatch.setattr(codex_bridge, "_BRIDGE_ROOT", tmp_path / "bridges")
+
+    class _RecordingServerClient(NullServerClient):
+        def __init__(self) -> None:
+            self.posts: list[tuple[str, Any]] = []
+
+        async def post(self, url: str, **kwargs: Any) -> Any:
+            self.posts.append((url, kwargs.get("json")))
+            return await super().post(url, **kwargs)
+
+    reads = 0
+
+    async def _read(scrollback: int = 0, *, join_wrapped: bool = False) -> dict[str, object]:
+        nonlocal reads
+        del scrollback, join_wrapped
+        reads += 1
+        if reads < 3:
+            return {"screen": _SIGN_IN_PROMPT_SCREEN}
+        if harness == "codex-native":
+            # Thread discovery publishes the bridge state as the TUI starts a thread.
+            codex_bridge.write_bridge_state(
+                codex_bridge.bridge_dir_for_bridge_id(conv),
+                codex_bridge.CodexNativeBridgeState(
+                    session_id=conv,
+                    socket_path="ws://127.0.0.1:1",
+                    thread_id="019e96aa-abcd-7343-8d3b-6f914d60936b",
+                    codex_home=str(tmp_path / "codex-home"),
+                    cwd=str(tmp_path),
+                ),
+            )
+        return {"screen": _SIGNED_IN_SCREENS[harness]}
+
+    instance = make_test_terminal_instance("agent", "main", tmp_path)
+    instance.read = _read  # type: ignore[method-assign]
+    registry = TerminalRegistry(conversation_link_base_url="http://127.0.0.1:8000")
+    registry._by_conversation.setdefault(conv, {})[(instance.name, instance.session_key)] = (
+        instance
+    )
+
+    async def _spec_resolver(agent_id: str, session_id: str | None = None) -> AgentSpec:
+        del agent_id, session_id
+        return AgentSpec(
+            spec_version=1,
+            name="sign-in-agent",
+            executor=ExecutorSpec(type="omnigent", config={"harness": harness}),
+        )
+
+    server_client = _RecordingServerClient()
+    app = create_runner_app(
+        process_manager=_FakeProcessManager(  # type: ignore[arg-type]
+            _FakeHarnessClient([_SSE_RESPONSE_CREATED, _SSE_RESPONSE_FAILED_SIGN_IN])
+        ),
+        spec_resolver=_spec_resolver,
+        server_client=server_client,  # type: ignore[arg-type]
+        terminal_registry=registry,
+    )
+
+    def _notices() -> list[Any]:
+        return [
+            body
+            for url, body in server_client.posts
+            if url.endswith(f"/v1/sessions/{conv}/events")
+            and isinstance(body, dict)
+            and body.get("type") == "external_conversation_item"
+            and body["data"]["item_data"].get("code") == "databricks_sign_in_completed"
+        ]
+
+    async with _runner_test_client(app) as http:
+        response = await http.post(
+            f"/v1/sessions/{conv}/events",
+            json={
+                "type": "message",
+                "role": "user",
+                "agent_id": "ag_sign_in",
+                "model": "x",
+                "content": [{"role": "user", "content": "hi"}],
+            },
+        )
+        assert response.status_code == 202
+        await _await_bg_turn_task(conv)
+        for _ in range(200):
+            if _notices():
+                break
+            await asyncio.sleep(0.01)
+        # Let the watcher wind down before the app is torn down.
+        await asyncio.sleep(0.05)
+
+    (notice,) = _notices()
+    item = notice["data"]["item_data"]
+    agent = "Codex" if harness == "codex-native" else "Claude Code"
+    assert notice["data"]["item_type"] == "error"
+    assert item["level"] == "info"
+    assert item["title"] == "Signed in to Databricks"
+    assert item["message"] == f"{agent} is ready. Send your message again."
+    # The prompt screen was seen (and ignored) before the agent came up.
+    assert reads >= 3

@@ -316,6 +316,23 @@ describe("ErrorBanner", () => {
     useChatStore.setState({ conversationId: null });
   });
 
+  it("shows a completed sign-in notice's line without expanding it", () => {
+    render(
+      <ErrorBanner
+        message="Codex is ready. Send your message again."
+        source="harness"
+        code="databricks_sign_in_completed"
+        title="Signed in to Databricks"
+        level="info"
+      />,
+    );
+    expect(screen.getByTestId("error-headline")).toHaveTextContent("Signed in to Databricks");
+    expect(screen.getByTestId("error-notice-body")).toHaveTextContent(
+      "Codex is ready. Send your message again.",
+    );
+    expect(screen.queryByRole("button", { name: "Open sign-in link" })).toBeNull();
+  });
+
   it("explains when no sign-in is pending any more instead of opening a dead link", async () => {
     useChatStore.setState({ conversationId: "conv_live" });
     const tab = { location: { href: "" }, close: vi.fn() };
