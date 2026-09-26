@@ -11088,6 +11088,45 @@ def create_runner_app(
             content=session_resource_view_to_dict(resource),
         )
 
+    @app.get("/v1/sessions/{session_id}/sign-in-link")
+    async def get_session_sign_in_link(session_id: str) -> JSONResponse:
+        """
+        Return the sign-in prompt a session's terminal is showing right now, if any.
+
+        A launcher wrapper can park a native pane on a device-style sign-in
+        (an address to open, often with a code) before the agent runs. The
+        address is bound to that launcher process, so a link saved in an
+        earlier error card goes stale once the process moves on. The web asks
+        here at click time and opens whatever the pane shows now.
+
+        :param session_id: Session/conversation id.
+        :returns: ``{"pending": true, "url", "code", "terminal_id"}`` when a
+            running terminal shows a prompt; ``{"pending": false}`` otherwise.
+        """
+        from omnigent.harnesses.diagnostics import detect_sign_in_prompt
+
+        registry = resource_registry.terminal_registry
+        entries = registry.list_for_conversation(session_id) if registry is not None else []
+        for entry in entries:
+            if not entry.instance.running:
+                continue
+            # Wrapped rows joined: the address is far wider than the pane.
+            result = await entry.instance.read(join_wrapped=True)
+            screen = result.get("screen") if isinstance(result, dict) else None
+            prompt = detect_sign_in_prompt(screen if isinstance(screen, str) else None)
+            if prompt is None:
+                continue
+            return JSONResponse(
+                status_code=200,
+                content={
+                    "pending": True,
+                    "url": prompt.url,
+                    "code": prompt.code,
+                    "terminal_id": terminal_resource_id(entry.terminal_name, entry.session_key),
+                },
+            )
+        return JSONResponse(status_code=200, content={"pending": False, "url": None, "code": None})
+
     @app.post("/v1/sessions/{session_id}/resources/terminals/{terminal_id}/transfer")
     async def transfer_session_terminal(
         session_id: str,

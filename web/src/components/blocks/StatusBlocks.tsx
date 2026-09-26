@@ -32,6 +32,8 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { shortModelName } from "@/components/CostRoutingControl";
 import { copyText } from "@/lib/clipboard";
+import { getSessionSignInLink } from "@/lib/sessionsApi";
+import { useChatStore } from "@/store/chatStore";
 import type { RelatedRenderError, RenderErrorDetails } from "@/lib/renderItems";
 import {
   type RoutingDecisionExtras,
@@ -275,6 +277,11 @@ export function ErrorBanner({
   const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
   const [activeDiagnostics, setActiveDiagnostics] = useState(diagnostics[0]?.id ?? "terminal");
   const [copiedTarget, setCopiedTarget] = useState<string | null>(null);
+  // The card's saved link is bound to the launcher process that printed it, so
+  // the button asks the host for the live prompt at click time.
+  const [signInCode, setSignInCode] = useState<string | null>(null);
+  const [signInNote, setSignInNote] = useState<string | null>(null);
+  const [signInBusy, setSignInBusy] = useState(false);
   const [retrying, setRetrying] = useState(false);
   const [retryError, setRetryError] = useState<string | null>(null);
   const [dismissed, setDismissed] = useState(false);
@@ -334,6 +341,41 @@ export function ErrorBanner({
     setCopiedTarget(target);
     window.clearTimeout(copyResetRef.current);
     copyResetRef.current = window.setTimeout(() => setCopiedTarget(null), 2000);
+  };
+
+  const openSignIn = async () => {
+    if (signInBusy) return;
+    const sessionId = useChatStore.getState().conversationId;
+    // Outside a live session (stories, history views) the saved link is all we
+    // have; open it directly. Otherwise pre-open the tab in the click so the
+    // navigation after the round trip is not treated as a popup.
+    if (!sessionId) {
+      window.open(signIn?.url ?? "", "_blank", "noopener,noreferrer");
+      return;
+    }
+    const tab = window.open("", "_blank");
+    setSignInBusy(true);
+    setSignInNote(null);
+    try {
+      const live = await getSessionSignInLink(sessionId);
+      if (live.pending && live.url) {
+        setSignInCode(live.code);
+        if (tab) tab.location.href = live.url;
+        else window.open(live.url, "_blank", "noopener,noreferrer");
+      } else {
+        tab?.close();
+        setSignInNote(
+          "No sign-in is pending in the terminal any more. Send your message again to get a fresh prompt.",
+        );
+      }
+    } catch (error) {
+      tab?.close();
+      setSignInNote(
+        `Could not reach the host for a fresh link: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    } finally {
+      setSignInBusy(false);
+    }
   };
 
   const retry = async () => {
@@ -447,23 +489,23 @@ export function ErrorBanner({
             className="mx-[4px] mt-[6px] flex flex-wrap items-center gap-[6px]"
           >
             <Button
-              asChild
+              type="button"
               variant="outline"
               size="xs"
+              disabled={signInBusy}
+              onClick={() => void openSignIn()}
               style={{ fontSize: "var(--text-13, 13px)" }}
               className="h-6 gap-1 rounded-[var(--control-radius,var(--radius-lg))] px-2 leading-5"
             >
-              <a href={signIn.url} target="_blank" rel="noreferrer noopener">
-                <ExternalLinkIcon className="size-3.5" aria-hidden="true" />
-                Open sign-in link
-              </a>
+              <ExternalLinkIcon className="size-3.5" aria-hidden="true" />
+              {signInBusy ? "Fetching link…" : "Open sign-in link"}
             </Button>
-            {signIn.code ? (
+            {(signInCode ?? signIn.code) ? (
               <Button
                 type="button"
                 variant="ghost"
                 size="xs"
-                onClick={() => void copy("code", signIn.code ?? "")}
+                onClick={() => void copy("code", signInCode ?? signIn.code ?? "")}
                 style={{ fontSize: "var(--text-13, 13px)" }}
                 className="h-6 gap-1 rounded-[var(--control-radius,var(--radius-lg))] px-2 leading-5 text-muted-foreground hover:bg-muted hover:text-foreground"
               >
@@ -472,8 +514,17 @@ export function ErrorBanner({
                 ) : (
                   <CopyIcon className="size-3.5" aria-hidden="true" />
                 )}
-                {copiedTarget === "code" ? "Copied" : `Copy code ${signIn.code}`}
+                {copiedTarget === "code" ? "Copied" : `Copy code ${signInCode ?? signIn.code}`}
               </Button>
+            ) : null}
+            {signInNote ? (
+              <span
+                role="status"
+                data-testid="error-sign-in-note"
+                className="basis-full text-sm leading-5 text-muted-foreground"
+              >
+                {signInNote}
+              </span>
             ) : null}
           </div>
         ) : null}

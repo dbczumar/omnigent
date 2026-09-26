@@ -1721,6 +1721,28 @@ async def test_create_terminal_surfaces_runner_error_without_crashing(
 
 
 @pytest.mark.asyncio
+async def test_sign_in_link_proxies_to_runner(
+    client: httpx.AsyncClient,
+) -> None:
+    """GET /sign-in-link validates the session, then asks the runner for the live prompt."""
+    path = "/v1/sessions/79b22ebd2309e48fdeb450c65611d51b/sign-in-link"
+    payload = {
+        "pending": True,
+        "url": "https://signin.example.com/device",
+        "code": "HQ7M-2KPD",
+        "terminal_id": "terminal_claude_main",
+    }
+    fake_runner = _FakeRunnerClient(responses={path: (200, payload)})
+    set_runner_router(_FakeRunnerRouter(fake_runner))  # type: ignore[arg-type]
+
+    resp = await client.get(path)
+
+    assert resp.status_code == 200
+    assert resp.json() == payload
+    assert fake_runner.calls == [("GET", path)]
+
+
+@pytest.mark.asyncio
 async def test_delete_terminal_proxies_to_runner(
     client: httpx.AsyncClient,
 ) -> None:
