@@ -194,6 +194,33 @@ def test_detect_sign_in_prompt_requires_an_address(screen: str | None) -> None:
     assert detect_sign_in_prompt(screen) is None
 
 
+@pytest.mark.parametrize(
+    "screen",
+    [
+        # An agent banner quoting its instructions, with a docs pointer.
+        "│ Logfood ingests eng data. Look them up at https://go/eng-data-access.\n"
+        "└ SessionStart says: Open this session in Omnigent: http://127.0.0.1:8931/c/abc\n",
+        # Ordinary tool output.
+        "Opened https://github.com/omnigent-ai/omnigent/pull/3792) for review.\n",
+        "Tracked in https://linear.app/omnigent/issues/OMNI-1006\n",
+    ],
+)
+def test_detect_sign_in_prompt_ignores_ordinary_addresses(screen: str) -> None:
+    """A running agent's screen is full of links; none of them is a sign-in gate."""
+    assert detect_sign_in_prompt(screen) is None
+
+
+def test_detect_sign_in_prompt_accepts_a_device_flow_by_its_instructions() -> None:
+    """A device flow is recognised by its wording or its auth-shaped address."""
+    prompt = detect_sign_in_prompt(
+        "! First copy your one-time code: 1A2B-3C4D\n"
+        "Press Enter to open https://github.com/login/device in your browser...\n"
+    )
+    assert prompt is not None
+    assert prompt.url == "https://github.com/login/device"
+    assert prompt.code == "1A2B-3C4D"
+
+
 def test_sign_in_next_step_names_the_agent_and_carries_no_address() -> None:
     """The next step never embeds the one-time link; the card fetches it live."""
     step = sign_in_next_step("Codex")

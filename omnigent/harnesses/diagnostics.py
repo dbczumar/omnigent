@@ -86,11 +86,17 @@ class SignInPrompt:
 
 
 _SIGN_IN_URL = re.compile(r"https?://[^\s<>\"'`)\]]+")
-# Words a sign-in prompt uses around its address. A welcome screen or a docs
-# link also shows addresses, so an address alone is not a prompt.
-_SIGN_IN_CONTEXT = re.compile(
-    r"sign[- ]?in|log(?:ging)?[- ]?in|authenticat|browser|open the following|"
-    r"device code|verification code|enter (?:the |this )?code",
+# Addresses that are themselves OAuth or device-flow endpoints.
+_SIGN_IN_URL_SHAPE = re.compile(
+    r"oauth|authoriz|/login|signin|sign-in|/sso\b|/device\b|devicelogin", re.IGNORECASE
+)
+# Instructions a launcher prints around the address. An address with neither
+# an auth-shaped path nor one of these nearby is ordinary output (a PR link, a
+# docs pointer in an agent banner), not a gate.
+_SIGN_IN_CUE = re.compile(
+    r"sign[ -]?in|log[ -]?in|logging in|authenticat|verification code|one-time code"
+    r"|device code|enter (?:the |this |your )?code"
+    r"|open (?:the following|this) (?:url|link|address)",
     re.IGNORECASE,
 )
 _SIGN_IN_CODE_LINE = re.compile(r"\bcode\b", re.IGNORECASE)
@@ -107,28 +113,37 @@ def detect_sign_in_prompt(screen: str | None) -> SignInPrompt | None:
     A launcher wrapper can stop before the agent binary runs and print a
     device-code sign-in: an address to open and a short code to enter. The
     runner reads the pane while it waits for the agent to start; this lifts
-    that prompt so the chat can show the link instead of sending the user to
-    the terminal.
+    that prompt so the chat can offer to open the live link.
 
-    The screen must also carry sign-in language (sign in, log in, authenticate,
-    browser, "open the following", a device or verification code): a docs link
-    on a welcome screen is not a prompt. The address is then the first
-    ``http(s)://`` token on screen. The code is the first device-code-shaped
-    token on a line that mentions "code"; the address itself is never taken as
-    the code. An address wrapped across two pane
-    lines is truncated at the wrap, so callers should prefer a wide pane.
+    Only an address that is itself an OAuth or device-flow endpoint, or that
+    sits within a few lines of sign-in instructions, counts. A running agent's
+    screen is full of ordinary addresses (pull requests, docs links in a
+    banner) and none of those is a gate. The code is the first
+    device-code-shaped token on a line that mentions "code"; the address
+    itself is never taken as the code. An address wrapped across two pane
+    lines is truncated at the wrap, so callers should capture with wrapped
+    rows joined.
 
     :param screen: ANSI-stripped terminal screen text, or ``None``.
-    :returns: The prompt, or ``None`` when no address is on screen.
+    :returns: The prompt, or ``None`` when no sign-in address is on screen.
     """
-    if not screen or not _SIGN_IN_CONTEXT.search(screen):
+    if not screen:
         return None
-    url_match = _SIGN_IN_URL.search(screen)
-    if url_match is None:
+    lines = screen.splitlines()
+    url: str | None = None
+    for index, line in enumerate(lines):
+        for match in _SIGN_IN_URL.finditer(line):
+            candidate = match.group(0).rstrip(".,;:")
+            nearby = "\n".join(lines[max(0, index - 3) : index + 3])
+            if _SIGN_IN_URL_SHAPE.search(candidate) or _SIGN_IN_CUE.search(nearby):
+                url = candidate
+                break
+        if url is not None:
+            break
+    if url is None:
         return None
-    url = url_match.group(0).rstrip(".,;:")
     code: str | None = None
-    for line in screen.splitlines():
+    for line in lines:
         if not _SIGN_IN_CODE_LINE.search(line):
             continue
         candidates = _SIGN_IN_CODE.findall(_SIGN_IN_URL.sub(" ", line))
