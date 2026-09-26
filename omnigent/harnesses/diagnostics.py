@@ -100,6 +100,14 @@ _SIGN_IN_CUE = re.compile(
     re.IGNORECASE,
 )
 _SIGN_IN_CODE_LINE = re.compile(r"\bcode\b", re.IGNORECASE)
+# Lines a prompt prints below its address: the code, "waiting for sign-in",
+# "press Enter". Any other output below the address means the launcher has
+# moved on (dbcert's success lines, the agent's own banner) and the address
+# still on screen is stale.
+_SIGN_IN_TRAILER = re.compile(
+    r"\bcode\b|waiting|wait for|press |browser|expire|sign[ -]?in|log[ -]?in|authenticat",
+    re.IGNORECASE,
+)
 # A device code: hyphenated groups, or one 6-9 character group mixing letters
 # and digits. Pure words ("CODE", "ENTER") and short numbers never match.
 _SIGN_IN_CODE = re.compile(
@@ -118,14 +126,18 @@ def detect_sign_in_prompt(screen: str | None) -> SignInPrompt | None:
     Only an address that is itself an OAuth or device-flow endpoint, or that
     sits within a few lines of sign-in instructions, counts. A running agent's
     screen is full of ordinary addresses (pull requests, docs links in a
-    banner) and none of those is a gate. The code is the first
+    banner) and none of those is a gate. The prompt must also still be the
+    launcher's latest output: an agent that draws inline leaves the launcher's
+    lines on screen above its own, so any output below the address other than
+    the prompt's own trailing lines (the code, "waiting for sign-in") means the
+    sign-in already completed and the address is stale. The code is the first
     device-code-shaped token on a line that mentions "code"; the address
     itself is never taken as the code. An address wrapped across two pane
     lines is truncated at the wrap, so callers should capture with wrapped
     rows joined.
 
     :param screen: ANSI-stripped terminal screen text, or ``None``.
-    :returns: The prompt, or ``None`` when no sign-in address is on screen.
+    :returns: The prompt, or ``None`` when no pending sign-in address is on screen.
     """
     if not screen:
         return None
@@ -141,6 +153,8 @@ def detect_sign_in_prompt(screen: str | None) -> SignInPrompt | None:
         if url is not None:
             break
     if url is None:
+        return None
+    if any(line.strip() and not _SIGN_IN_TRAILER.search(line) for line in lines[index + 1 :]):
         return None
     code: str | None = None
     for line in lines:

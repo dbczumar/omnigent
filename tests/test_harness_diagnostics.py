@@ -177,6 +177,15 @@ def test_cookie_redaction_precedes_diagnostic_tail_clipping() -> None:
         ),
         # A numeric-only token is not a device code; the address alone is still useful.
         ("Enter code 123456 at https://x.example/verify.", "https://x.example/verify", None),
+        # dbcert's real prompt: the address is the last thing printed while it waits.
+        (
+            "dbcert: Certificate requested by: omnigent\n"
+            "dbcert: Logging in via SSO...\n"
+            "dbcert: If the browser does not open automatically, please open the following URL:\n"
+            "\n\thttps://databricks.okta.com/oauth2/v1/authorize?client_id=0oa1&state=T4IU\n\n",
+            "https://databricks.okta.com/oauth2/v1/authorize?client_id=0oa1&state=T4IU",
+            None,
+        ),
     ],
 )
 def test_detect_sign_in_prompt_lifts_url_and_code(
@@ -207,6 +216,27 @@ def test_detect_sign_in_prompt_requires_an_address(screen: str | None) -> None:
 )
 def test_detect_sign_in_prompt_ignores_ordinary_addresses(screen: str) -> None:
     """A running agent's screen is full of links; none of them is a sign-in gate."""
+    assert detect_sign_in_prompt(screen) is None
+
+
+def test_detect_sign_in_prompt_ignores_an_address_the_launcher_moved_past() -> None:
+    """
+    Once the sign-in completes, the launcher and the agent print below the address.
+
+    Codex draws its interface inline, so dbcert's lines stay on screen above
+    the banner; the address is no longer a pending prompt. A card asking the
+    host for the live link must then hear "nothing pending" instead of opening
+    the spent address again.
+    """
+    screen = (
+        "dbcert: If the browser does not open automatically, please open the following URL:\n"
+        "\n\thttps://databricks.okta.com/oauth2/v1/authorize?client_id=0oa1&state=T4IU\n\n"
+        "dbcert: All credentials successfully written\n"
+        "dbcert: Successfully copied certificates for bazel cache\n"
+        "Cloning hosted gateway models from gpt-5.5 because gpt-5.2 is not bundled\n"
+        "\u256d\u2500\u2500 OpenAI Codex (v0.156.1) \u2500\u2500\u256e\n"
+        "\u203a Ask Codex to do anything\n"
+    )
     assert detect_sign_in_prompt(screen) is None
 
 

@@ -325,7 +325,7 @@ describe("ErrorBanner", () => {
     fireEvent.click(screen.getByRole("button", { name: "Open sign-in link" }));
     await waitFor(() => expect(tab.close).toHaveBeenCalled());
     expect(screen.getByTestId("error-sign-in-note")).toHaveTextContent(
-      "No sign-in is pending in the terminal any more.",
+      "No sign-in is pending in the terminal any more. Try sending your message again.",
     );
     expect(tab.location.href).toBe("");
     open.mockRestore();

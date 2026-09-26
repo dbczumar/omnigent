@@ -347,7 +347,7 @@ export function ErrorBanner({
       } else {
         tab?.close();
         setSignInNote(
-          "No sign-in is pending in the terminal any more. Send your message again to get a fresh prompt.",
+          "No sign-in is pending in the terminal any more. Try sending your message again.",
         );
       }
     } catch (error) {
