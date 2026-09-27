@@ -50,7 +50,11 @@ queue order: text alone cannot tell them apart, so if the older one was
 lost the receipt names it and the later one is surfaced as undelivered
 at the next match — the only ambiguity this scheme accepts. When
 no entry matches — the transcript may still reformat text in ways not
-normalized here — the oldest entry is drained, as before.
+normalized here — the oldest entry is drained, as before, and every entry
+still queued is marked uncertain (:func:`mark_uncertain`): the drained
+receipt may really have belonged to one of them, so a later match that
+jumps over them drains them quietly instead of recording them as
+undelivered.
 
 The one imperfect case is interleaving a web-composer message with a
 message typed directly in the TUI: the TUI message (which has no pending
@@ -172,10 +176,22 @@ class DrainedInput:
 
 @dataclass
 class MatchedDrain:
-    """Result from draining pending inputs up to a text-matched entry."""
+    """
+    Result from draining pending inputs up to a text-matched entry.
+
+    :param matched: The entry whose text the mirror carried, or ``None``.
+    :param skipped: Older entries the match jumped over that are known to be
+        lost: no mirror of theirs can still arrive, so the caller records them
+        as undelivered.
+    :param uncertain: Older entries the match jumped over that were queued
+        when an unmatched mirror drained by position (see
+        :func:`mark_uncertain`). That mirror may have been theirs, so they are
+        drained without being declared undelivered.
+    """
 
     matched: DrainedInput | None
     skipped: list[DrainedInput]
+    uncertain: list[DrainedInput] = field(default_factory=list)
 
 
 @dataclass
@@ -202,6 +218,9 @@ class _Entry:
         with ``hold=True``: it keeps its slot and order, other drains skip
         it, and cap eviction leaves it alone until :func:`restore` (the
         persist did not land) or :func:`release` (it did) settles it.
+    :param uncertain: ``True`` once an unmatched mirror drained by position
+        while this entry was queued. That mirror may have been this entry's
+        own, so a later match that jumps over it must not call it undelivered.
     """
 
     pending_id: str
@@ -213,6 +232,7 @@ class _Entry:
     # resolved at construction time rather than bound at class def.
     created_at: float = field(default_factory=lambda: _now())
     held: bool = False
+    uncertain: bool = False
 
 
 # Per-conversation mapping conversation_id → {pending_id: entry}. The
@@ -418,6 +438,24 @@ def resolve_oldest(conversation_id: str, *, hold: bool = False) -> DrainedInput 
         return _drained_input(entry)
 
 
+def mark_uncertain(conversation_id: str) -> None:
+    """
+    Flag every queued, unheld entry as possibly already mirrored.
+
+    Called right after a mirror that matched no entry drained the oldest one
+    by position. The mirror's true owner may be any entry still queued (its
+    text was reformatted beyond what matching normalizes), so those entries
+    can no longer be declared undelivered with confidence: a later match that
+    jumps over them drains them as ``uncertain`` instead of ``skipped``.
+
+    :param conversation_id: Conversation/session id, e.g. ``"conv_abc123"``.
+    """
+    with _lock:
+        for entry in _pending.get(conversation_id, {}).values():
+            if not entry.held:
+                entry.uncertain = True
+
+
 def restore(conversation_id: str, drained: DrainedInput) -> None:
     """
     Put a drained entry back into the pending queue.
@@ -490,10 +528,12 @@ def resolve_matching_text(conversation_id: str, text: str, *, hold: bool = False
         instead of removing them; the caller settles each with
         :func:`release` or :func:`restore`. Entries already held are skipped.
     :returns: Matched entry plus the older entries it jumped over — at most
-        :data:`_MAX_ENTRIES_PER_CONVERSATION` of them, oldest first; any
-        beyond that stay queued for a later drain — or no match with an
-        empty skipped list when nothing carries this text (e.g. it was typed
-        directly in the TUI).
+        :data:`_MAX_ENTRIES_PER_CONVERSATION` of them, oldest first, split
+        into ``skipped`` (known lost) and ``uncertain`` (queued when a
+        positional drain happened, see :func:`mark_uncertain`); any beyond
+        the cap stay queued for a later drain — or no match with empty lists
+        when nothing carries this text (e.g. it was typed directly in the
+        TUI).
     """
     exact_needle = _collapse_whitespace(text)
     if not exact_needle:
@@ -540,7 +580,14 @@ def resolve_matching_text(conversation_id: str, text: str, *, hold: bool = False
             _pending.pop(conversation_id, None)
         return MatchedDrain(
             matched=_drained_input(matched_entry),
-            skipped=[_drained_input(entry) for _pending_id, entry in skipped_entries],
+            skipped=[
+                _drained_input(entry)
+                for _pending_id, entry in skipped_entries
+                if not entry.uncertain
+            ],
+            uncertain=[
+                _drained_input(entry) for _pending_id, entry in skipped_entries if entry.uncertain
+            ],
         )
 
 

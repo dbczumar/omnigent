@@ -582,3 +582,23 @@ def test_pending_id_for_stable_id_finds_only_live_entries() -> None:
 
     pending_inputs.resolve("conv_a", pending_id)
     assert pending_inputs.pending_id_for_stable_id("conv_a", stable_id) is None
+
+
+def test_mark_uncertain_keeps_jumped_over_entries_out_of_the_undelivered_set() -> None:
+    """Entries queued during a positional drain are later drained as uncertain, not skipped."""
+    first = pending_inputs.record("conv_a", [_text_block("first")])
+    second = pending_inputs.record("conv_a", [_text_block("second")])
+
+    # A reformatted mirror matched nothing and drained the oldest entry.
+    drained = pending_inputs.resolve_oldest("conv_a", hold=True)
+    assert drained is not None and drained.pending_id == first
+    pending_inputs.mark_uncertain("conv_a")
+    pending_inputs.release("conv_a", drained)
+    third = pending_inputs.record("conv_a", [_text_block("third")])
+
+    matched = pending_inputs.resolve_matching_text("conv_a", "third")
+
+    assert matched.matched is not None and matched.matched.pending_id == third
+    assert matched.skipped == []
+    assert [entry.pending_id for entry in matched.uncertain] == [second]
+    assert pending_inputs.snapshot_for("conv_a") == []

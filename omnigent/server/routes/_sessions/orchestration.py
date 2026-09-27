@@ -2726,6 +2726,7 @@ async def _persist_external_conversation_item_unlocked(
     # surfaces them as undelivered; a source-less mirror or a slash command
     # only holds them and puts them back afterwards.
     skipped_pending: list[pending_inputs.DrainedInput] = []
+    uncertain_pending: list[pending_inputs.DrainedInput] = []
     held_older: list[pending_inputs.DrainedInput] = []
     if (
         item.type == "message"
@@ -2744,14 +2745,21 @@ async def _persist_external_conversation_item_unlocked(
         drained = matched.matched
         if item.stable_id is not None or _is_kiro_native_session(conv):
             skipped_pending = matched.skipped
+            # Jumped-over entries that a positional drain may already have
+            # settled: drained without an undelivered record.
+            uncertain_pending = matched.uncertain
         else:
             # A mirror without a source id cannot be told from a retry of an
             # already-persisted one, and a retry matching a newer identical
             # message would brand everything queued in between undelivered.
             # Leave the older entries queued for a later mirror instead.
-            held_older = matched.skipped
+            held_older = [*matched.skipped, *matched.uncertain]
         if drained is None and not _is_kiro_native_session(conv):
             drained = pending_inputs.resolve_oldest(session_id, hold=True)
+            if drained is not None:
+                # The mirror's true owner may be any entry still queued, so none
+                # of them can be declared undelivered later.
+                pending_inputs.mark_uncertain(session_id)
         if drained is not None:
             cleared_pending_id = drained.pending_id
             item = _merge_pending_file_blocks(item, drained.content)
@@ -2805,18 +2813,24 @@ async def _persist_external_conversation_item_unlocked(
         # Nothing was committed: unhold every drained entry so the forwarder's
         # retry drains the same entries and surfaces the same undelivered
         # messages.
-        _restore_drained_inputs(session_id, [*skipped_pending, *held_older], drained)
+        _restore_drained_inputs(
+            session_id, [*skipped_pending, *uncertain_pending, *held_older], drained
+        )
         raise
     persisted = persisted_items[-1]
     if persisted.deduplicated:
         # A re-post of an already-committed item: nothing new to render or
         # title. Every pending entry consumed above belongs to a LATER user
         # message.
-        _restore_drained_inputs(session_id, [*skipped_pending, *held_older], drained)
+        _restore_drained_inputs(
+            session_id, [*skipped_pending, *uncertain_pending, *held_older], drained
+        )
         return persisted.id
-    # Landed: the drained entries are settled; older messages a slash command
-    # jumped over are still on their way and go back into play.
-    _release_drained_inputs(session_id, [*skipped_pending, drained])
+    # Landed: the drained entries are settled (uncertain ones leave without a
+    # record — their mirror may already have been attributed by position);
+    # older messages a slash command jumped over are still on their way and
+    # go back into play.
+    _release_drained_inputs(session_id, [*skipped_pending, *uncertain_pending, drained])
     _restore_drained_inputs(session_id, held_older, None)
     # Not a duplicate: publish side effects for each skipped pair. Items are
     # [user0, error0, user1, error1, ...]; 2 per skipped entry. The consumed
