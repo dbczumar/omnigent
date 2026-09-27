@@ -471,7 +471,7 @@ def test_release_drops_a_held_entry() -> None:
 
 
 def test_resolve_matching_text_drops_only_generated_leading_markers() -> None:
-    """Leading attachment marker lines cancel out; a marker typed mid-message is kept."""
+    """A message with a file block matches behind its generated marker; typed text is kept."""
     with_image = pending_inputs.record(
         "conv_a", [{"type": "input_image", "url": "img://1"}, _text_block("look at this")]
     )
@@ -515,3 +515,28 @@ def test_resolve_matching_text_prefers_an_exact_match_over_marker_stripping() ->
 
     assert drained.matched is not None and drained.matched.pending_id == second
     assert [entry.pending_id for entry in drained.skipped] == [first]
+
+
+def test_resolve_matching_text_keeps_a_typed_marker_distinct_from_a_generated_one() -> None:
+    """A typed ``[Attached: …]`` phrase never stands in for the executor's marker line."""
+    typed = pending_inputs.record("conv_a", [_text_block("[Attached: literal] same")])
+    with_image = pending_inputs.record(
+        "conv_a", [{"type": "input_image", "url": "img://1"}, _text_block("same")]
+    )
+
+    drained = pending_inputs.resolve_matching_text("conv_a", "[Attached: /tmp/x.png]\n\nsame")
+
+    assert drained.matched is not None and drained.matched.pending_id == with_image
+    assert [entry.pending_id for entry in drained.skipped] == [typed]
+
+
+def test_resolve_matching_text_identical_texts_drain_in_queue_order() -> None:
+    """Identical texts are indistinguishable, so the oldest one takes the mirror."""
+    first = pending_inputs.record("conv_a", [_text_block("yes")])
+    second = pending_inputs.record("conv_a", [_text_block("yes")])
+
+    drained = pending_inputs.resolve_matching_text("conv_a", "yes")
+
+    assert drained.matched is not None and drained.matched.pending_id == first
+    assert drained.skipped == []
+    assert [entry["pending_id"] for entry in pending_inputs.snapshot_for("conv_a")] == [second]

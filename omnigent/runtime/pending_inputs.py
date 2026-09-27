@@ -42,9 +42,13 @@ its entry at the head of the queue, and every later message would then
 drain the wrong entry — the receipt names the previous message, clients
 settle the wrong bubble, and the new message renders twice. So the
 persist site drains the oldest entry whose text equals the mirror
-(generated leading attachment marker lines dropped, whitespace
-normalized) and reports the older entries it skipped, which the caller
-persists as undelivered. When
+(whitespace collapsed; for a message with attachments, the executor's
+generated marker lines — one per file block — are dropped from the mirror
+first) and reports the older entries it skipped, which the caller
+persists as undelivered. Two queued messages with identical text drain in
+queue order: text alone cannot tell them apart, so if the older one was
+lost the receipt names it and the later one is surfaced as undelivered
+at the next match — the only ambiguity this scheme accepts. When
 no entry matches — the transcript may still reformat text in ways not
 normalized here — the oldest entry is drained, as before.
 
@@ -70,8 +74,8 @@ Limitations (identical to :mod:`pending_elicitations`):
   refills during the persist can never discard the entries a failed append
   has to put back; they are a transient overlay of at most one drain, so
   the queue never exceeds twice the cap.
-* An image-only message has no text to match (its generated attachment
-  marker lines are dropped), so it drains by position; behind a stale head
+* An image-only message has no text to match, so it drains by position;
+  behind a stale head
   entry its image can land on the wrong message. This is the positional
   behavior that predates text matching, kept as a known limitation.
 
@@ -91,7 +95,6 @@ import re
 import threading
 import time
 import uuid
-from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -112,11 +115,13 @@ _TTL_S: float = 600.0
 # back.
 _MAX_ENTRIES_PER_CONVERSATION = 64
 
-# Attachment reference lines a native executor prepends to a pasted message
+# One attachment reference line a native executor prepends to a pasted message
 # ("[Attached: /tmp/x.png]", "[Attached file: …]", "[Attachment x could not be
-# loaded]"). Anchored to the start of the text so only the generated leading
-# lines are dropped, never a marker-like phrase the person typed.
-_LEADING_ATTACHMENT_MARKERS_RE = re.compile(rf"^(?:\s*(?:{ATTACHMENT_MARKER_STRIP_PATTERN}))+\s*")
+# loaded]"), anchored to the start of the text. The matcher removes exactly as
+# many of these as the queued message has file blocks, so a marker-like phrase
+# the person typed is never mistaken for a generated one.
+_ONE_LEADING_ATTACHMENT_MARKER_RE = re.compile(rf"^\s*(?:{ATTACHMENT_MARKER_STRIP_PATTERN})\s*")
+_ATTACHMENT_BLOCK_TYPES = frozenset({"input_image", "input_file"})
 
 
 def _now() -> float:
@@ -470,15 +475,25 @@ def resolve_matching_text(conversation_id: str, text: str, *, hold: bool = False
         if entries is None:
             return MatchedDrain(matched=None, skipped=[])
         ordered = [(pid, entry) for pid, entry in entries.items() if not entry.held]
-        texts = [_content_text(entry.content) for _pid, entry in ordered]
+        texts = [_collapse_whitespace(_content_text(entry.content)) for _pid, entry in ordered]
         # Two passes. An exact (whitespace-collapsed) match first, so two
         # messages that differ only in a marker-like phrase the person typed
-        # at the front stay distinct; then a match with the generated leading
-        # attachment marker lines dropped, for a paste the executor prefixed
-        # with them.
-        match_index = _first_match(texts, exact_needle, _collapse_whitespace)
+        # at the front stay distinct. Then, for entries carrying attachments:
+        # the executor pastes one generated marker line per file block ahead
+        # of the text, so drop exactly that many from the mirror and compare
+        # with the entry's own text — typed marker-like text still counts.
+        match_index = _first_match(texts, exact_needle)
         if match_index is None:
-            match_index = _first_match(texts, _normalize_text(text), _normalize_text)
+            for index, (_pid, entry) in enumerate(ordered):
+                attachments = _attachment_count(entry.content)
+                if attachments == 0 or not texts[index]:
+                    continue
+                if (
+                    _collapse_whitespace(_strip_generated_markers(text, attachments))
+                    == texts[index]
+                ):
+                    match_index = index
+                    break
         if match_index is None:
             return MatchedDrain(matched=None, skipped=[])
         skipped_entries = ordered[:match_index]
@@ -576,25 +591,23 @@ def _content_text(content: list[dict[str, Any]]) -> str:
     return "\n".join(parts)
 
 
-def _first_match(texts: list[str], needle: str, normalize: Callable[[str], str]) -> int | None:
+def _first_match(texts: list[str], needle: str) -> int | None:
     """
-    Index of the first text whose normalized form equals ``needle``.
+    Index of the first non-empty text equal to ``needle``.
 
     Equality only: an unanchored suffix check (``"noyes".endswith("yes")``)
     can pick an unrelated queued entry whenever its text happens to trail a
     different accepted prompt, handing that entry's file attachments to the
     wrong persisted message.
 
-    :param texts: Queued entry texts in queue order.
-    :param needle: The mirrored text, already passed through ``normalize``.
-    :param normalize: Normalization applied to each queued text.
+    :param texts: Whitespace-collapsed queued entry texts in queue order.
+    :param needle: The whitespace-collapsed mirrored text.
     :returns: The matching index, or ``None``.
     """
     if not needle:
         return None
     for index, text in enumerate(texts):
-        normalized = normalize(text)
-        if normalized and normalized == needle:
+        if text and text == needle:
             return index
     return None
 
@@ -604,20 +617,33 @@ def _collapse_whitespace(text: str) -> str:
     return " ".join(text.split())
 
 
-def _normalize_text(text: str) -> str:
+def _attachment_count(content: list[dict[str, Any]]) -> int:
+    """Number of file blocks in queued content — one generated marker line each."""
+    return sum(
+        1
+        for block in content
+        if isinstance(block, dict) and block.get("type") in _ATTACHMENT_BLOCK_TYPES
+    )
+
+
+def _strip_generated_markers(text: str, count: int) -> str:
     """
-    Normalize text for the marker-tolerant comparison pass.
+    Drop up to ``count`` generated attachment marker lines from the front of a mirror.
 
-    Drops the generated leading attachment marker lines and collapses
-    whitespace. Applied to both sides of the comparison, so a marker-like
-    phrase the person typed themselves cancels out instead of breaking the
-    match.
+    Stops early when the text has fewer leading marker lines, so nothing but
+    the executor's own prefix is ever removed.
 
-    :param text: Queued text or mirrored transcript text.
-    :returns: The comparable form, e.g. ``"look at this"`` for
+    :param text: Mirrored transcript text, e.g.
         ``"[Attached: /tmp/x.png]\\n\\nlook at this"``.
+    :param count: File blocks on the queued message the mirror is compared to.
+    :returns: The text behind the generated markers, e.g. ``"look at this"``.
     """
-    return _collapse_whitespace(_LEADING_ATTACHMENT_MARKERS_RE.sub("", text, count=1))
+    for _ in range(count):
+        stripped, removed = _ONE_LEADING_ATTACHMENT_MARKER_RE.subn("", text, count=1)
+        if not removed:
+            break
+        text = stripped
+    return text
 
 
 def reset_for_tests() -> None:
