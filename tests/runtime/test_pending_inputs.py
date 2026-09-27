@@ -234,10 +234,12 @@ def test_resolve_removes_entry_idempotently() -> None:
     keep = pending_inputs.record("conv_a", [_text_block("keep")])
     drop = pending_inputs.record("conv_a", [_text_block("drop")])
 
-    pending_inputs.resolve("conv_a", drop)
+    dropped = pending_inputs.resolve("conv_a", drop)
+    assert dropped is not None
+    assert (dropped.pending_id, dropped.content) == (drop, [_text_block("drop")])
     assert [e["pending_id"] for e in pending_inputs.snapshot_for("conv_a")] == [keep]
-    # Idempotent — resolving an already-removed id does nothing.
-    pending_inputs.resolve("conv_a", drop)
+    # Idempotent — resolving an already-removed id does nothing and returns None.
+    assert pending_inputs.resolve("conv_a", drop) is None
     assert [e["pending_id"] for e in pending_inputs.snapshot_for("conv_a")] == [keep]
 
 
@@ -560,3 +562,23 @@ def test_resolve_matching_text_reports_at_most_a_cap_of_skipped_entries() -> Non
     assert [entry.pending_id for entry in drained.skipped] == first_wave
     remaining = [entry["pending_id"] for entry in pending_inputs.snapshot_for("conv_a")]
     assert remaining == second_wave[:-1]
+
+
+def test_pending_id_for_stable_id_finds_only_live_entries() -> None:
+    """
+    A queued entry is found by the web client's stable id so a resend can be
+    answered without a second forward; a settled or unknown id finds nothing.
+    """
+    stable_id = "7f3a9c1e5b2d4f6a8c0e1d2b3a4f5c6d"
+    content = [{"type": "input_text", "text": "hello"}]
+    assert pending_inputs.pending_id_for_stable_id("conv_a", stable_id) is None
+
+    pending_id = pending_inputs.record("conv_a", content, stable_id=stable_id)
+    assert pending_inputs.pending_id_for_stable_id("conv_a", stable_id) == pending_id
+    # Scoped to the conversation and to entries that carry a stable id.
+    assert pending_inputs.pending_id_for_stable_id("conv_b", stable_id) is None
+    pending_inputs.record("conv_a", content)
+    assert pending_inputs.pending_id_for_stable_id("conv_a", stable_id) == pending_id
+
+    pending_inputs.resolve("conv_a", pending_id)
+    assert pending_inputs.pending_id_for_stable_id("conv_a", stable_id) is None

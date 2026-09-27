@@ -527,7 +527,14 @@ async def test_login_wait_uses_slower_terminal_exit_polling(
 
     await _discover(startup, terminal_instance=terminal, login_required=login_required)
 
-    race.assert_awaited_once_with(thread_waiter, terminal, poll_interval_s=expected_interval)
+    # The pane is watched for a launcher sign-in prompt only while a deadline
+    # applies; a login wait already has its cause recorded.
+    race.assert_awaited_once_with(
+        thread_waiter,
+        terminal,
+        poll_interval_s=expected_interval,
+        watch_sign_in=not login_required,
+    )
     assert thread_waiter.cancelled()
 
 
