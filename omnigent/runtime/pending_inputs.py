@@ -62,12 +62,14 @@ Limitations (identical to :mod:`pending_elicitations`):
   subscribers live on one process), so this rides the same affinity.
 * Entries do not survive an AP-server restart — acceptable, the loss
   is one in-flight message, same as every other AP-side transient.
-* At most :data:`_MAX_ENTRIES_PER_CONVERSATION` entries per conversation;
-  :func:`record` evicts the oldest unheld entries beyond that. Entries a
-  persist in progress has drained with ``hold=True`` keep their slot until
-  :func:`release` (it landed) or :func:`restore` (it did not) settles them,
-  so a queue that refills during the persist can never discard the entries
-  a failed append has to put back.
+* At most :data:`_MAX_ENTRIES_PER_CONVERSATION` unheld entries per
+  conversation; :func:`record` evicts the oldest unheld entries beyond that
+  and never the entry it just recorded. Entries a persist in progress has
+  drained with ``hold=True`` keep their slot until :func:`release` (it
+  landed) or :func:`restore` (it did not) settles them, so a queue that
+  refills during the persist can never discard the entries a failed append
+  has to put back; they are a transient overlay of at most one drain, so
+  the queue never exceeds twice the cap.
 * An image-only message has no text to match (its generated attachment
   marker lines are dropped), so it drains by position; behind a stale head
   entry its image can land on the wrong message. This is the positional
@@ -89,6 +91,7 @@ import re
 import threading
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -101,11 +104,12 @@ from omnigent.inner.native_attachments import ATTACHMENT_MARKER_STRIP_PATTERN
 # transcript round-trip on a busy session still drains normally.
 _TTL_S: float = 600.0
 
-# Hard cap on queued entries per conversation, enforced by :func:`record`: the
-# oldest unheld entries are evicted when a new one would exceed it. Bounds the
-# snapshot replay and the persist site's append (each skipped entry becomes two
-# rows). Far above any real queue: nobody sends this many messages within the
-# TTL with none echoed back.
+# Hard cap on unheld queued entries per conversation, enforced by
+# :func:`record`: the oldest unheld entries are evicted when a new one would
+# exceed it (never the new one itself). Bounds the snapshot replay and the
+# persist site's append (each skipped entry becomes two rows). Far above any
+# real queue: nobody sends this many messages within the TTL with none echoed
+# back.
 _MAX_ENTRIES_PER_CONVERSATION = 64
 
 # Attachment reference lines a native executor prepends to a pasted message
@@ -266,10 +270,10 @@ def record(
         send one.
     :returns: The index-assigned pending id, e.g. ``"pending_a1b2c3"``.
 
-    Beyond :data:`_MAX_ENTRIES_PER_CONVERSATION` live entries the oldest
-    unheld one is evicted, so the queue (and everything sized by it) stays
-    bounded without touching entries a persist in progress must be able to
-    put back.
+    Beyond :data:`_MAX_ENTRIES_PER_CONVERSATION` unheld entries the oldest
+    unheld one is evicted (never this new one), so the queue (and everything
+    sized by it) stays bounded without touching entries a persist in progress
+    must be able to put back.
     """
     with _lock:
         _evict_stale_locked(conversation_id, _now())
@@ -296,18 +300,22 @@ def record(
 
 def _evict_beyond_cap(entries: dict[str, _Entry]) -> None:
     """
-    Drop the oldest unheld entries until ``entries`` fits the per-conversation cap.
+    Drop the oldest unheld entries until at most the cap remain unheld.
 
     Caller must hold :data:`_lock`. Insertion order is age order, so the first
-    unheld keys go first. Held entries belong to a persist in progress and keep
-    their slot: discarding one would break the rollback that puts it back.
+    unheld keys go first and the entry just recorded (the newest) is never the
+    victim, even when every other entry is held. Held entries belong to a
+    persist in progress and keep their slot: discarding one would break the
+    rollback that puts it back. They are a transient overlay of at most one
+    persist's drain, so the queue never exceeds twice the cap.
 
     :param entries: One conversation's ``{pending_id: entry}`` map.
     """
-    excess = len(entries) - _MAX_ENTRIES_PER_CONVERSATION
+    unheld = [pid for pid, entry in entries.items() if not entry.held]
+    excess = len(unheld) - _MAX_ENTRIES_PER_CONVERSATION
     if excess <= 0:
         return
-    for pending_id in [pid for pid, entry in entries.items() if not entry.held][:excess]:
+    for pending_id in unheld[:excess]:
         entries.pop(pending_id, None)
 
 
@@ -453,8 +461,8 @@ def resolve_matching_text(conversation_id: str, text: str, *, hold: bool = False
         empty skipped list when nothing carries this text (e.g. it was typed
         directly in the TUI).
     """
-    needle = _normalize_text(text)
-    if not needle:
+    exact_needle = _collapse_whitespace(text)
+    if not exact_needle:
         return MatchedDrain(matched=None, skipped=[])
     with _lock:
         _evict_stale_locked(conversation_id, _now())
@@ -462,17 +470,15 @@ def resolve_matching_text(conversation_id: str, text: str, *, hold: bool = False
         if entries is None:
             return MatchedDrain(matched=None, skipped=[])
         ordered = [(pid, entry) for pid, entry in entries.items() if not entry.held]
-        match_index: int | None = None
-        for index, (_pending_id, entry) in enumerate(ordered):
-            entry_text = _normalize_text(_content_text(entry.content))
-            # Exact match only: an unanchored suffix check ("noyes".endswith("yes"))
-            # can pick an unrelated queued entry whenever its text happens to trail
-            # a different accepted prompt, handing that entry's file attachments to
-            # the wrong persisted message. A miss falls through to "no match" below,
-            # the same fail-safe path already used for terminal-typed text.
-            if entry_text and needle == entry_text:
-                match_index = index
-                break
+        texts = [_content_text(entry.content) for _pid, entry in ordered]
+        # Two passes. An exact (whitespace-collapsed) match first, so two
+        # messages that differ only in a marker-like phrase the person typed
+        # at the front stay distinct; then a match with the generated leading
+        # attachment marker lines dropped, for a paste the executor prefixed
+        # with them.
+        match_index = _first_match(texts, exact_needle, _collapse_whitespace)
+        if match_index is None:
+            match_index = _first_match(texts, _normalize_text(text), _normalize_text)
         if match_index is None:
             return MatchedDrain(matched=None, skipped=[])
         skipped_entries = ordered[:match_index]
@@ -570,9 +576,37 @@ def _content_text(content: list[dict[str, Any]]) -> str:
     return "\n".join(parts)
 
 
+def _first_match(texts: list[str], needle: str, normalize: Callable[[str], str]) -> int | None:
+    """
+    Index of the first text whose normalized form equals ``needle``.
+
+    Equality only: an unanchored suffix check (``"noyes".endswith("yes")``)
+    can pick an unrelated queued entry whenever its text happens to trail a
+    different accepted prompt, handing that entry's file attachments to the
+    wrong persisted message.
+
+    :param texts: Queued entry texts in queue order.
+    :param needle: The mirrored text, already passed through ``normalize``.
+    :param normalize: Normalization applied to each queued text.
+    :returns: The matching index, or ``None``.
+    """
+    if not needle:
+        return None
+    for index, text in enumerate(texts):
+        normalized = normalize(text)
+        if normalized and normalized == needle:
+            return index
+    return None
+
+
+def _collapse_whitespace(text: str) -> str:
+    """Collapse whitespace runs so paste and mirror spacing differences cancel out."""
+    return " ".join(text.split())
+
+
 def _normalize_text(text: str) -> str:
     """
-    Normalize text enough to compare a pending input with its mirrored text.
+    Normalize text for the marker-tolerant comparison pass.
 
     Drops the generated leading attachment marker lines and collapses
     whitespace. Applied to both sides of the comparison, so a marker-like
@@ -583,7 +617,7 @@ def _normalize_text(text: str) -> str:
     :returns: The comparable form, e.g. ``"look at this"`` for
         ``"[Attached: /tmp/x.png]\\n\\nlook at this"``.
     """
-    return " ".join(_LEADING_ATTACHMENT_MARKERS_RE.sub("", text, count=1).split())
+    return _collapse_whitespace(_LEADING_ATTACHMENT_MARKERS_RE.sub("", text, count=1))
 
 
 def reset_for_tests() -> None:

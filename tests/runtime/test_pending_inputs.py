@@ -444,10 +444,11 @@ def test_held_entries_keep_their_slot_while_the_queue_refills() -> None:
     # Other drains skip the held entry.
     assert pending_inputs.resolve_matching_text("conv_a", "m0").matched is None
     newer = [pending_inputs.record("conv_a", [_text_block(f"n{i}")]) for i in range(2)]
-    # The two oldest UNHELD entries went; the held head is still first.
+    # Only unheld entries count against the cap: one refill fits, the second
+    # evicts the oldest UNHELD entry; the held head is still first.
     after_refill = [entry["pending_id"] for entry in pending_inputs.snapshot_for("conv_a")]
-    assert after_refill == [ids[0], *ids[3:], *newer]
-    assert len(after_refill) == cap
+    assert after_refill == [ids[0], *ids[2:], *newer]
+    assert len(after_refill) == cap + 1
 
     pending_inputs.restore("conv_a", held)
 
@@ -486,3 +487,31 @@ def test_resolve_matching_text_drops_only_generated_leading_markers() -> None:
     assert second.matched is not None and second.matched.pending_id == literal
     assert second.skipped == []
     assert pending_inputs.snapshot_for("conv_a") == []
+
+
+def test_record_keeps_a_new_entry_when_every_other_entry_is_held() -> None:
+    """A fresh record is never the eviction victim, even with the whole cap held."""
+    cap = pending_inputs._MAX_ENTRIES_PER_CONVERSATION
+    ids = [pending_inputs.record("conv_a", [_text_block(f"m{i}")]) for i in range(cap)]
+    held = pending_inputs.resolve_matching_text("conv_a", f"m{cap - 1}", hold=True)
+    assert held.matched is not None and len(held.skipped) == cap - 1
+
+    newest = pending_inputs.record("conv_a", [_text_block("newest")])
+
+    assert [entry["pending_id"] for entry in pending_inputs.snapshot_for("conv_a")] == [
+        *ids,
+        newest,
+    ]
+    found = pending_inputs.resolve_matching_text("conv_a", "newest")
+    assert found.matched is not None and found.matched.pending_id == newest
+
+
+def test_resolve_matching_text_prefers_an_exact_match_over_marker_stripping() -> None:
+    """Two messages differing only in a typed leading marker stay distinct."""
+    first = pending_inputs.record("conv_a", [_text_block("[Attached: literal-a] same")])
+    second = pending_inputs.record("conv_a", [_text_block("[Attached: literal-b] same")])
+
+    drained = pending_inputs.resolve_matching_text("conv_a", "[Attached: literal-b] same")
+
+    assert drained.matched is not None and drained.matched.pending_id == second
+    assert [entry.pending_id for entry in drained.skipped] == [first]

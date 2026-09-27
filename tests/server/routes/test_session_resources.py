@@ -5251,22 +5251,6 @@ async def test_claude_native_overlapping_retries_persist_nothing_extra() -> None
     from omnigent.runtime import pending_inputs
     from omnigent.server.routes.sessions import _persist_external_conversation_item
 
-    class _BlockingStore(_ConversationStore):
-        """Store whose first append parks until the test releases it."""
-
-        def __init__(self) -> None:
-            super().__init__()
-            self.first_append_started = threading.Event()
-            self.release_first_append = threading.Event()
-            self.append_count = 0
-
-        def append(self, conversation_id: str, items: list[Any]) -> list[Any]:
-            self.append_count += 1
-            if self.append_count == 1:
-                self.first_append_started.set()
-                assert self.release_first_append.wait(timeout=5)
-            return super().append(conversation_id, items)
-
     pending_inputs.reset_for_tests()
     store = _BlockingStore()
     sid = "64a784c3aa907d1774f44313546947c6"
@@ -5315,6 +5299,26 @@ async def test_claude_native_overlapping_retries_persist_nothing_extra() -> None
     finally:
         store.release_first_append.set()
         pending_inputs.reset_for_tests()
+
+
+class _BlockingStore(_ConversationStore):
+    """Store whose first append parks until the test releases it, then optionally raises."""
+
+    def __init__(self, *, fail_first_append: bool = False) -> None:
+        super().__init__()
+        self.fail_first_append = fail_first_append
+        self.first_append_started = threading.Event()
+        self.release_first_append = threading.Event()
+        self.append_count = 0
+
+    def append(self, conversation_id: str, items: list[Any]) -> list[Any]:
+        self.append_count += 1
+        if self.append_count == 1:
+            self.first_append_started.set()
+            assert self.release_first_append.wait(timeout=5)
+            if self.fail_first_append:
+                raise RuntimeError("database unavailable")
+        return super().append(conversation_id, items)
 
 
 class _FailOnceStore(_ConversationStore):
@@ -5506,30 +5510,14 @@ async def test_claude_native_failed_append_keeps_held_entries_when_the_queue_ref
     """Entries a persist has drained survive a refill of the queue during a failed append.
 
     Full queue: a lost message A at the head, B behind it, then filler. Mirror B
-    (A skipped, B matched). While the append is in flight two new messages
-    arrive, then the append fails. The refill must evict the oldest unheld
-    filler, never A or B, so the retry persists A as undelivered, matches B, and
-    the receipts name A then B.
+    (A skipped, B matched). While the append is in flight three new messages
+    arrive, then the append fails. Only unheld entries count against the cap,
+    so the refill evicts the oldest filler once it overflows, never A or B; the
+    retry then persists A as undelivered, matches B, and the receipts name A
+    then B.
     """
     from omnigent.runtime import pending_inputs
     from omnigent.server.routes.sessions import _persist_external_conversation_item
-
-    class _BlockThenFailStore(_ConversationStore):
-        """First append parks until released, then raises; later appends work."""
-
-        def __init__(self) -> None:
-            super().__init__()
-            self.first_append_started = threading.Event()
-            self.release_first_append = threading.Event()
-            self.append_count = 0
-
-        def append(self, conversation_id: str, items: list[Any]) -> list[Any]:
-            self.append_count += 1
-            if self.append_count == 1:
-                self.first_append_started.set()
-                assert self.release_first_append.wait(timeout=5)
-                raise RuntimeError("database unavailable")
-            return super().append(conversation_id, items)
 
     published: list[tuple[str, dict[str, Any]]] = []
     monkeypatch.setattr(
@@ -5538,7 +5526,7 @@ async def test_claude_native_failed_append_keeps_held_entries_when_the_queue_ref
         lambda conversation_id, event: published.append((conversation_id, event)),
     )
     pending_inputs.reset_for_tests()
-    store = _BlockThenFailStore()
+    store = _BlockingStore(fail_first_append=True)
     sid = "64a784c3aa907d1774f44313546947c6"
     conv = store.get_conversation(sid)
     assert conv is not None
@@ -5575,17 +5563,17 @@ async def test_claude_native_failed_append_keeps_held_entries_when_the_queue_ref
         await asyncio.to_thread(store.first_append_started.wait, 5)
         newer = [
             pending_inputs.record(sid, [{"type": "input_text", "text": f"new {i}"}])
-            for i in range(2)
+            for i in range(3)
         ]
         store.release_first_append.set()
         with pytest.raises(RuntimeError, match="database unavailable"):
             await first
 
-        # The refill evicted the two oldest filler entries, not the held ones.
+        # The refill evicted the oldest filler entry, not the held ones.
         assert [entry["pending_id"] for entry in pending_inputs.snapshot_for(sid)] == [
             lost,
             matched,
-            *filler[2:],
+            *filler[1:],
             *newer,
         ]
         assert store.appended_items == []
@@ -5595,7 +5583,7 @@ async def test_claude_native_failed_append_keeps_held_entries_when_the_queue_ref
         assert [item.type for item in store.appended_items] == ["message", "error", "message"]
         assert item_id == store.appended_items[-1].id
         assert [entry["pending_id"] for entry in pending_inputs.snapshot_for(sid)] == [
-            *filler[2:],
+            *filler[1:],
             *newer,
         ]
         receipts = [
@@ -5604,6 +5592,90 @@ async def test_claude_native_failed_append_keeps_held_entries_when_the_queue_ref
             if event.get("type") == "session.input.consumed"
         ]
         assert receipts == [lost, matched]
+    finally:
+        store.release_first_append.set()
+        pending_inputs.reset_for_tests()
+
+
+@pytest.mark.asyncio
+async def test_claude_native_cancelled_mirror_still_settles_its_held_entries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A request cancelled mid-append still releases its held entries and publishes.
+
+    The persist is shielded from the caller's cancellation: the append thread
+    runs to completion, the held entries are released (or unheld on failure),
+    and the receipts go out. Without that they would stay held until the TTL
+    and a retry, finding the item persisted, would return without ever
+    acknowledging them.
+    """
+    from omnigent.runtime import pending_inputs
+    from omnigent.server.routes.sessions import _persist_external_conversation_item
+
+    published: list[tuple[str, dict[str, Any]]] = []
+    monkeypatch.setattr(
+        session_stream,
+        "publish",
+        lambda conversation_id, event: published.append((conversation_id, event)),
+    )
+    pending_inputs.reset_for_tests()
+    store = _BlockingStore()
+    sid = "64a784c3aa907d1774f44313546947c6"
+    conv = store.get_conversation(sid)
+    assert conv is not None
+    lost = pending_inputs.record(sid, [{"type": "input_text", "text": "lost in the reconnect"}])
+    matched = pending_inputs.record(sid, [{"type": "input_text", "text": "still here?"}])
+    body = SessionEventInput(
+        type="external_conversation_item",
+        data={
+            "item_type": "message",
+            "item_data": {
+                "role": "user",
+                "content": [{"type": "input_text", "text": "still here?"}],
+            },
+            "response_id": "resp_still_here",
+            "source_id": "claude:still-here:0",
+        },
+    )
+
+    async def persist() -> str:
+        return await _persist_external_conversation_item(
+            sid,
+            conv,
+            body,
+            store,  # type: ignore[arg-type]
+        )
+
+    try:
+        request = asyncio.create_task(persist())
+        await asyncio.to_thread(store.first_append_started.wait, 5)
+        request.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await request
+        # Still in flight: the entries stay held, so nothing else can drain them.
+        assert [entry["pending_id"] for entry in pending_inputs.snapshot_for(sid)] == [
+            lost,
+            matched,
+        ]
+        assert pending_inputs.resolve_matching_text(sid, "still here?").matched is None
+
+        store.release_first_append.set()
+        for _attempt in range(200):
+            if not pending_inputs.snapshot_for(sid):
+                break
+            await asyncio.sleep(0.01)
+
+        assert pending_inputs.snapshot_for(sid) == []
+        assert [item.type for item in store.appended_items] == ["message", "error", "message"]
+        receipts = [
+            event["data"]["cleared_pending_id"]
+            for _conversation_id, event in published
+            if event.get("type") == "session.input.consumed"
+        ]
+        assert receipts == [lost, matched]
+        # The forwarder's retry is a no-op.
+        assert await persist() == store.appended_items[-1].id
+        assert len(store.appended_items) == 3
     finally:
         store.release_first_append.set()
         pending_inputs.reset_for_tests()
