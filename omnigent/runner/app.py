@@ -5510,6 +5510,21 @@ def create_runner_app(
         _task.add_done_callback(_background_tasks.discard)
         _background_tasks.add(_task)
 
+    def _native_pane_names(conv_id: str) -> set[str]:
+        """
+        Return the terminal names that can carry a session's launcher sign-in prompt.
+
+        Only the native agent's own pane counts: a shell the person opened
+        alongside it (``gh auth login``, a docs page) must not supply the
+        sign-in address or hold back the "signed in" notice. With the harness
+        known this is its one pane; otherwise any native agent pane.
+        """
+        from omnigent.harness_plugins import native_agents
+
+        harness = _session_harness_name(conv_id)
+        names = {agent.terminal_name for agent in native_agents() if agent.harness == harness}
+        return names or {agent.terminal_name for agent in native_agents()}
+
     def _start_sign_in_watch(conv_id: str) -> None:
         """Watch the pane behind a sign-in card so the chat learns when the sign-in worked."""
         existing = _sign_in_watchers.get(conv_id)
@@ -5537,13 +5552,14 @@ def create_runner_app(
         from omnigent.harnesses.diagnostics import detect_sign_in_prompt
 
         harness = _session_harness_name(conv_id)
+        pane_names = _native_pane_names(conv_id)
         while True:
             await asyncio.sleep(_SIGN_IN_WATCH_INTERVAL_S)
             registry = resource_registry.terminal_registry
             entries = registry.list_for_conversation(conv_id) if registry is not None else []
             screens: list[str] = []
             for entry in entries:
-                if not entry.instance.running:
+                if entry.terminal_name not in pane_names or not entry.instance.running:
                     continue
                 result = await entry.instance.read(join_wrapped=True)
                 screen = result.get("screen") if isinstance(result, dict) else None
@@ -11282,15 +11298,19 @@ def create_runner_app(
         here at click time and opens whatever the pane shows now.
 
         :param session_id: Session/conversation id.
-        :returns: ``{"pending": true, "url", "code", "terminal_id"}`` when a
-            running terminal shows a prompt; ``{"pending": false}`` otherwise.
+        Only the native agent's own pane is read (see ``_native_pane_names``):
+        another terminal in the session must not supply the address.
+
+        :returns: ``{"pending": true, "url", "code", "terminal_id"}`` when the
+            running agent pane shows a prompt; ``{"pending": false}`` otherwise.
         """
         from omnigent.harnesses.diagnostics import detect_sign_in_prompt
 
         registry = resource_registry.terminal_registry
         entries = registry.list_for_conversation(session_id) if registry is not None else []
+        pane_names = _native_pane_names(session_id)
         for entry in entries:
-            if not entry.instance.running:
+            if entry.terminal_name not in pane_names or not entry.instance.running:
                 continue
             # Wrapped rows joined: the address is far wider than the pane.
             result = await entry.instance.read(join_wrapped=True)

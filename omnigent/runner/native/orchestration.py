@@ -5603,7 +5603,7 @@ async def _record_agent_startup_pending(
         session_id,
         waited_seconds,
         code,
-        f" (sign-in prompt: {prompt.url})" if prompt is not None else "",
+        " (a sign-in prompt is on screen)" if prompt is not None else "",
         extra=pending_event,
     )
 

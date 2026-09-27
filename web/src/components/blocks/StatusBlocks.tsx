@@ -339,8 +339,10 @@ export function ErrorBanner({
       return;
     }
     // Pre-open the tab in the click so the navigation after the round trip is
-    // not treated as a popup.
+    // not treated as a popup. Sever the opener so the sign-in page can never
+    // navigate this tab.
     const tab = window.open("", "_blank");
+    if (tab) tab.opener = null;
     setSignInBusy(true);
     setSignInNote(null);
     try {

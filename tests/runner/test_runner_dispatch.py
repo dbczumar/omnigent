@@ -12505,7 +12505,8 @@ async def test_sign_in_pending_failure_posts_a_notice_once_the_agent_is_ready(
             )
         return {"screen": _SIGNED_IN_SCREENS[harness]}
 
-    instance = make_test_terminal_instance("agent", "main", tmp_path)
+    pane_name = "codex" if harness == "codex-native" else "claude"
+    instance = make_test_terminal_instance(pane_name, "main", tmp_path)
     instance.read = _read  # type: ignore[method-assign]
     registry = TerminalRegistry(conversation_link_base_url="http://127.0.0.1:8000")
     registry._by_conversation.setdefault(conv, {})[(instance.name, instance.session_key)] = (

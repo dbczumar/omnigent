@@ -317,7 +317,7 @@ describe("ErrorBanner", () => {
     // The saved link belongs to the launcher process that printed it and goes
     // stale once that process moves on, so the click fetches the current one.
     useChatStore.setState({ conversationId: "conv_live" });
-    const tab = { location: { href: "" }, close: vi.fn() };
+    const tab = { location: { href: "" }, close: vi.fn(), opener: window as Window | null };
     const open = vi.spyOn(window, "open").mockReturnValue(tab as unknown as Window);
     vi.mocked(getSessionSignInLink).mockResolvedValue({
       pending: true,
@@ -329,6 +329,8 @@ describe("ErrorBanner", () => {
     await waitFor(() =>
       expect(tab.location.href).toBe("https://signin.example.com/device?fresh=1"),
     );
+    // The sign-in page must not be able to navigate this tab.
+    expect(tab.opener).toBeNull();
     expect(getSessionSignInLink).toHaveBeenCalledWith("conv_live");
     // The tab was pre-opened in the click, so the navigation is not a popup.
     expect(open).toHaveBeenCalledWith("", "_blank");
