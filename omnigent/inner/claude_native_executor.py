@@ -272,7 +272,7 @@ class ClaudeNativeExecutor(Executor):
             message = describe_exception(exc)
             if cleanup_error is not None:
                 message = f"{message} Cleanup also failed: {cleanup_error}"
-            yield ExecutorError(message=message)
+            yield ExecutorError(message=message, undelivered=True)
             return
         except ClaudeSignInPending as exc:
             # The pane is parked on a launcher sign-in the person finishes from
@@ -286,6 +286,7 @@ class ClaudeNativeExecutor(Executor):
                 code=exc.code,
                 title=exc.title,
                 remediation=exc.remediation,
+                undelivered=True,
             )
             return
         except RuntimeError as exc:

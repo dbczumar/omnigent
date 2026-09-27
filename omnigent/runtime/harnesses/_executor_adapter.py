@@ -124,6 +124,7 @@ class InnerExecutorError(RuntimeError):
     :param code: Semantic failure code, e.g. ``"databricks_sign_in_pending"``.
     :param title: Short headline for the error card, or ``None``.
     :param remediation: Concrete next step for the user, or ``None``.
+    :param undelivered: ``True`` when the harness never received the message.
     """
 
     def __init__(
@@ -133,11 +134,13 @@ class InnerExecutorError(RuntimeError):
         code: str,
         title: str | None = None,
         remediation: str | None = None,
+        undelivered: bool = False,
     ) -> None:
         super().__init__(message)
         self.code = code
         self.title = title
         self.remediation = remediation
+        self.undelivered = undelivered
 
 
 class ExecutorAdapter(HarnessApp):
@@ -372,6 +375,7 @@ class ExecutorAdapter(HarnessApp):
                                 code=event.code,
                                 title=event.title,
                                 remediation=event.remediation,
+                                undelivered=event.undelivered,
                             )
                         raise RuntimeError(f"inner executor error: {detail}")
         except ElicitationDeclinedError:
@@ -994,6 +998,7 @@ class ExecutorAdapter(HarnessApp):
                 message=str(exception),
                 title=exception.title,
                 remediation=exception.remediation,
+                undelivered=True if exception.undelivered else None,
             )
         if isinstance(exception, OmnigentError):
             return ErrorDetail(code=exception.code, message=str(exception))

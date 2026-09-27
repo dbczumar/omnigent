@@ -1702,6 +1702,8 @@ async def test_run_turn_keeps_the_pane_when_a_sign_in_prompt_blocks_delivery(
     assert error.title == "Claude Code can't start until you sign in to Databricks"
     assert error.remediation is not None
     assert "HQ7M-2KPD" in error.remediation
+    # The gate failed before the prompt was typed: the message never reached Claude Code.
+    assert error.undelivered is True
 
 
 @pytest.mark.asyncio

@@ -2738,6 +2738,22 @@ async def _persist_external_conversation_items(
     return [persisted.id for persisted in persisted_items]
 
 
+def _failed_event_undelivered(event: Mapping[str, Any]) -> bool:
+    """
+    Return whether a ``response.failed`` event says the harness never received the message.
+
+    The harness sets ``undelivered`` on the error when the turn failed before
+    delivery (a launcher sign-in prompt, a missing bridge, a prompt that never
+    rendered). A failure after the harness may have accepted the message must
+    not settle anything: its own mirror can still arrive.
+    """
+    raw_response = event.get("response")
+    raw_error = raw_response.get("error") if isinstance(raw_response, dict) else None
+    if not isinstance(raw_error, dict):
+        raw_error = event.get("error")
+    return isinstance(raw_error, dict) and raw_error.get("undelivered") is True
+
+
 async def _settle_undelivered_native_input(
     conversation_store: ConversationStore | None,
     session_id: str,
@@ -2763,7 +2779,8 @@ async def _settle_undelivered_native_input(
     :param response_id: The failed turn's response id, so the message groups
         with the error item persisted right after it; ``None`` mints one.
     :param input_stable_id: The web stable id the runner stamped on the failed
-        turn; ``None`` (an API client without one) settles nothing.
+        turn, passed only when the harness reported the failure as undelivered;
+        ``None`` settles nothing.
     """
     if conversation_store is None or input_stable_id is None:
         return
@@ -7380,7 +7397,12 @@ async def _relay_runner_stream_once(
                             conversation_store,
                             session_id,
                             current_response_id,
-                            raw_input_stable_id if isinstance(raw_input_stable_id, str) else None,
+                            (
+                                raw_input_stable_id
+                                if isinstance(raw_input_stable_id, str)
+                                and _failed_event_undelivered(event)
+                                else None
+                            ),
                         )
                     error_item = _error_item_from_sse(
                         event,

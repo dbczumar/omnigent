@@ -582,10 +582,13 @@ def test_build_error_detail_keeps_inner_executor_error_fields() -> None:
         code="databricks_sign_in_pending",
         title="Codex can't start until you sign in to Databricks",
         remediation="Open https://signin.example.com/device and enter code HQ7M-2KPD.",
+        undelivered=True,
     )
     detail = adapter._build_error_detail(error)
 
     assert detail.code == "databricks_sign_in_pending"
+    # The relay settles the queued message only on a failure before delivery.
+    assert detail.undelivered is True
     assert detail.message == "Codex is waiting for a sign-in in this session's terminal."
     assert detail.title == "Codex can't start until you sign in to Databricks"
     assert detail.remediation is not None
@@ -618,6 +621,7 @@ async def test_coded_executor_error_is_raised_with_its_code() -> None:
                 code="databricks_sign_in_pending",
                 title="Codex can't start until you sign in to Databricks",
                 remediation="Open https://signin.example.com/device and enter code HQ7M-2KPD.",
+                undelivered=True,
             )
         ]
     )
@@ -635,6 +639,7 @@ async def test_coded_executor_error_is_raised_with_its_code() -> None:
     assert raised.value.title == "Codex can't start until you sign in to Databricks"
     assert raised.value.remediation is not None
     assert "HQ7M-2KPD" in raised.value.remediation
+    assert raised.value.undelivered is True
 
 
 def test_build_error_detail_uses_omnigent_error_code() -> None:

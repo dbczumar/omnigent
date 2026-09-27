@@ -1619,6 +1619,8 @@ def test_run_turn_surfaces_coded_startup_failure(
     assert error.title == "Codex can't start until you sign in to Databricks"
     assert error.remediation is not None
     assert "HQ7M-2KPD" in error.remediation
+    # The message never reached Codex: the sender's queued copy is the record.
+    assert error.undelivered is True
 
 
 def test_bridge_state_wait_preserves_legacy_and_configured_command_contracts(

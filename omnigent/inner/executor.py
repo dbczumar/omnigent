@@ -356,6 +356,11 @@ class ExecutorError(ExecutorEvent):
         for a sign-in"``, or ``None``.
     :param remediation: Concrete next step for the user, e.g. the sign-in link
         and code, or ``None``.
+    :param undelivered: ``True`` when the failure happened before the harness
+        received the message (a launcher sign-in prompt, a missing bridge, a
+        prompt that never rendered), so the message never reached the
+        transcript and its sender's queued copy is the only record of it.
+        ``False`` (default) once the harness may have accepted it.
     """
 
     message: str
@@ -365,6 +370,7 @@ class ExecutorError(ExecutorEvent):
     code: str | None = None
     title: str | None = None
     remediation: str | None = None
+    undelivered: bool = False
 
 
 def _close_stream_quietly(stream: Iterator[ProviderStreamItem]) -> None:

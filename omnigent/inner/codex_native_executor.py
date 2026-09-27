@@ -513,6 +513,7 @@ class CodexNativeExecutor(Executor):
 
         error_msg: str | None = None
         startup_failure: CodexStartupFailure | None = None
+        undelivered = False
         while True:
             if state is None:
                 (
@@ -577,8 +578,10 @@ class CodexNativeExecutor(Executor):
                         if startup_error
                         else "Codex native bridge state is missing"
                     )
+                    undelivered = True
                 elif not _session_is_active(state.session_id, self._request_session_id):
                     error_msg = "Codex native session is no longer active"
+                    undelivered = True
                 else:
                     client = client_for_transport(
                         state.socket_path,
@@ -641,6 +644,9 @@ class CodexNativeExecutor(Executor):
                 code=startup_failure.code if startup_failure is not None else None,
                 title=startup_failure.title if startup_failure is not None else None,
                 remediation=startup_failure.remediation if startup_failure is not None else None,
+                # A failure once the app-server was asked to start the turn is
+                # ambiguous: Codex may have accepted the message.
+                undelivered=undelivered,
             )
         else:
             yield TurnComplete(response=None)
