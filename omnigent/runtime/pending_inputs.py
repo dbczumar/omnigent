@@ -73,7 +73,9 @@ Limitations (identical to :mod:`pending_elicitations`):
   landed) or :func:`restore` (it did not) settles them, so a queue that
   refills during the persist can never discard the entries a failed append
   has to put back; they are a transient overlay of at most one drain, so
-  the queue never exceeds twice the cap.
+  the queue never exceeds twice the cap. A drain reports at most a cap's
+  worth of skipped entries, so the persist site's append stays bounded
+  even right after a rolled-back drain left the queue over the cap.
 * An image-only message has no text to match, so it drains by position;
   behind a stale head
   entry its image can land on the wrong message. This is the positional
@@ -462,7 +464,9 @@ def resolve_matching_text(conversation_id: str, text: str, *, hold: bool = False
     :param hold: Keep the matched and skipped entries in place, marked held,
         instead of removing them; the caller settles each with
         :func:`release` or :func:`restore`. Entries already held are skipped.
-    :returns: Matched entry plus older skipped entries, or no match with an
+    :returns: Matched entry plus the older entries it jumped over — at most
+        :data:`_MAX_ENTRIES_PER_CONVERSATION` of them, oldest first; any
+        beyond that stay queued for a later drain — or no match with an
         empty skipped list when nothing carries this text (e.g. it was typed
         directly in the TUI).
     """
@@ -496,9 +500,13 @@ def resolve_matching_text(conversation_id: str, text: str, *, hold: bool = False
                     break
         if match_index is None:
             return MatchedDrain(matched=None, skipped=[])
-        skipped_entries = ordered[:match_index]
-        _matched_id, matched_entry = ordered[match_index]
-        for pending_id, entry in ordered[: match_index + 1]:
+        # Bound one drain's work: report at most a cap's worth of skipped
+        # entries (oldest first) and leave the rest queued for later drains, so
+        # a queue that overflowed after a rolled-back append never yields an
+        # unbounded append downstream. The matched entry itself always drains.
+        skipped_entries = ordered[:match_index][:_MAX_ENTRIES_PER_CONVERSATION]
+        matched_id, matched_entry = ordered[match_index]
+        for pending_id, entry in [*skipped_entries, (matched_id, matched_entry)]:
             if hold:
                 entry.held = True
             else:

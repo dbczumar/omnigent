@@ -2722,8 +2722,9 @@ async def _persist_external_conversation_item_unlocked(
     # Every drain below holds its entries in place (``hold=True``): they keep
     # their slot until the append settles, so a failed append restores the
     # queue exactly and a refill meanwhile cannot evict them. Older entries a
-    # text match jumped over: a user message surfaces them as undelivered; a
-    # slash command only holds them and puts them back afterwards.
+    # text match jumped over: a user message with a retry-safe identity
+    # surfaces them as undelivered; a source-less mirror or a slash command
+    # only holds them and puts them back afterwards.
     skipped_pending: list[pending_inputs.DrainedInput] = []
     held_older: list[pending_inputs.DrainedInput] = []
     if (
@@ -2741,7 +2742,14 @@ async def _persist_external_conversation_item_unlocked(
         text = _message_text(item.data.content) or ""
         matched = pending_inputs.resolve_matching_text(session_id, text, hold=True)
         drained = matched.matched
-        skipped_pending = matched.skipped
+        if item.stable_id is not None or _is_kiro_native_session(conv):
+            skipped_pending = matched.skipped
+        else:
+            # A mirror without a source id cannot be told from a retry of an
+            # already-persisted one, and a retry matching a newer identical
+            # message would brand everything queued in between undelivered.
+            # Leave the older entries queued for a later mirror instead.
+            held_older = matched.skipped
         if drained is None and not _is_kiro_native_session(conv):
             drained = pending_inputs.resolve_oldest(session_id, hold=True)
         if drained is not None:
@@ -2778,10 +2786,11 @@ async def _persist_external_conversation_item_unlocked(
     # the matched item to match broadcast order), then the anchor. Each
     # skipped entry gets a pair of items (user message + error) with stable
     # IDs derived from pending_id, so the whole batch is idempotent under the
-    # append lock. The queue is capped per conversation
-    # (``pending_inputs._MAX_ENTRIES_PER_CONVERSATION``), so one append writes
-    # at most ``2 * cap + 1`` rows. A concurrent retry that slipped past the
-    # probe above comes back deduplicated and its queue entries are unheld.
+    # append lock. A drain reports at most ``pending_inputs.
+    # _MAX_ENTRIES_PER_CONVERSATION`` skipped entries, so one append writes at
+    # most ``2 * cap + 1`` rows whatever state a rolled-back drain left the
+    # queue in. A concurrent retry that slipped past the probe above comes
+    # back deduplicated and its queue entries are unheld.
     try:
         skipped_new_items = _build_skipped_native_items(session_id, conv, skipped_pending)
         batch = [*skipped_new_items, item]

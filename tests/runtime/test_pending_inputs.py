@@ -540,3 +540,23 @@ def test_resolve_matching_text_identical_texts_drain_in_queue_order() -> None:
     assert drained.matched is not None and drained.matched.pending_id == first
     assert drained.skipped == []
     assert [entry["pending_id"] for entry in pending_inputs.snapshot_for("conv_a")] == [second]
+
+
+def test_resolve_matching_text_reports_at_most_a_cap_of_skipped_entries() -> None:
+    """A drain surfaces at most a cap's worth of skipped entries and leaves the rest queued."""
+    cap = pending_inputs._MAX_ENTRIES_PER_CONVERSATION
+    first_wave = [pending_inputs.record("conv_a", [_text_block(f"a{i}")]) for i in range(cap)]
+    held = pending_inputs.resolve_matching_text("conv_a", f"a{cap - 1}", hold=True)
+    assert held.matched is not None
+    second_wave = [pending_inputs.record("conv_a", [_text_block(f"b{i}")]) for i in range(cap)]
+    # The append failed: everything is unheld again, twice the cap in queue order.
+    for entry in [*held.skipped, held.matched]:
+        pending_inputs.restore("conv_a", entry)
+    assert len(pending_inputs.snapshot_for("conv_a")) == 2 * cap
+
+    drained = pending_inputs.resolve_matching_text("conv_a", f"b{cap - 1}")
+
+    assert drained.matched is not None and drained.matched.pending_id == second_wave[-1]
+    assert [entry.pending_id for entry in drained.skipped] == first_wave
+    remaining = [entry["pending_id"] for entry in pending_inputs.snapshot_for("conv_a")]
+    assert remaining == second_wave[:-1]
