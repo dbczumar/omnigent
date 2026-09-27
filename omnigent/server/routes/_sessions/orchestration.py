@@ -324,7 +324,6 @@ from omnigent.server.routes._sessions.helpers import (
     _signal_terminal_resolved_harness_elicitation,
     _spec_harness,
     _stop_session_via_runner,
-    _strip_attachment_markers,
     _usage_by_model_for_display,
     _validate_session_workspace,
     _validate_terminal_launch_args,
@@ -2664,7 +2663,11 @@ async def _persist_external_conversation_item_unlocked(
     # draining for it would hand the queued message's uploads to the marker.
     cleared_pending_id: str | None = None
     drained: pending_inputs.DrainedInput | None = None
+    # Older entries a text match jumped over. A user message surfaces them as
+    # undelivered; a slash command only holds them and puts them back once the
+    # append has settled, so a failed append can restore the original order.
     skipped_pending: list[pending_inputs.DrainedInput] = []
+    held_older: list[pending_inputs.DrainedInput] = []
     if (
         item.type == "message"
         and isinstance(item.data, MessageData)
@@ -2677,7 +2680,7 @@ async def _persist_external_conversation_item_unlocked(
         # hand it to THIS message (see ``omnigent.runtime.pending_inputs``).
         # Skipped older entries are persisted as undelivered. A miss falls back
         # to the oldest entry, except for Kiro, whose prompt text is exact.
-        text = _strip_attachment_markers(_message_text(item.data.content) or "")
+        text = _message_text(item.data.content) or ""
         matched = pending_inputs.resolve_matching_text(session_id, text)
         drained = matched.matched
         skipped_pending = matched.skipped
@@ -2709,10 +2712,10 @@ async def _persist_external_conversation_item_unlocked(
         # mistaken for a lost message; older entries stay in place.
         command_line = f"/{item.data.name} {item.data.arguments}".strip()
         matched = pending_inputs.resolve_matching_text(session_id, command_line)
-        if matched.matched is not None:
-            cleared_pending_id = matched.matched.pending_id
-        for entry in reversed(matched.skipped):
-            pending_inputs.restore(session_id, entry)
+        drained = matched.matched
+        if drained is not None:
+            cleared_pending_id = drained.pending_id
+        held_older = matched.skipped
     # Build the batch: skipped entries first (their positions must precede
     # the matched item to match broadcast order), then the anchor. Each
     # skipped entry gets a pair of items (user message + error) with stable
@@ -2735,15 +2738,17 @@ async def _persist_external_conversation_item_unlocked(
         # Nothing was committed: put every drained entry back so the
         # forwarder's retry drains the same entries and surfaces the same
         # undelivered messages.
-        _restore_drained_inputs(session_id, skipped_pending, drained)
+        _restore_drained_inputs(session_id, [*skipped_pending, *held_older], drained)
         raise
     persisted = persisted_items[-1]
     if persisted.deduplicated:
         # A re-post of an already-committed item: nothing new to render or
         # title. Every pending entry consumed above belongs to a LATER user
         # message.
-        _restore_drained_inputs(session_id, skipped_pending, drained)
+        _restore_drained_inputs(session_id, [*skipped_pending, *held_older], drained)
         return persisted.id
+    # Older messages a slash command jumped over are still on their way.
+    _restore_drained_inputs(session_id, held_older, None)
     # Not a duplicate: publish side effects for each skipped pair. Items are
     # [user0, error0, user1, error1, ...]; 2 per skipped entry. The consumed
     # event names each skipped entry so clients settle those bubbles in order

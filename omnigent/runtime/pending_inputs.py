@@ -42,8 +42,9 @@ its entry at the head of the queue, and every later message would then
 drain the wrong entry — the receipt names the previous message, clients
 settle the wrong bubble, and the new message renders twice. So the
 persist site drains the oldest entry whose text equals the mirror
-(whitespace-normalized, attachment markers stripped) and reports the
-older entries it skipped, which the caller persists as undelivered. When
+(generated leading attachment marker lines dropped, whitespace
+normalized) and reports the older entries it skipped, which the caller
+persists as undelivered. When
 no entry matches — the transcript may still reformat text in ways not
 normalized here — the oldest entry is drained, as before.
 
@@ -63,8 +64,8 @@ Limitations (identical to :mod:`pending_elicitations`):
   is one in-flight message, same as every other AP-side transient.
 * At most :data:`_MAX_ENTRIES_PER_CONVERSATION` entries per conversation;
   :func:`record` and :func:`restore` evict the oldest beyond that.
-* An image-only message has no text to match (attachment markers are
-  stripped before matching), so it drains by position; behind a stale head
+* An image-only message has no text to match (its generated attachment
+  marker lines are dropped), so it drains by position; behind a stale head
   entry its image can land on the wrong message. This is the positional
   behavior that predates text matching, kept as a known limitation.
 
@@ -80,6 +81,7 @@ same conversation.
 from __future__ import annotations
 
 import copy
+import re
 import threading
 import time
 import uuid
@@ -87,6 +89,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from omnigent.db.workspace_cache import WorkspaceScopedCache
+from omnigent.inner.native_attachments import ATTACHMENT_MARKER_STRIP_PATTERN
 
 # A pending entry is evicted this many seconds after it was recorded
 # if it was never drained by a matching persisted message. Covers the
@@ -100,6 +103,12 @@ _TTL_S: float = 600.0
 # becomes two rows). Far above any real queue: nobody sends this many messages
 # within the TTL with none echoed back.
 _MAX_ENTRIES_PER_CONVERSATION = 64
+
+# Attachment reference lines a native executor prepends to a pasted message
+# ("[Attached: /tmp/x.png]", "[Attached file: …]", "[Attachment x could not be
+# loaded]"). Anchored to the start of the text so only the generated leading
+# lines are dropped, never a marker-like phrase the person typed.
+_LEADING_ATTACHMENT_MARKERS_RE = re.compile(rf"^(?:\s*(?:{ATTACHMENT_MARKER_STRIP_PATTERN}))+\s*")
 
 
 def _now() -> float:
@@ -394,8 +403,7 @@ def resolve_matching_text(conversation_id: str, text: str) -> MatchedDrain:
     undelivered web messages.
 
     :param conversation_id: Conversation/session id, e.g. ``"conv_abc123"``.
-    :param text: User-message text mirrored from the native transcript, with
-        any attachment marker lines already stripped.
+    :param text: User-message text mirrored from the native transcript.
     :returns: Matched entry plus older skipped entries, or no match with an
         empty skipped list when nothing carries this text (e.g. it was typed
         directly in the TUI).
@@ -515,8 +523,19 @@ def _content_text(content: list[dict[str, Any]]) -> str:
 
 
 def _normalize_text(text: str) -> str:
-    """Normalize text enough to compare a pending input with its mirrored text."""
-    return " ".join(text.split())
+    """
+    Normalize text enough to compare a pending input with its mirrored text.
+
+    Drops the generated leading attachment marker lines and collapses
+    whitespace. Applied to both sides of the comparison, so a marker-like
+    phrase the person typed themselves cancels out instead of breaking the
+    match.
+
+    :param text: Queued text or mirrored transcript text.
+    :returns: The comparable form, e.g. ``"look at this"`` for
+        ``"[Attached: /tmp/x.png]\\n\\nlook at this"``.
+    """
+    return " ".join(_LEADING_ATTACHMENT_MARKERS_RE.sub("", text, count=1).split())
 
 
 def reset_for_tests() -> None:

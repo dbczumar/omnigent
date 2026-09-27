@@ -447,3 +447,22 @@ def test_restore_keeps_the_per_conversation_cap() -> None:
     snapshot = [entry["pending_id"] for entry in pending_inputs.snapshot_for("conv_a")]
     assert len(snapshot) == cap
     assert snapshot == [*ids[1:], newest]
+
+
+def test_resolve_matching_text_drops_only_generated_leading_markers() -> None:
+    """Leading attachment marker lines cancel out; a marker typed mid-message is kept."""
+    with_image = pending_inputs.record(
+        "conv_a", [{"type": "input_image", "url": "img://1"}, _text_block("look at this")]
+    )
+    literal = pending_inputs.record("conv_a", [_text_block("explain [Attached: example]")])
+
+    first = pending_inputs.resolve_matching_text(
+        "conv_a", "[Attached: /tmp/x.png]\n\nlook at this"
+    )
+    second = pending_inputs.resolve_matching_text("conv_a", "explain [Attached: example]")
+
+    assert first.matched is not None and first.matched.pending_id == with_image
+    assert first.skipped == []
+    assert second.matched is not None and second.matched.pending_id == literal
+    assert second.skipped == []
+    assert pending_inputs.snapshot_for("conv_a") == []
