@@ -360,10 +360,21 @@ describe("ErrorBanner", () => {
     useChatStore.setState({ conversationId: "conv_live" });
     const tab = { location: { href: "" }, close: vi.fn() };
     const open = vi.spyOn(window, "open").mockReturnValue(tab as unknown as Window);
-    vi.mocked(getSessionSignInLink).mockResolvedValue({ pending: false, url: null, code: null });
+    // A first click found a prompt with a code; the sign-in then completed.
+    vi.mocked(getSessionSignInLink).mockResolvedValueOnce({
+      pending: true,
+      url: "https://signin.example.com/device?fresh=1",
+      code: "ZZ99-FRSH",
+    });
     renderSignInCard();
     fireEvent.click(screen.getByRole("button", { name: "Open sign-in link" }));
+    await screen.findByRole("button", { name: "Copy code ZZ99-FRSH" });
+    tab.location.href = "";
+    vi.mocked(getSessionSignInLink).mockResolvedValue({ pending: false, url: null, code: null });
+    fireEvent.click(screen.getByRole("button", { name: "Open sign-in link" }));
     await waitFor(() => expect(tab.close).toHaveBeenCalled());
+    // The obsolete code is gone along with the prompt.
+    expect(screen.queryByRole("button", { name: "Copy code ZZ99-FRSH" })).toBeNull();
     expect(screen.getByTestId("error-sign-in-note")).toHaveTextContent(
       "No sign-in is pending in the terminal any more. Try sending your message again.",
     );

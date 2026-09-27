@@ -353,6 +353,8 @@ export function ErrorBanner({
         else window.open(live.url, "_blank", "noopener,noreferrer");
       } else {
         tab?.close();
+        // A code fetched earlier belongs to a prompt that is gone.
+        setSignInCode(null);
         setSignInNote(
           "No sign-in is pending in the terminal any more. Try sending your message again.",
         );
