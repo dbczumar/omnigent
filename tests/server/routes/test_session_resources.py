@@ -5500,6 +5500,116 @@ async def test_claude_native_failed_slash_command_append_restores_its_entry() ->
 
 
 @pytest.mark.asyncio
+async def test_claude_native_failed_append_keeps_held_entries_when_the_queue_refills(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Entries a persist has drained survive a refill of the queue during a failed append.
+
+    Full queue: a lost message A at the head, B behind it, then filler. Mirror B
+    (A skipped, B matched). While the append is in flight two new messages
+    arrive, then the append fails. The refill must evict the oldest unheld
+    filler, never A or B, so the retry persists A as undelivered, matches B, and
+    the receipts name A then B.
+    """
+    from omnigent.runtime import pending_inputs
+    from omnigent.server.routes.sessions import _persist_external_conversation_item
+
+    class _BlockThenFailStore(_ConversationStore):
+        """First append parks until released, then raises; later appends work."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.first_append_started = threading.Event()
+            self.release_first_append = threading.Event()
+            self.append_count = 0
+
+        def append(self, conversation_id: str, items: list[Any]) -> list[Any]:
+            self.append_count += 1
+            if self.append_count == 1:
+                self.first_append_started.set()
+                assert self.release_first_append.wait(timeout=5)
+                raise RuntimeError("database unavailable")
+            return super().append(conversation_id, items)
+
+    published: list[tuple[str, dict[str, Any]]] = []
+    monkeypatch.setattr(
+        session_stream,
+        "publish",
+        lambda conversation_id, event: published.append((conversation_id, event)),
+    )
+    pending_inputs.reset_for_tests()
+    store = _BlockThenFailStore()
+    sid = "64a784c3aa907d1774f44313546947c6"
+    conv = store.get_conversation(sid)
+    assert conv is not None
+    cap = pending_inputs._MAX_ENTRIES_PER_CONVERSATION
+    lost = pending_inputs.record(sid, [{"type": "input_text", "text": "lost in the reconnect"}])
+    matched = pending_inputs.record(sid, [{"type": "input_text", "text": "still here?"}])
+    filler = [
+        pending_inputs.record(sid, [{"type": "input_text", "text": f"filler {i}"}])
+        for i in range(cap - 2)
+    ]
+    body = SessionEventInput(
+        type="external_conversation_item",
+        data={
+            "item_type": "message",
+            "item_data": {
+                "role": "user",
+                "content": [{"type": "input_text", "text": "still here?"}],
+            },
+            "response_id": "resp_still_here",
+            "source_id": "claude:still-here:0",
+        },
+    )
+
+    async def persist() -> str:
+        return await _persist_external_conversation_item(
+            sid,
+            conv,
+            body,
+            store,  # type: ignore[arg-type]
+        )
+
+    try:
+        first = asyncio.create_task(persist())
+        await asyncio.to_thread(store.first_append_started.wait, 5)
+        newer = [
+            pending_inputs.record(sid, [{"type": "input_text", "text": f"new {i}"}])
+            for i in range(2)
+        ]
+        store.release_first_append.set()
+        with pytest.raises(RuntimeError, match="database unavailable"):
+            await first
+
+        # The refill evicted the two oldest filler entries, not the held ones.
+        assert [entry["pending_id"] for entry in pending_inputs.snapshot_for(sid)] == [
+            lost,
+            matched,
+            *filler[2:],
+            *newer,
+        ]
+        assert store.appended_items == []
+
+        item_id = await persist()
+
+        assert [item.type for item in store.appended_items] == ["message", "error", "message"]
+        assert item_id == store.appended_items[-1].id
+        assert [entry["pending_id"] for entry in pending_inputs.snapshot_for(sid)] == [
+            *filler[2:],
+            *newer,
+        ]
+        receipts = [
+            event["data"]["cleared_pending_id"]
+            for _conversation_id, event in published
+            if event.get("type") == "session.input.consumed"
+        ]
+        assert receipts == [lost, matched]
+    finally:
+        store.release_first_append.set()
+        pending_inputs.reset_for_tests()
+
+
+@pytest.mark.asyncio
 async def test_native_dispatch_reports_malformed_runner_error_body() -> None:
     """Opaque framework 500 bodies become explicit ensure errors.
 

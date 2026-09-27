@@ -63,7 +63,11 @@ Limitations (identical to :mod:`pending_elicitations`):
 * Entries do not survive an AP-server restart — acceptable, the loss
   is one in-flight message, same as every other AP-side transient.
 * At most :data:`_MAX_ENTRIES_PER_CONVERSATION` entries per conversation;
-  :func:`record` and :func:`restore` evict the oldest beyond that.
+  :func:`record` evicts the oldest unheld entries beyond that. Entries a
+  persist in progress has drained with ``hold=True`` keep their slot until
+  :func:`release` (it landed) or :func:`restore` (it did not) settles them,
+  so a queue that refills during the persist can never discard the entries
+  a failed append has to put back.
 * An image-only message has no text to match (its generated attachment
   marker lines are dropped), so it drains by position; behind a stale head
   entry its image can land on the wrong message. This is the positional
@@ -97,11 +101,11 @@ from omnigent.inner.native_attachments import ATTACHMENT_MARKER_STRIP_PATTERN
 # transcript round-trip on a busy session still drains normally.
 _TTL_S: float = 600.0
 
-# Hard cap on queued entries per conversation, enforced by :func:`record` and
-# :func:`restore`: the oldest entries are evicted when either would exceed it.
-# Bounds the snapshot replay and the persist site's append (each skipped entry
-# becomes two rows). Far above any real queue: nobody sends this many messages
-# within the TTL with none echoed back.
+# Hard cap on queued entries per conversation, enforced by :func:`record`: the
+# oldest unheld entries are evicted when a new one would exceed it. Bounds the
+# snapshot replay and the persist site's append (each skipped entry becomes two
+# rows). Far above any real queue: nobody sends this many messages within the
+# TTL with none echoed back.
 _MAX_ENTRIES_PER_CONVERSATION = 64
 
 # Attachment reference lines a native executor prepends to a pasted message
@@ -183,6 +187,10 @@ class _Entry:
         carries the correct author on all clients.
     :param created_at: ``time.monotonic()`` timestamp at record time,
         used only for TTL eviction.
+    :param held: ``True`` while a persist in progress has drained this entry
+        with ``hold=True``: it keeps its slot and order, other drains skip
+        it, and cap eviction leaves it alone until :func:`restore` (the
+        persist did not land) or :func:`release` (it did) settles it.
     """
 
     pending_id: str
@@ -193,6 +201,7 @@ class _Entry:
     # Lambda (not ``_now`` directly) so a monkeypatched ``_now`` is
     # resolved at construction time rather than bound at class def.
     created_at: float = field(default_factory=lambda: _now())
+    held: bool = False
 
 
 # Per-conversation mapping conversation_id → {pending_id: entry}. The
@@ -257,8 +266,10 @@ def record(
         send one.
     :returns: The index-assigned pending id, e.g. ``"pending_a1b2c3"``.
 
-    Beyond :data:`_MAX_ENTRIES_PER_CONVERSATION` live entries the oldest one
-    is evicted, so the queue (and everything sized by it) stays bounded.
+    Beyond :data:`_MAX_ENTRIES_PER_CONVERSATION` live entries the oldest
+    unheld one is evicted, so the queue (and everything sized by it) stays
+    bounded without touching entries a persist in progress must be able to
+    put back.
     """
     with _lock:
         _evict_stale_locked(conversation_id, _now())
@@ -285,15 +296,19 @@ def record(
 
 def _evict_beyond_cap(entries: dict[str, _Entry]) -> None:
     """
-    Drop the oldest entries until ``entries`` fits the per-conversation cap.
+    Drop the oldest unheld entries until ``entries`` fits the per-conversation cap.
 
     Caller must hold :data:`_lock`. Insertion order is age order, so the first
-    keys go first.
+    unheld keys go first. Held entries belong to a persist in progress and keep
+    their slot: discarding one would break the rollback that puts it back.
 
     :param entries: One conversation's ``{pending_id: entry}`` map.
     """
-    while len(entries) > _MAX_ENTRIES_PER_CONVERSATION:
-        entries.pop(next(iter(entries)))
+    excess = len(entries) - _MAX_ENTRIES_PER_CONVERSATION
+    if excess <= 0:
+        return
+    for pending_id in [pid for pid, entry in entries.items() if not entry.held][:excess]:
+        entries.pop(pending_id, None)
 
 
 def resolve(conversation_id: str, pending_id: str) -> None:
@@ -318,7 +333,7 @@ def resolve(conversation_id: str, pending_id: str) -> None:
             _pending.pop(conversation_id, None)
 
 
-def resolve_oldest(conversation_id: str) -> DrainedInput | None:
+def resolve_oldest(conversation_id: str, *, hold: bool = False) -> DrainedInput | None:
     """
     Drain the oldest pending entry (FIFO) and return it.
 
@@ -338,6 +353,9 @@ def resolve_oldest(conversation_id: str) -> DrainedInput | None:
 
     :param conversation_id: Conversation/session id the message was
         persisted on, e.g. ``"conv_abc123"``.
+    :param hold: Keep the entry in place, marked held, instead of removing it;
+        the caller settles it with :func:`release` once the persist landed or
+        :func:`restore` if it did not. Entries already held are skipped.
     :returns: The drained :class:`DrainedInput`, or ``None`` when no
         entry was pending.
     """
@@ -346,30 +364,32 @@ def resolve_oldest(conversation_id: str) -> DrainedInput | None:
         entries = _pending.get(conversation_id)
         if entries is None:
             return None
-        # Insertion order = FIFO; the first key is the oldest entry.
-        oldest_id = next(iter(entries))
-        entry = entries.pop(oldest_id)
-        if not entries:
-            _pending.pop(conversation_id, None)
-        return DrainedInput(
-            pending_id=entry.pending_id,
-            content=copy.deepcopy(entry.content),
-            created_by=entry.created_by,
-            stable_id=entry.stable_id,
-            background_titles_enabled=entry.background_titles_enabled,
-        )
+        # Insertion order = FIFO; the first unheld key is the oldest entry.
+        oldest_id = next((pid for pid, entry in entries.items() if not entry.held), None)
+        if oldest_id is None:
+            return None
+        entry = entries[oldest_id]
+        if hold:
+            entry.held = True
+        else:
+            entries.pop(oldest_id)
+            if not entries:
+                _pending.pop(conversation_id, None)
+        return _drained_input(entry)
 
 
 def restore(conversation_id: str, drained: DrainedInput) -> None:
     """
-    Put a drained entry back at the FRONT of the pending queue.
+    Put a drained entry back into the pending queue.
 
-    Compensation for a drain whose persist turned out to be a duplicate
-    (an idempotent external-item append deduplicated the retry): the
-    entry belongs to the NEXT user message, and it was the oldest when
-    drained, so it returns to the head to keep FIFO intact. The cap still
-    holds: if the queue filled up meanwhile, the oldest entries are
-    evicted, which may be the restored one itself.
+    Compensation for a drain whose persist did not land (a deduplicated
+    retry, or an append that raised): the entry belongs to a LATER mirror.
+    An entry drained with ``hold=True`` never left the queue, so it is
+    simply unheld in place, keeping its slot and order. One that is gone
+    (drained without ``hold``, or evicted by the TTL meanwhile) returns to
+    the FRONT, since it was the oldest when drained. Compensation never
+    evicts: a queue that refilled meanwhile may exceed the cap by the
+    restored entries until the next :func:`record` trims unheld ones.
 
     :param conversation_id: Conversation/session id, e.g.
         ``"conv_abc123"``.
@@ -385,12 +405,34 @@ def restore(conversation_id: str, drained: DrainedInput) -> None:
     )
     with _lock:
         entries = _pending.get(conversation_id, {})
-        merged = {drained.pending_id: entry, **entries}
-        _evict_beyond_cap(merged)
-        _pending[conversation_id] = merged
+        current = entries.get(drained.pending_id)
+        if current is not None:
+            current.held = False
+            return
+        _pending[conversation_id] = {drained.pending_id: entry, **entries}
 
 
-def resolve_matching_text(conversation_id: str, text: str) -> MatchedDrain:
+def release(conversation_id: str, drained: DrainedInput) -> None:
+    """
+    Drop a held entry whose persist landed.
+
+    Idempotent: an entry already gone (evicted by the TTL, or drained without
+    ``hold``) is a no-op.
+
+    :param conversation_id: Conversation/session id, e.g. ``"conv_abc123"``.
+    :param drained: The entry returned by :func:`resolve_oldest` or
+        :func:`resolve_matching_text` with ``hold=True``.
+    """
+    with _lock:
+        entries = _pending.get(conversation_id)
+        if entries is None:
+            return
+        entries.pop(drained.pending_id, None)
+        if not entries:
+            _pending.pop(conversation_id, None)
+
+
+def resolve_matching_text(conversation_id: str, text: str, *, hold: bool = False) -> MatchedDrain:
     """
     Drain through the first pending entry whose text matches ``text``.
 
@@ -404,6 +446,9 @@ def resolve_matching_text(conversation_id: str, text: str) -> MatchedDrain:
 
     :param conversation_id: Conversation/session id, e.g. ``"conv_abc123"``.
     :param text: User-message text mirrored from the native transcript.
+    :param hold: Keep the matched and skipped entries in place, marked held,
+        instead of removing them; the caller settles each with
+        :func:`release` or :func:`restore`. Entries already held are skipped.
     :returns: Matched entry plus older skipped entries, or no match with an
         empty skipped list when nothing carries this text (e.g. it was typed
         directly in the TUI).
@@ -416,7 +461,7 @@ def resolve_matching_text(conversation_id: str, text: str) -> MatchedDrain:
         entries = _pending.get(conversation_id)
         if entries is None:
             return MatchedDrain(matched=None, skipped=[])
-        ordered = list(entries.items())
+        ordered = [(pid, entry) for pid, entry in entries.items() if not entry.held]
         match_index: int | None = None
         for index, (_pending_id, entry) in enumerate(ordered):
             entry_text = _normalize_text(_content_text(entry.content))
@@ -432,8 +477,11 @@ def resolve_matching_text(conversation_id: str, text: str) -> MatchedDrain:
             return MatchedDrain(matched=None, skipped=[])
         skipped_entries = ordered[:match_index]
         _matched_id, matched_entry = ordered[match_index]
-        for pending_id, _entry in ordered[: match_index + 1]:
-            entries.pop(pending_id, None)
+        for pending_id, entry in ordered[: match_index + 1]:
+            if hold:
+                entry.held = True
+            else:
+                entries.pop(pending_id, None)
         if not entries:
             _pending.pop(conversation_id, None)
         return MatchedDrain(

@@ -2663,9 +2663,11 @@ async def _persist_external_conversation_item_unlocked(
     # draining for it would hand the queued message's uploads to the marker.
     cleared_pending_id: str | None = None
     drained: pending_inputs.DrainedInput | None = None
-    # Older entries a text match jumped over. A user message surfaces them as
-    # undelivered; a slash command only holds them and puts them back once the
-    # append has settled, so a failed append can restore the original order.
+    # Every drain below holds its entries in place (``hold=True``): they keep
+    # their slot until the append settles, so a failed append restores the
+    # queue exactly and a refill meanwhile cannot evict them. Older entries a
+    # text match jumped over: a user message surfaces them as undelivered; a
+    # slash command only holds them and puts them back afterwards.
     skipped_pending: list[pending_inputs.DrainedInput] = []
     held_older: list[pending_inputs.DrainedInput] = []
     if (
@@ -2681,11 +2683,11 @@ async def _persist_external_conversation_item_unlocked(
         # Skipped older entries are persisted as undelivered. A miss falls back
         # to the oldest entry, except for Kiro, whose prompt text is exact.
         text = _message_text(item.data.content) or ""
-        matched = pending_inputs.resolve_matching_text(session_id, text)
+        matched = pending_inputs.resolve_matching_text(session_id, text, hold=True)
         drained = matched.matched
         skipped_pending = matched.skipped
         if drained is None and not _is_kiro_native_session(conv):
-            drained = pending_inputs.resolve_oldest(session_id)
+            drained = pending_inputs.resolve_oldest(session_id, hold=True)
         if drained is not None:
             cleared_pending_id = drained.pending_id
             item = _merge_pending_file_blocks(item, drained.content)
@@ -2711,7 +2713,7 @@ async def _persist_external_conversation_item_unlocked(
         # back as a slash_command item. Drain its own entry so it is not later
         # mistaken for a lost message; older entries stay in place.
         command_line = f"/{item.data.name} {item.data.arguments}".strip()
-        matched = pending_inputs.resolve_matching_text(session_id, command_line)
+        matched = pending_inputs.resolve_matching_text(session_id, command_line, hold=True)
         drained = matched.matched
         if drained is not None:
             cleared_pending_id = drained.pending_id
@@ -2723,21 +2725,21 @@ async def _persist_external_conversation_item_unlocked(
     # append lock. The queue is capped per conversation
     # (``pending_inputs._MAX_ENTRIES_PER_CONVERSATION``), so one append writes
     # at most ``2 * cap + 1`` rows. A concurrent retry that slipped past the
-    # probe above comes back deduplicated and its queue entries are restored.
-    skipped_new_items = _build_skipped_native_items(session_id, conv, skipped_pending)
-    batch = [*skipped_new_items, item]
-    pending_background_title = prepare_background_session_title(
-        coordinator=background_title_coordinator,
-        conversation=conv,
-        event=SessionEventInput(type=item.type, data=item.data.model_dump()),
-        enabled=enabled and (drained is None or drained.background_titles_enabled),
-    )
+    # probe above comes back deduplicated and its queue entries are unheld.
     try:
+        skipped_new_items = _build_skipped_native_items(session_id, conv, skipped_pending)
+        batch = [*skipped_new_items, item]
+        pending_background_title = prepare_background_session_title(
+            coordinator=background_title_coordinator,
+            conversation=conv,
+            event=SessionEventInput(type=item.type, data=item.data.model_dump()),
+            enabled=enabled and (drained is None or drained.background_titles_enabled),
+        )
         persisted_items = await asyncio.to_thread(conversation_store.append, session_id, batch)
     except Exception:
-        # Nothing was committed: put every drained entry back so the
-        # forwarder's retry drains the same entries and surfaces the same
-        # undelivered messages.
+        # Nothing was committed: unhold every drained entry so the forwarder's
+        # retry drains the same entries and surfaces the same undelivered
+        # messages.
         _restore_drained_inputs(session_id, [*skipped_pending, *held_older], drained)
         raise
     persisted = persisted_items[-1]
@@ -2747,7 +2749,9 @@ async def _persist_external_conversation_item_unlocked(
         # message.
         _restore_drained_inputs(session_id, [*skipped_pending, *held_older], drained)
         return persisted.id
-    # Older messages a slash command jumped over are still on their way.
+    # Landed: the drained entries are settled; older messages a slash command
+    # jumped over are still on their way and go back into play.
+    _release_drained_inputs(session_id, [*skipped_pending, drained])
     _restore_drained_inputs(session_id, held_older, None)
     # Not a duplicate: publish side effects for each skipped pair. Items are
     # [user0, error0, user1, error1, ...]; 2 per skipped entry. The consumed
@@ -2857,11 +2861,13 @@ def _restore_drained_inputs(
     drained: pending_inputs.DrainedInput | None,
 ) -> None:
     """
-    Put a mirror's drained pending entries back in their original queue order.
+    Put a mirror's drained pending entries back into play, in queue order.
 
     Compensation for a drain whose persist did not land (a deduplicated retry,
-    or an append that raised). Skipped entries preceded the matched one and
-    :func:`pending_inputs.restore` prepends, so they go back newest-first.
+    or an append that raised), and the way a slash command hands back the
+    older entries it only held. Held entries are unheld in place; one the TTL
+    evicted meanwhile is re-inserted at the front, newest-first, so the
+    original order survives either way.
 
     :param session_id: Conversation the entries belong to.
     :param skipped: Older entries skipped by the text match, oldest first.
@@ -2870,6 +2876,20 @@ def _restore_drained_inputs(
     for entry in reversed([*skipped, drained]):
         if entry is not None:
             pending_inputs.restore(session_id, entry)
+
+
+def _release_drained_inputs(
+    session_id: str, entries: list[pending_inputs.DrainedInput | None]
+) -> None:
+    """
+    Drop a mirror's drained pending entries once their persist landed.
+
+    :param session_id: Conversation the entries belong to.
+    :param entries: The matched entry and any skipped ones; ``None`` is skipped.
+    """
+    for entry in entries:
+        if entry is not None:
+            pending_inputs.release(session_id, entry)
 
 
 def _build_skipped_native_items(
