@@ -2729,16 +2729,20 @@ async def _persist_external_conversation_item_unlocked(
         event=SessionEventInput(type=item.type, data=item.data.model_dump()),
         enabled=enabled and (drained is None or drained.background_titles_enabled),
     )
-    persisted_items = await asyncio.to_thread(conversation_store.append, session_id, batch)
+    try:
+        persisted_items = await asyncio.to_thread(conversation_store.append, session_id, batch)
+    except Exception:
+        # Nothing was committed: put every drained entry back so the
+        # forwarder's retry drains the same entries and surfaces the same
+        # undelivered messages.
+        _restore_drained_inputs(session_id, skipped_pending, drained)
+        raise
     persisted = persisted_items[-1]
     if persisted.deduplicated:
         # A re-post of an already-committed item: nothing new to render or
         # title. Every pending entry consumed above belongs to a LATER user
-        # message — restore in original queue order (skipped entries preceded
-        # the match; restore prepends, so reverse).
-        for entry in reversed([*skipped_pending, drained]):
-            if entry is not None:
-                pending_inputs.restore(session_id, entry)
+        # message.
+        _restore_drained_inputs(session_id, skipped_pending, drained)
         return persisted.id
     # Not a duplicate: publish side effects for each skipped pair. Items are
     # [user0, error0, user1, error1, ...]; 2 per skipped entry. The consumed
@@ -2840,6 +2844,27 @@ async def _persist_external_conversation_items(
     if error is not None:
         raise error
     return [persisted.id for persisted in persisted_items]
+
+
+def _restore_drained_inputs(
+    session_id: str,
+    skipped: list[pending_inputs.DrainedInput],
+    drained: pending_inputs.DrainedInput | None,
+) -> None:
+    """
+    Put a mirror's drained pending entries back in their original queue order.
+
+    Compensation for a drain whose persist did not land (a deduplicated retry,
+    or an append that raised). Skipped entries preceded the matched one and
+    :func:`pending_inputs.restore` prepends, so they go back newest-first.
+
+    :param session_id: Conversation the entries belong to.
+    :param skipped: Older entries skipped by the text match, oldest first.
+    :param drained: The matched (or FIFO-drained) entry, or ``None``.
+    """
+    for entry in reversed([*skipped, drained]):
+        if entry is not None:
+            pending_inputs.restore(session_id, entry)
 
 
 def _build_skipped_native_items(
