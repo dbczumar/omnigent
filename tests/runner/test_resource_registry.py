@@ -36,7 +36,11 @@ from omnigent.runner.resource_registry import (
     trim_terminal_output,
 )
 from omnigent.terminals import TerminalRegistry
-from tests.runner.helpers import make_test_terminal_instance
+from tests.runner.helpers import (
+    CLAUDE_COMPOSER_PANE,
+    finish_native_tui_boot,
+    make_test_terminal_instance,
+)
 
 
 @pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux not installed")
@@ -681,11 +685,19 @@ async def _observe_native_agent_terminal_and_capture(
     terminal_registry: TerminalRegistry,
     instance: object,
     session_id: str,
+    *,
+    resource_role: str = CLAUDE_NATIVE_TERMINAL_ROLE,
+    status_publisher: Callable[[str, str, str | None], None] | None = None,
 ) -> dict[str, object]:
     """Observe *instance* as the native agent terminal, capturing its watcher.
 
     Returns the captured ``on_idle`` / ``on_activity`` / ``on_exit`` callbacks
     so a test can drive the PTY-status edges directly.
+
+    :param resource_role: Native terminal role to observe it under, e.g.
+        :data:`PI_NATIVE_TERMINAL_ROLE`.
+    :param status_publisher: Receives each published ``(session_id, status,
+        blocked_on)`` edge; ``None`` discards them.
     """
     callbacks: dict[str, object] = {}
 
@@ -708,13 +720,15 @@ async def _observe_native_agent_terminal_and_capture(
     instance.start_idle_watcher_thread = _capture_watcher  # type: ignore[attr-defined]
     # A status publisher is required for the native agent terminal's watcher to
     # wire its running/idle edges (and thus record the PTY status).
-    registry.set_session_status_publisher(lambda _sid, _status, _reason=None: None)
+    registry.set_session_status_publisher(
+        status_publisher or (lambda _sid, _status, _reason=None: None)
+    )
     await registry.observe_required_terminal(
         session_id,
         instance.name,  # type: ignore[attr-defined]
         instance.session_key,  # type: ignore[attr-defined]
         instance,
-        resource_role=CLAUDE_NATIVE_TERMINAL_ROLE,
+        resource_role=resource_role,
     )
     return callbacks
 
@@ -892,9 +906,12 @@ async def test_parked_pane_stays_running_then_recovers_on_pane_death(tmp_path: P
     pane death retires the poller and the PTY side owns the outcome. Without
     that, the session would spin forever.
     """
-    callbacks, statuses, pollers, _registry = await _observe_native_with_fake_poller(
+    callbacks, statuses, pollers, registry = await _observe_native_with_fake_poller(
         tmp_path, "conv_parked"
     )
+    instance = registry.terminal_registry.get("conv_parked", "claude", "main")
+    assert instance is not None
+    finish_native_tui_boot(instance, callbacks["on_tick"], callbacks["on_idle"])
     poller = pollers[0]
     poller.active = True
 
@@ -1108,9 +1125,12 @@ async def test_reconnect_resync_keeps_the_exit_classification_memo(tmp_path: Pat
 async def test_pty_edges_drive_status_when_poller_inactive(tmp_path: Path) -> None:
     """With no file (poller inactive), the PTY pane edges remain the status
     source — the fallback path for old Claude versions."""
-    callbacks, statuses, pollers, _registry = await _observe_native_with_fake_poller(
+    callbacks, statuses, pollers, registry = await _observe_native_with_fake_poller(
         tmp_path, "conv_fallback"
     )
+    instance = registry.terminal_registry.get("conv_fallback", "claude", "main")
+    assert instance is not None
+    finish_native_tui_boot(instance, callbacks["on_tick"], callbacks["on_idle"])
     # Poller stays inactive (file never resolved).
     assert pollers[0].active is False
 
@@ -1119,6 +1139,188 @@ async def test_pty_edges_drive_status_when_poller_inactive(tmp_path: Path) -> No
     # Status edges publish via loop.call_soon_threadsafe; let them drain.
     await asyncio.sleep(0)
     assert statuses == ["running", "idle"]
+
+
+@pytest.mark.asyncio
+async def test_pane_publishes_no_status_while_the_tui_boots(tmp_path: Path) -> None:
+    """A booting TUI's repaints are not a turn, so they publish no status.
+
+    Claude paints its banner and composer before it is asked anything. As
+    ``running`` then ``idle``, those repaints read as a turn that already
+    finished, and the desktop app announced it before the first prompt was even
+    typed in. The pane drives status once the TUI is quiet at its prompt.
+    """
+    callbacks, statuses, _pollers, registry = await _observe_native_with_fake_poller(
+        tmp_path, "conv_boot"
+    )
+    instance = registry.terminal_registry.get("conv_boot", "claude", "main")
+    assert instance is not None
+    on_tick, on_activity, on_idle = (
+        callbacks["on_tick"],
+        callbacks["on_activity"],
+        callbacks["on_idle"],
+    )
+    assert callable(on_tick) and callable(on_activity) and callable(on_idle)
+
+    # The banner paints, then the pane rests before the composer appears.
+    on_tick()
+    on_activity()
+    on_idle()
+    # The composer's own repaint lands on the tick that first finds it ready.
+    instance.last_pane_text = lambda: CLAUDE_COMPOSER_PANE  # type: ignore[method-assign]
+    on_tick()
+    on_activity()
+    on_tick()
+    on_idle()
+    await asyncio.sleep(0)
+    assert statuses == []
+
+    # Booted: the pane is the agent's work again.
+    on_activity()
+    on_idle()
+    await asyncio.sleep(0)
+    assert statuses == ["running", "idle"]
+
+
+@pytest.mark.asyncio
+async def test_message_handed_over_during_boot_publishes_once_the_tui_is_ready(
+    tmp_path: Path,
+) -> None:
+    """A message the runner holds through boot is a turn as soon as it is typed in.
+
+    A session's first message can reach the runner before the TUI is ready.
+    The banner still is not that turn, but the runner types the message the
+    moment the composer appears, without the pane ever resting in between.
+    Waiting for a quiet spell would hide the whole turn.
+    """
+    callbacks, statuses, _pollers, registry = await _observe_native_with_fake_poller(
+        tmp_path, "conv_boot_turn"
+    )
+    instance = registry.terminal_registry.get("conv_boot_turn", "claude", "main")
+    assert instance is not None
+    on_tick, on_activity, on_idle = (
+        callbacks["on_tick"],
+        callbacks["on_activity"],
+        callbacks["on_idle"],
+    )
+    assert callable(on_tick) and callable(on_activity) and callable(on_idle)
+    registry.note_session_turn_started("conv_boot_turn")
+
+    on_tick()
+    on_activity()
+    on_idle()
+    await asyncio.sleep(0)
+    assert statuses == []
+
+    instance.last_pane_text = lambda: CLAUDE_COMPOSER_PANE  # type: ignore[method-assign]
+    on_tick()
+    on_activity()
+    on_idle()
+    await asyncio.sleep(0)
+    assert statuses == ["running", "idle"]
+
+    # That turn's quiet ended the boot too, so a turn typed into the TUI shows.
+    on_activity()
+    await asyncio.sleep(0)
+    assert statuses == ["running", "idle", "running"]
+
+
+@pytest.mark.asyncio
+async def test_pane_drives_status_once_a_quiet_tui_reports_ready(tmp_path: Path) -> None:
+    """A TUI that reports ready after its pane went quiet has finished booting.
+
+    Pi's extension writes its ready marker once its inbox poller is armed,
+    which can follow the TUI's last repaint. The next pane change is then the
+    agent working, not boot output waiting for another quiet spell.
+    """
+    from omnigent.harnesses.pi_native import bridge as pi_bridge
+
+    bridge_dir = tmp_path / "pi-bridge"
+    bridge_dir.mkdir()
+    _extension, config = pi_bridge.write_extension_files(
+        bridge_dir,
+        session_id="conv_pi_boot",
+        server_url="http://ap.example",
+        conversation_url="http://ap.example/c/conv_pi_boot",
+    )
+    instance = make_test_terminal_instance("pi", "main", tmp_path)
+    instance.env = {pi_bridge.PI_NATIVE_CONFIG_ENV_VAR: str(config)}
+    terminal_registry = TerminalRegistry()
+    statuses: list[str] = []
+    callbacks = await _observe_native_agent_terminal_and_capture(
+        SessionResourceRegistry(terminal_registry=terminal_registry),
+        terminal_registry,
+        instance,
+        "conv_pi_boot",
+        resource_role=PI_NATIVE_TERMINAL_ROLE,
+        status_publisher=lambda _sid, status, _reason=None: statuses.append(status),
+    )
+    on_tick, on_activity, on_idle = (
+        callbacks["on_tick"],
+        callbacks["on_activity"],
+        callbacks["on_idle"],
+    )
+    assert callable(on_tick) and callable(on_activity) and callable(on_idle)
+
+    on_tick()
+    on_activity()
+    on_idle()
+    (bridge_dir / "input_ready").write_text("", encoding="utf-8")
+    on_tick()
+    on_tick()
+    await asyncio.sleep(0)
+    assert statuses == []
+
+    on_activity()
+    await asyncio.sleep(0)
+    assert statuses == ["running"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("finish_boot", "session_was_idle"),
+    [(False, False), (True, True)],
+    ids=["dies-mid-boot", "exits-at-its-prompt"],
+)
+async def test_required_terminal_exit_reads_idle_only_once_the_tui_booted(
+    tmp_path: Path, finish_boot: bool, session_was_idle: bool
+) -> None:
+    """A TUI that dies before reaching its prompt failed to start.
+
+    A boot can rest mid-way (a sign-in screen, a slow MCP server), and that
+    pause is not the session going idle: an exit then must surface as a failure.
+    One that exits after settling at its prompt is a clean shutdown.
+    """
+    callbacks, _statuses, _pollers, registry = await _observe_native_with_fake_poller(
+        tmp_path, "conv_boot_exit"
+    )
+    instance = registry.terminal_registry.get("conv_boot_exit", "claude", "main")
+    assert instance is not None
+    exits: list[TerminalExitEvent] = []
+    exit_published = asyncio.Event()
+
+    def _publish_exit(event: TerminalExitEvent) -> None:
+        exits.append(event)
+        exit_published.set()
+
+    registry.set_terminal_exit_publisher(_publish_exit)
+    on_tick, on_activity, on_idle, on_exit = (
+        callbacks["on_tick"],
+        callbacks["on_activity"],
+        callbacks["on_idle"],
+        callbacks["on_exit"],
+    )
+    assert callable(on_tick) and callable(on_activity) and callable(on_idle)
+    assert callable(on_exit)
+    on_tick()
+    on_activity()
+    on_idle()
+    if finish_boot:
+        finish_native_tui_boot(instance, on_tick, on_idle)
+    on_exit()
+    await asyncio.wait_for(exit_published.wait(), timeout=1.0)
+
+    assert [event.session_was_idle for event in exits] == [session_was_idle]
 
 
 @pytest.mark.asyncio
@@ -1154,9 +1356,11 @@ async def test_required_terminal_exit_while_idle_is_clean_shutdown(
 
     initial_activity = registry.session_activity_epoch("conv_idle")
     # The agent worked, then its turn completed (pane became quiet → idle).
+    on_tick = callbacks["on_tick"]
     on_activity = callbacks["on_activity"]
     on_idle = callbacks["on_idle"]
-    assert callable(on_activity) and callable(on_idle)
+    assert callable(on_tick) and callable(on_activity) and callable(on_idle)
+    finish_native_tui_boot(instance, on_tick, on_idle)
     on_activity()
     on_idle()
     # Then the pane disappeared (e.g. Claude Code exited cleanly).
@@ -1208,8 +1412,11 @@ async def test_required_terminal_exit_while_running_is_failure(
         registry, terminal_registry, instance, "conv_run"
     )
 
+    on_tick = callbacks["on_tick"]
     on_activity = callbacks["on_activity"]
-    assert callable(on_activity)
+    on_idle = callbacks["on_idle"]
+    assert callable(on_tick) and callable(on_activity) and callable(on_idle)
+    finish_native_tui_boot(instance, on_tick, on_idle)
     on_activity()
     on_exit = callbacks["on_exit"]
     assert callable(on_exit)
@@ -1367,8 +1574,10 @@ async def test_required_terminal_exit_after_new_turn_is_failure(tmp_path: Path) 
 
     # The previous turn finished (idle), then a new message starts a turn and
     # the pane crashes before the watcher emits its next ``running`` edge.
+    on_tick = callbacks["on_tick"]
     on_idle = callbacks["on_idle"]
-    assert callable(on_idle)
+    assert callable(on_tick) and callable(on_idle)
+    finish_native_tui_boot(instance, on_tick, on_idle)
     on_idle()
     registry.note_session_turn_started("conv_turn")
     on_exit = callbacks["on_exit"]

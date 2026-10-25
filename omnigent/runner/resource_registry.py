@@ -1436,7 +1436,10 @@ class SessionResourceRegistry:
         This PTY-derived status catches cases lifecycle hooks can miss
         because it observes the terminal directly. The status edges are
         gated to these roles so a side shell's output never flips the
-        session's status.
+        session's status. They also wait out the TUI's boot: until its
+        ``input_ready_probe`` passes and the pane then goes quiet, pane
+        edges publish nothing unless the runner has started a turn, so a
+        booting TUI never reads as a turn that ran and finished.
 
         :param session_id: Session/conversation identifier.
         :param terminal_name: Terminal name from the agent spec.
@@ -1526,9 +1529,30 @@ class SessionResourceRegistry:
 
         input_ready_probe = _native_input_ready_probe(resource_role)
         native_input_ready = False
+        # The TUI has booted once it is input-ready and its pane goes quiet.
+        boot_settled = False
+        pane_quiet = False
+
+        def _pane_status_is_boot_output() -> bool:
+            # Boot repaints (banner, composer, MCP notices) are not a turn, so
+            # publishing them reads as one that already finished. Before the TUI
+            # settles, only a message the runner handed it makes output a turn.
+            if input_ready_probe is None or boot_settled:
+                return False
+            return not native_input_ready or not self.session_turn_is_active(session_id)
+
+        def _settle_boot() -> None:
+            nonlocal boot_settled
+            boot_settled = True
+            # Waiting at its prompt, so an exit from here is a clean shutdown.
+            if not self.session_turn_is_active(session_id):
+                self._set_session_status_memo(session_id, "idle", record_activity=False)
 
         def _on_tick() -> None:
             nonlocal native_input_ready
+            # Readiness from an earlier tick: this tick's diff may still be a repaint.
+            if native_input_ready and pane_quiet and not boot_settled:
+                _settle_boot()
             if status_poller is not None:
                 status_poller.tick()
             if resource_role == CLAUDE_NATIVE_TERMINAL_ROLE:
@@ -1557,7 +1581,7 @@ class SessionResourceRegistry:
                         extra={"session_id": session_id},
                     )
             if input_ready_probe is not None and not native_input_ready:
-                # Readiness logging must not stop the lifecycle watcher on failure.
+                # A failing readiness probe must not stop the lifecycle watcher.
                 with contextlib.suppress(Exception):
                     if input_ready_probe(session_id, instance):
                         native_input_ready = True
@@ -1573,6 +1597,8 @@ class SessionResourceRegistry:
                         )
 
         def _on_activity() -> None:
+            nonlocal pane_quiet
+            pane_quiet = False
             with contextlib.suppress(Exception):
                 instance.lifecycle_trace.note_activity()
             # Runs on the watcher daemon thread; hop to the loop so the
@@ -1597,7 +1623,11 @@ class SessionResourceRegistry:
             # re-emit ``running`` every poll. Skipped once the status file owns
             # the session (see :func:`_structured_status_active`) — a post-turn prompt
             # redraw is not a new turn, and the file already said so.
-            if emit_status and not _structured_status_active():
+            if (
+                emit_status
+                and not _structured_status_active()
+                and not _pane_status_is_boot_output()
+            ):
                 _publish_status("running")
 
         def _on_exit() -> None:
@@ -1662,6 +1692,8 @@ class SessionResourceRegistry:
             return
 
         def _on_idle() -> None:
+            nonlocal pane_quiet
+            pane_quiet = True
             # Pane quiet for the claude-native status threshold → the
             # agent has stopped. Edge-triggered: re-arms only after new
             # output mutates the pane (which flips back to ``running``).
@@ -1670,7 +1702,11 @@ class SessionResourceRegistry:
             # file can tell that from a finished one.
             # Edge ordering: the watcher thread runs idle/exit serially, so
             # this idle commits before any later on_exit reads the memo.
-            if not _structured_status_active():
+            boot_output = _pane_status_is_boot_output()
+            # Quiet at an input-ready prompt: the TUI has finished booting.
+            if native_input_ready and not boot_settled:
+                _settle_boot()
+            if not boot_output and not _structured_status_active():
                 _publish_status("idle")
             # Clear the activity throttle so the next working episode emits
             # its first pulse immediately, keeping the activity badge
