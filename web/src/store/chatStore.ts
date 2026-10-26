@@ -8131,17 +8131,15 @@ export function handleSessionEvent(event: StreamEvent, streamConversationId?: st
         // `waiting` (set above) and `backgroundTaskCount` is untouched, so the
         // "Working…" spinner and sidebar dot keep reflecting the background work.
         // A message still held here hasn't started a turn, so idle/waiting can't end
-        // one; a turn already streaming still ends.
-        const holdingDraft =
-          event.status !== "failed" &&
-          holdsInitialDraft(s) &&
-          s.activeResponse?.state !== "streaming";
+        // one; a turn already streaming still ends, but the held send stays open.
+        const holdsDraft = event.status !== "failed" && holdsInitialDraft(s);
+        const holdingDraft = holdsDraft && s.activeResponse?.state !== "streaming";
         if (
           (event.status === "idle" || event.status === "failed" || event.status === "waiting") &&
           !holdingDraft
         ) {
           if (event.responseId !== undefined && s.activeResponse?.responseId === event.responseId) {
-            patch.status = "idle";
+            patch.status = holdsDraft ? "streaming" : "idle";
             if (s.activeResponse.state === "streaming") settledResponseId = event.responseId;
             if (s.activeResponse.state !== "cancelled") {
               patch.activeResponse = {
@@ -8161,7 +8159,7 @@ export function handleSessionEvent(event: StreamEvent, streamConversationId?: st
             // the snapshot). Every terminal edge that reaches this point is
             // now a real turn end: control signals (policy deny, compaction)
             // no longer publish status. A `cancelled` turn is preserved as-is.
-            patch.status = "idle";
+            patch.status = holdsDraft ? "streaming" : "idle";
             if (s.activeResponse?.state === "streaming") {
               settledResponseId = s.activeResponse.responseId;
               patch.activeResponse = {
@@ -8172,7 +8170,7 @@ export function handleSessionEvent(event: StreamEvent, streamConversationId?: st
               };
             }
           }
-          // Clear ALL pending user messages on terminal status. Any
+          // Clear every sent pending user message on terminal status. Any
           // message still pending when the session reaches idle was
           // either consumed (input.consumed event raced ahead) or
           // denied by policy (no input.consumed fires). In both
@@ -8195,7 +8193,10 @@ export function handleSessionEvent(event: StreamEvent, streamConversationId?: st
           // via the POST `denied` response — so the idle-clear is never
           // needed for them and only races the round-trip.
           if (!s.isNativeTerminalSession && s.pendingUserMessages.length > 0) {
-            patch.pendingUserMessages = [];
+            // A held message was never sent, so no turn can have consumed it.
+            patch.pendingUserMessages = s.pendingUserMessages.filter(
+              (message) => message.initialDraft !== undefined,
+            );
           }
         }
         // Surface terminal-native failures carried only by session status.

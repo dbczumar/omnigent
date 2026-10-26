@@ -4705,11 +4705,17 @@ describe("chatStore — first message during native model startup", () => {
 
 describe("chatStore — sending during a model switch", () => {
   const sessionId = "conv_model_switch_send";
+  const CLAUDE_NATIVE_SESSION = {
+    harness: "claude-native",
+    labels: { "omnigent.wrapper": "claude-code-native-ui" },
+  };
 
   beforeEach(clearSessionDrafts);
   afterEach(clearSessionDrafts);
 
-  async function beginModelSwitch(): Promise<() => Promise<void>> {
+  async function beginModelSwitch(
+    session: { harness: string; labels: Record<string, string> } = CLAUDE_NATIVE_SESSION,
+  ): Promise<() => Promise<void>> {
     seedSession(sessionId, [
       userMessage("previous", "hello"),
       assistantMessage("previous", "hello"),
@@ -4727,8 +4733,7 @@ describe("chatStore — sending during a model switch", () => {
           agent_id: "agent_xyz",
           status: "idle",
           created_at: 0,
-          harness: "claude-native",
-          labels: { "omnigent.wrapper": "claude-code-native-ui" },
+          ...session,
           llm_model: "haiku",
         });
       }
@@ -4778,38 +4783,66 @@ describe("chatStore — sending during a model switch", () => {
     expect(useChatStore.getState().pendingUserMessages[0]?.initialDraft).toBeUndefined();
   });
 
-  it("still ends a running turn while a message sent during it waits for the switch", async () => {
-    const confirmModel = await beginModelSwitch();
-    handleSessionEvent(
-      {
-        type: "session_status",
-        conversationId: sessionId,
-        status: "running",
-        responseId: "resp_running",
-      },
-      sessionId,
-    );
-    const sending = useChatStore.getState().send("after this turn", "agent_xyz");
-    await tick();
-    expect(useChatStore.getState().pendingUserMessages.at(-1)?.initialDraft).toBeDefined();
+  it.each([
+    // A native session's sent bubbles wait for their consumed event instead.
+    { kind: "native", session: CLAUDE_NATIVE_SESSION, pendingAfterTurn: ["sent", "held"] },
+    {
+      kind: "non-native",
+      session: { harness: "claude-sdk", labels: {} },
+      pendingAfterTurn: ["held"],
+    },
+  ])(
+    "still ends a running $kind turn while a message sent during it waits for the switch",
+    async ({ session, pendingAfterTurn }) => {
+      const confirmModel = await beginModelSwitch(session);
+      handleSessionEvent(
+        {
+          type: "session_status",
+          conversationId: sessionId,
+          status: "running",
+          responseId: "resp_running",
+        },
+        sessionId,
+      );
+      useChatStore.setState({
+        pendingUserMessages: [
+          { tempId: "pend_sent", content: [{ type: "input_text", text: "sent" }] },
+        ],
+      });
+      const sending = useChatStore.getState().send("held", "agent_xyz");
+      await tick();
+      expect(useChatStore.getState().pendingUserMessages.at(-1)?.initialDraft).toBeDefined();
 
-    handleSessionEvent(
-      {
-        type: "session_status",
-        conversationId: sessionId,
-        status: "idle",
+      handleSessionEvent(
+        {
+          type: "session_status",
+          conversationId: sessionId,
+          status: "idle",
+          responseId: "resp_running",
+        },
+        sessionId,
+      );
+      const afterTurn = useChatStore.getState();
+      expect(afterTurn.activeResponse).toMatchObject({
         responseId: "resp_running",
-      },
-      sessionId,
-    );
-    expect(useChatStore.getState().activeResponse).toMatchObject({
-      responseId: "resp_running",
-      state: "completed",
-    });
+        state: "completed",
+      });
+      // The held message's send is still open, and nothing may drop it.
+      expect(afterTurn.status).toBe("streaming");
+      expect(
+        afterTurn.pendingUserMessages.map((p) => (p.content[0] as { text: string }).text),
+      ).toEqual(pendingAfterTurn);
 
-    await confirmModel();
-    await sending;
-  });
+      await confirmModel();
+      await sending;
+      expect(eventBodies()).toEqual([
+        {
+          type: "message",
+          data: expect.objectContaining({ content: [{ type: "input_text", text: "held" }] }),
+        },
+      ]);
+    },
+  );
 
   it("restores a stopped draft and sends only its correction after the model switch", async () => {
     const confirmModel = await beginModelSwitch();
