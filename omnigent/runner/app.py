@@ -3594,8 +3594,17 @@ def create_runner_app(
         ):
             status = "running"
         harness = _session_harness_name(conv_id)
-        if harness in {
-            "claude-native",
+        if harness == "claude-native":
+            # Claude's terminal reports its status, but only once the runner has
+            # typed the message in. Show the turn from acceptance, then hand status
+            # back to the terminal when delivery ends.
+            if requested_status == "running":
+                resource_registry.note_runner_turn_accepted(conv_id)
+                return
+            resource_registry.note_runner_turn_ended(conv_id, requested_status)
+            if requested_status != "failed":
+                return
+        if status != "failed" and harness in {
             "pi-native",
             "cursor-native",
             "kiro-native",
@@ -3604,15 +3613,7 @@ def create_runner_app(
             "kimi-native",
             "hermes-native",
         }:
-            # The terminal reports these sessions' status, but only once the runner
-            # has typed the message in. Show the turn from acceptance, then hand
-            # status back to the terminal when delivery ends.
-            if requested_status == "running":
-                resource_registry.note_runner_turn_accepted(conv_id)
-                return
-            resource_registry.note_runner_turn_ended(conv_id, requested_status)
-            if requested_status != "failed":
-                return
+            return
         if status == "idle" and harness in {"codex-native", "antigravity-native"}:
             return
         event: _JsonObject = {"type": "session.status", "status": status}
@@ -6641,7 +6642,14 @@ def create_runner_app(
                 _publish_turn_status(conversation_id, "running")
 
                 if stream:
-                    response = await _stream_message_to_harness(message_body, conversation_id)
+                    try:
+                        response = await _stream_message_to_harness(message_body, conversation_id)
+                    except (Exception, asyncio.CancelledError) as exc:
+                        # End the turn as _run_turn_bg does, so it can't stay running.
+                        _on_proxy_stream_end(
+                            conversation_id, error={"message": f"turn setup failed: {exc}"}
+                        )
+                        raise
                     if not isinstance(response, StreamingResponse):
                         _on_proxy_stream_end(
                             conversation_id,

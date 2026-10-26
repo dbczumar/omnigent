@@ -356,7 +356,8 @@ def _native_input_ready_probe(
         :data:`PI_NATIVE_TERMINAL_ROLE`, or ``None`` for a generic terminal.
     :returns: The probe, or ``None`` for generic terminals or a probe that fails
         to import (logged loudly, but readiness logging must not block the
-        terminal watcher).
+        terminal watcher). Without a probe, Claude's startup output isn't held
+        back from its status.
     """
     agent = native_coding_agent_for_harness(resource_role)
     if agent is None:
@@ -365,7 +366,8 @@ def _native_input_ready_probe(
         return resolve_hook_for_key(agent.key, "input_ready_probe")
     except Exception:  # see docstring.
         _logger.warning(
-            "Native input-ready probe unavailable for %s; native_input_ready will not be logged",
+            "Native input-ready probe unavailable for %s; native_input_ready will not be "
+            "logged or hold back startup status",
             resource_role,
             exc_info=True,
         )
@@ -718,26 +720,29 @@ class SessionResourceRegistry:
         self._note_terminal_status(session_id, "running", "runner_turn_start")
 
     def note_runner_turn_accepted(self, session_id: str) -> None:
-        """Show a terminal-backed session working from the moment the runner takes a message.
+        """Show a Claude session working from the moment the runner takes a message.
 
-        The terminal only sees the message once the runner types it in, which can
-        wait for the TUI to boot. Until that delivery ends the terminal's idle edges
-        are held: a TUI booting or resting at its prompt hasn't finished a turn it
-        was never given. Called on the event loop.
+        Holds the terminal's idle edges until message delivery ends. Called on the
+        event loop.
 
         :param session_id: Session/conversation identifier, e.g. ``"conv_abc"``.
         """
         with self._lock:
             self._open_runner_turns.add(session_id)
-            self._published_session_status[session_id] = ("running", None)
-        if self._session_status_publisher is not None:
+        # A turn, whichever runner path started it, so the TUI's output is its own.
+        self._set_session_status_memo(session_id, "running")
+        if self._claim_status_edge(session_id, "running", None) and (
+            self._session_status_publisher is not None
+        ):
             self._session_status_publisher(session_id, "running", None)
         self._note_terminal_status(session_id, "running", "runner_turn_accepted")
 
     def note_runner_turn_ended(self, session_id: str, status: str) -> None:
-        """Hand a terminal-backed session's status back to its terminal after delivery.
+        """Hand a Claude session's status back to its terminal after delivery.
 
-        Called on the event loop when the runner's delivery turn ends.
+        Called on the event loop when the runner's delivery turn ends. The
+        terminal's watcher then reports what Claude is doing, from a pane capture
+        taken after delivery.
 
         :param session_id: Session/conversation identifier, e.g. ``"conv_abc"``.
         :param status: How the delivery turn ended, e.g. ``"idle"`` or
@@ -1484,12 +1489,9 @@ class SessionResourceRegistry:
         This PTY-derived status catches cases lifecycle hooks can miss
         because it observes the terminal directly. The status edges are
         gated to these roles so a side shell's output never flips the
-        session's status. They also wait out the TUI's boot: until its
-        ``input_ready_probe`` passes and the pane then goes quiet, pane
-        edges publish nothing unless the runner has started a turn, so a
-        booting TUI never reads as a turn that ran and finished. Idle edges
-        also wait while the runner is still delivering a message (see
-        :meth:`note_runner_turn_accepted`).
+        session's status. Claude's pane edges publish nothing until Claude is
+        input-ready and quiet, unless a turn is active, and its idle edges
+        wait while the runner is still delivering a message.
 
         :param session_id: Session/conversation identifier.
         :param terminal_name: Terminal name from the agent spec.
@@ -1582,15 +1584,21 @@ class SessionResourceRegistry:
 
         input_ready_probe = _native_input_ready_probe(resource_role)
         native_input_ready = False
-        # The TUI has booted once it is input-ready and its pane goes quiet.
-        boot_settled = False
+        # Claude has booted once it is input-ready and its pane goes quiet. Other
+        # roles' pane edges aren't held back for boot.
+        boot_settled = resource_role != CLAUDE_NATIVE_TERMINAL_ROLE or input_ready_probe is None
         pane_quiet = False
+        # Set on the loop when message delivery ends; the watcher thread consumes it.
+        handback_lock = threading.Lock()
+        handback_requested = False
+        # Ticks left before handing status back, so a capture taken after delivery is diffed.
+        handback_ticks_left = 0
 
         def _pane_status_is_boot_output() -> bool:
             # Boot repaints (banner, composer, MCP notices) are not a turn, so
             # publishing them reads as one that already finished. Before the TUI
-            # settles, only a message the runner handed it makes output a turn.
-            if input_ready_probe is None or boot_settled:
+            # settles, only an active turn makes output a turn.
+            if boot_settled:
                 return False
             return not native_input_ready or not self.session_turn_is_active(session_id)
 
@@ -1601,23 +1609,42 @@ class SessionResourceRegistry:
             if not self.session_turn_is_active(session_id):
                 self._set_session_status_memo(session_id, "idle", record_activity=False)
 
-        def _reassert_status() -> None:
-            # Delivery ended: report what the terminal is doing now. The idle edges
-            # held during delivery don't recur on their own.
+        def _request_handback() -> None:
+            nonlocal handback_requested
+            with handback_lock:
+                handback_requested = True
+
+        def _hand_status_back() -> None:
+            # Idle edges held during delivery don't recur on their own.
             if status_poller is not None and status_poller.active:
                 status_poller.resync()
             elif pane_quiet and not _pane_status_is_boot_output():
                 _publish_status("idle")
 
+        def _advance_handback() -> None:
+            nonlocal handback_requested, handback_ticks_left
+            with handback_lock:
+                requested = handback_requested
+                handback_requested = False
+            if requested:
+                # This tick's capture may predate delivery; the next one doesn't.
+                handback_ticks_left = 2
+            elif handback_ticks_left:
+                handback_ticks_left -= 1
+                if not handback_ticks_left:
+                    _hand_status_back()
+
         if emit_status:
             with self._lock:
-                self._status_reasserters[session_id] = _reassert_status
+                self._status_reasserters[session_id] = _request_handback
 
         def _on_tick() -> None:
             nonlocal native_input_ready
-            # Readiness from an earlier tick: this tick's diff may still be a repaint.
+            # Settle on the tick after readiness, so the composer's own repaint isn't counted.
             if native_input_ready and pane_quiet and not boot_settled:
                 _settle_boot()
+            _advance_handback()
+            # Claude's own status reports aren't boot output, so they publish during startup.
             if status_poller is not None:
                 status_poller.tick()
             if resource_role == CLAUDE_NATIVE_TERMINAL_ROLE:

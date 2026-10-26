@@ -2600,11 +2600,11 @@ async def test_events_interrupt_on_native_session_injects_escape_without_marker(
 @pytest.mark.parametrize(
     ("harness", "expected_statuses"),
     [
-        # claude-native's terminal owns its working status, but can't report a
-        # message the runner hasn't typed in yet (it may still be booting), so
-        # the runner shows the turn from acceptance. Its idle edge is not
-        # published: delivery ends before Claude's turn does.
+        # The runner shows Claude's turn from acceptance (Claude may still be booting),
+        # but not its idle edge: delivery ends before Claude's turn does.
         ("claude-native", ["running"]),
+        # The other PTY-status harnesses' terminals still own their status outright.
+        ("pi-native", []),
         # codex-native may use the runner's running edge so the thread
         # shows work as soon as Omnigent accepts the turn, but must not use the
         # runner's idle edge because the injection task completes before
