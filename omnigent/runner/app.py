@@ -1892,7 +1892,8 @@ def create_runner_app(
             return
 
         # Resting at its prompt, or quit by a person before reaching it: not a crash.
-        if event.session_was_idle or event.quit_before_prompt:
+        # A launcher can exit 0 after Claude fails, so a recognized failure still fails.
+        if event.session_was_idle or (event.quit_before_prompt and diagnosis is None):
             _release_required_terminal_session(event.session_id)
             return
 

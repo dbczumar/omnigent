@@ -184,10 +184,10 @@ class TerminalExitEvent:
         ``idle`` at exit. ``True`` marks a clean shutdown after the turn
         finished; ``False`` (the default — last seen ``running``, or never
         observed) keeps a mid-turn crash or boot failure a failure.
-    :param quit_before_prompt: Whether a person quit the TUI before it reached
-        its prompt: it exited 0, or a Ctrl-C ended it (``SIGINT``, or exit
-        status 130). Like an idle exit, a clean shutdown. Only Claude's startup
-        is tracked.
+    :param quit_before_prompt: Whether the TUI ended like a person quitting
+        before it reached its prompt: it exited 0, or a Ctrl-C ended it
+        (``SIGINT``, or exit status 130). A clean shutdown unless its last
+        output shows a recognized failure. Only Claude's startup is tracked.
     :param terminal_instance_id: Identity of the observed terminal instance.
     :param lifecycle_context: Content-free evidence captured before exit cleanup.
     """
