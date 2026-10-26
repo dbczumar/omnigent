@@ -79,5 +79,9 @@ export function useWriteFileContent(conversationId: string) {
       queryClient.invalidateQueries({ queryKey: ["file-content", conversationId, path] });
       queryClient.invalidateQueries({ queryKey: ["workspace-changed-files", conversationId] });
     },
+    // The write cancelled any read in flight; re-read so its result isn't lost.
+    onError: (_, { path }) => {
+      void queryClient.invalidateQueries({ queryKey: ["file-content", conversationId, path] });
+    },
   });
 }

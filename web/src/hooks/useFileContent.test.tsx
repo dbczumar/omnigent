@@ -28,6 +28,7 @@ import { isAndroidShell, isIOSShell } from "@/lib/nativeBridge";
 import { useChatStore } from "@/store/chatStore";
 import {
   downloadWorkspaceFile,
+  FILE_CONTENT_FAILING_POLL_MS,
   FILE_CONTENT_POLL_MAX_BYTES,
   FILE_CONTENT_POLL_MS,
   fetchWorkspaceFileBlob,
@@ -642,17 +643,24 @@ function textFile(content: string, bytes = content.length): FileContentResponse 
 
 describe("fileContentPollInterval", () => {
   it.each([
-    ["a small text file", textFile("hi"), FILE_CONTENT_POLL_MS],
+    ["a small text file", textFile("hi"), false, FILE_CONTENT_POLL_MS],
     [
       "a text file at the size limit",
       textFile("", FILE_CONTENT_POLL_MAX_BYTES),
+      false,
       FILE_CONTENT_POLL_MS,
     ],
-    ["a larger or truncated text file", textFile("", FILE_CONTENT_POLL_MAX_BYTES + 1), false],
-    ["a binary preview", { ...textFile("YWJj"), encoding: "base64" as const }, false],
-    ["a file that has not loaded", undefined, false],
-  ])("%s", (_name, data, expected) => {
-    expect(fileContentPollInterval(data)).toBe(expected);
+    ["a small text file whose refresh fails", textFile("hi"), true, FILE_CONTENT_FAILING_POLL_MS],
+    [
+      "a larger or truncated text file",
+      textFile("", FILE_CONTENT_POLL_MAX_BYTES + 1),
+      false,
+      false,
+    ],
+    ["a binary preview", { ...textFile("YWJj"), encoding: "base64" as const }, false, false],
+    ["a file that has not loaded", undefined, false, false],
+  ])("%s", (_name, data, failing, expected) => {
+    expect(fileContentPollInterval(data, failing)).toBe(expected);
   });
 });
 
@@ -698,6 +706,24 @@ describe("useFileContent on-screen refresh", () => {
     expect(fetchMock).toHaveBeenCalledTimes(3);
     await vi.advanceTimersByTimeAsync(FILE_CONTENT_POLL_MS);
     expect(fetchMock).toHaveBeenCalledTimes(4);
+  });
+
+  it("re-checks less often while refreshes fail, e.g. after the file is deleted", async () => {
+    render(
+      <Wrap>
+        <ScreenProbe visible />
+      </Wrap>,
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    fetchMock.mockResolvedValue({ ok: false, status: 404, statusText: "Not Found" } as Response);
+    await vi.advanceTimersByTimeAsync(FILE_CONTENT_POLL_MS);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    await vi.advanceTimersByTimeAsync(FILE_CONTENT_POLL_MS * 3);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(FILE_CONTENT_FAILING_POLL_MS);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 
   it("pauses in a hidden browser tab and catches up when the tab returns", async () => {

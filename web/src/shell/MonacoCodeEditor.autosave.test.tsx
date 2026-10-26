@@ -133,6 +133,7 @@ vi.mock("@/hooks/RunnerHealthProvider", () => ({
 }));
 
 import { MonacoCodeEditor } from "./MonacoCodeEditor";
+import { CONFLICT_CHECK_TIMEOUT_MS } from "./useEditorAutoSave";
 import { getSavedScrollTop, saveScrollTop } from "./useScrollRestore";
 import * as writeHook from "@/hooks/useWriteFileContent";
 import * as runnerHook from "@/hooks/RunnerHealthProvider";
@@ -370,6 +371,26 @@ describe("MonacoCodeEditor auto-save wiring (integration)", () => {
 
     expect(mutateAsync).not.toHaveBeenCalled();
     expect(fakeEditor!.getValue()).toBe("const y = 3;\n");
+  });
+
+  it("saves anyway when the conflict check stalls", async () => {
+    vi.mocked(fetchFileContent).mockImplementationOnce(
+      (_conversationId, _path, signal) =>
+        new Promise((_, reject) => {
+          signal!.addEventListener("abort", () => reject(new Error("aborted")));
+        }),
+    );
+    await renderMounted(makeEditor());
+    await fireEdit(EDITED);
+    await act(async () => {
+      vi.advanceTimersByTime(1000);
+    });
+    expect(mutateAsync).not.toHaveBeenCalled();
+
+    await act(async () => {
+      vi.advanceTimersByTime(CONFLICT_CHECK_TIMEOUT_MS);
+    });
+    expect(mutateAsync).toHaveBeenCalledExactlyOnceWith({ path: PATH, content: EDITED });
   });
 
   it("flushes accumulated edits when the runner reconnects", async () => {

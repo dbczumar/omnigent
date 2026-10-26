@@ -248,8 +248,8 @@ instead of treating one comparison clip as complete feature verification.
 - Every autosave re-reads the file first and raises the conflict if another
   writer changed it. Saves are still last-writer-wins: a write landing between
   that read and the save can be overwritten.
-- A failed refresh keeps the last loaded content and shows a notice; saving a
-  file that was deleted meanwhile recreates it.
+- A failed refresh keeps the last loaded content, shows a notice, and re-checks
+  every 30 seconds; saving a file that was deleted meanwhile recreates it.
 - An external update replaces the document as `setContent` would, maps the
   caret through the changed range, and clears undo history, as Monaco does. A
   caret inside that range, or between separately changed regions, moves to its

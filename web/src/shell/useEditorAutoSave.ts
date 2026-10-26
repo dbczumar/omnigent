@@ -18,6 +18,10 @@ import { useAutoSave } from "./useAutoSave";
 // editor surfaces behave identically.
 const AUTOSAVE_DELAY_MS = 1000;
 
+// A stalled pre-write conflict check gives up after this long, and the save
+// proceeds as if the check had failed.
+export const CONFLICT_CHECK_TIMEOUT_MS = 10_000;
+
 interface UseEditorAutoSaveOptions {
   conversationId: string;
   path: string;
@@ -108,8 +112,10 @@ export function useEditorAutoSave({
         // GET the live file first: if another writer changed it since the last
         // refresh, raise the conflict instead of clobbering their edit. A write
         // landing between this GET and the PUT can still be lost (last writer wins).
+        const checkTimeout = new AbortController();
+        const timer = window.setTimeout(() => checkTimeout.abort(), CONFLICT_CHECK_TIMEOUT_MS);
         try {
-          const fresh = await fetchFileContent(conversationId, path);
+          const fresh = await fetchFileContent(conversationId, path, checkTimeout.signal);
           // Torn down during the GET → don't touch the outer sync hook (it now
           // tracks a different file); fall through and let the write land.
           if (
@@ -120,7 +126,9 @@ export function useEditorAutoSave({
             return;
           }
         } catch {
-          // Best-effort: a failed conflict-check GET must not block saving.
+          // Best-effort: a failed or timed-out conflict-check GET must not block saving.
+        } finally {
+          window.clearTimeout(timer);
         }
         // Clean again after the GET (undone, or the check adopted newer server
         // content): writing the captured value would overwrite what's shown.

@@ -80,8 +80,9 @@ export async function fetchWorkspaceFileBlob(
 export async function fetchFileContent(
   conversationId: string,
   path: string,
+  signal?: AbortSignal,
 ): Promise<FileContentResponse> {
-  const res = await authenticatedFetch(workspaceFileUrl(conversationId, path));
+  const res = await authenticatedFetch(workspaceFileUrl(conversationId, path), { signal });
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
   return (await res.json()) as FileContentResponse;
 }
@@ -173,6 +174,9 @@ export const FILE_CONTENT_POLL_MS = 2_000;
 /** Larger files refresh only when shown again: every poll downloads the whole file. */
 export const FILE_CONTENT_POLL_MAX_BYTES = 256 * 1024;
 
+/** While refreshes keep failing (e.g. the file was deleted), re-check this often. */
+export const FILE_CONTENT_FAILING_POLL_MS = 30_000;
+
 /**
  * Decide how often to re-read an on-screen file.
  *
@@ -180,12 +184,15 @@ export const FILE_CONTENT_POLL_MAX_BYTES = 256 * 1024;
  * previews and large (including truncated) files are skipped.
  *
  * :param data: The last successful response, or undefined before the first load.
+ * :param failing: True when the latest refresh failed after its retries.
  * :returns: The interval in milliseconds, or ``false`` to not poll.
  */
-export function fileContentPollInterval(data: FileContentResponse | undefined): number | false {
-  return data?.encoding === "utf-8" && data.bytes <= FILE_CONTENT_POLL_MAX_BYTES
-    ? FILE_CONTENT_POLL_MS
-    : false;
+export function fileContentPollInterval(
+  data: FileContentResponse | undefined,
+  failing: boolean,
+): number | false {
+  if (data?.encoding !== "utf-8" || data.bytes > FILE_CONTENT_POLL_MAX_BYTES) return false;
+  return failing ? FILE_CONTENT_FAILING_POLL_MS : FILE_CONTENT_POLL_MS;
 }
 
 /**
@@ -253,7 +260,9 @@ export function useFileContent(
     },
     enabled: !!serverId && !!path && serveable !== false,
     staleTime: 5_000,
-    refetchInterval: visible ? (query) => fileContentPollInterval(query.state.data) : false,
+    refetchInterval: visible
+      ? (query) => fileContentPollInterval(query.state.data, query.state.status === "error")
+      : false,
     refetchOnWindowFocus: visible,
     ...(options.retry === undefined ? {} : { retry: options.retry }),
   });
