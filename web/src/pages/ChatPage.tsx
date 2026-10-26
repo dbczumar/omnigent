@@ -971,7 +971,9 @@ export function ChatPage() {
         void reconnect();
         // Posting now could record a failed turn, so the message waits for the host.
         if (sendReconnectsArca) {
-          useChatStore.getState().enqueueMessage(text, files, replyDraft, { waitingForHost: true });
+          useChatStore
+            .getState()
+            .enqueueMessage(text, files, replyDraft, undefined, { waitingForHost: true });
         }
         return;
       }
