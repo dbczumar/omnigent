@@ -3199,6 +3199,40 @@ describe("chatStore — send (first-send ordering)", () => {
     expect(useChatStore.getState().queuedMessages).toEqual([]);
   });
 
+  // startupPending would otherwise send a new message right away.
+  it.each([false, true])(
+    "doesn't post anything when queueing a message for an offline host (startupPending: %s)",
+    (startupPending) => {
+      useChatStore.setState({
+        conversationId: "conv_existing",
+        boundAgentId: "agent_xyz",
+        abortController: new AbortController(),
+        status: "idle",
+        sessionStatus: "idle",
+        startupPending,
+        blocks: [],
+        pendingUserMessages: [],
+        // Queued mid-turn before the host dropped; the composer holds it while unreachable.
+        queuedMessages: [
+          { queueId: "q_earlier", text: "earlier", conversationId: "conv_existing" },
+        ],
+      });
+      const posts: string[] = [];
+      fetchMock.mockImplementation((input, init) => {
+        if (String(input).endsWith("/v1/sessions/conv_existing/events")) {
+          posts.push(String(init?.body));
+          return mockResponse({ queued: true, item_id: "item_1" });
+        }
+        return defaultFetchHandler(input, init);
+      });
+
+      useChatStore.getState().enqueueMessage("hi", undefined, undefined, { waitingForHost: true });
+
+      expect(posts).toEqual([]);
+      expect(useChatStore.getState().queuedMessages.map((m) => m.text)).toEqual(["earlier", "hi"]);
+    },
+  );
+
   it("queues a message for an offline host without posting it until released", async () => {
     useChatStore.setState({
       conversationId: "conv_existing",

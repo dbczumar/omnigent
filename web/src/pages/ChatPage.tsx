@@ -1884,7 +1884,6 @@ const MainAgentSurface = memo(function MainAgentSurfaceImpl({
             isNativeWrapper={isNativeWrapper}
             unreachable={
               !sandboxLaunching &&
-              !sendReconnectsArca &&
               (liveness.kind === "host_offline" || liveness.kind === "local_stranded")
             }
             sendReconnectsArca={sendReconnectsArca}
@@ -2035,7 +2034,10 @@ interface ComposerProps {
    * banner below is the only affordance.
    */
   unreachable?: boolean;
-  /** Sending reconnects the session's offline Arca host; the placeholder says so. */
+  /**
+   * Sending reconnects the session's offline Arca host: the textarea stays
+   * enabled while `unreachable`, and the placeholder says so.
+   */
   sendReconnectsArca?: boolean;
   /**
    * Open the reconnect help dialog. Always wired to the status line's host
@@ -3610,6 +3612,12 @@ function ComposerImpl(
       const cmd = parts[0].toLowerCase();
       const arg = parts[1] ?? "";
       const sendSkill = (match: { command: string; args: string }) => {
+        // A skill can't wait in the queue for the host, so it stays here while Arca reconnects.
+        if (sendReconnectsArca) {
+          onShowReconnectHelp?.();
+          setCommandError("Send this skill again once Arca is back online.");
+          return;
+        }
         appendEntry(trimmed);
         onSendSlashCommand?.(match.command.slice(1), match.args);
         dirtyRef.current = true;
@@ -3989,20 +3997,21 @@ function ComposerImpl(
               ? readOnlyReason
               : isReadOnly
                 ? "You have read-only access to this session"
-                : unreachable && sendDisabledReason === null
+                : unreachable && !sendReconnectsArca && sendDisabledReason === null
                   ? "Session offline — reconnect below to continue"
-                  : sendReconnectsArca
-                    ? "Send a message to reconnect Arca…"
-                    : hasPendingElicitation
-                      ? "Respond to the pending request above to continue"
-                      : disabled && sendDisabledReason === null
-                        ? "Waiting for agents…"
-                        : isStreaming
-                          ? "Send a follow-up (queued) — Esc to stop"
+                  : hasPendingElicitation
+                    ? "Respond to the pending request above to continue"
+                    : disabled && sendDisabledReason === null
+                      ? "Waiting for agents…"
+                      : isStreaming
+                        ? "Send a follow-up (queued) — Esc to stop"
+                        : sendReconnectsArca
+                          ? "Send a message to reconnect Arca…"
                           : "Send a message…",
           rows: 1,
+          // Only typing reopens for an Arca reconnect; every other unreachable gate stays.
           disabled:
-            ((disabled || unreachable) && sendDisabledReason === null) ||
+            ((disabled || (unreachable && !sendReconnectsArca)) && sendDisabledReason === null) ||
             isReadOnly ||
             composerLockedByBtw,
           "data-slash-command": composerIsCommand ? "true" : undefined,
