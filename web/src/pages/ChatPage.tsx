@@ -3500,7 +3500,8 @@ function ComposerImpl(
   const replyQuoteInsertedRef = useRef(false);
   useImperativeHandle(ref, () => ({
     appendReplyQuote(text) {
-      if (disabled || isReadOnly || unreachable || composerLockedByBtw || !text.trim()) return;
+      const blocked = disabled || isReadOnly || (unreachable && !sendReconnectsArca);
+      if (blocked || composerLockedByBtw || !text.trim()) return;
       appendQuote(text);
       textareaRef.current = tailTextareaRef.current;
       dirtyRef.current = true;

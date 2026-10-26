@@ -2264,10 +2264,7 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
     const target = s.queuedMessages.find((m) => m.queueId === queueId);
     const agentId = target?.agentId ?? s.boundAgentId;
     if (target === undefined || agentId === null) return;
-    // Nothing is sent early while the conversation waits for its host.
-    const waiting = (m: QueuedMessage) =>
-      m.conversationId === target.conversationId && m.waitingForHost;
-    if (s.queuedMessages.some(waiting)) return;
+    if (waitsForHost(s.queuedMessages, target.conversationId)) return;
     if (target.command === "compact" && rejectBusyCompact(target.conversationId)) return;
     // Nothing can be steered past a first message still held for startup; it stays queued.
     const targetState = setterForState(target.conversationId);
@@ -2280,8 +2277,7 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
   steerAllQueuedMessages: (conversationId) => {
     const s = get();
     const own = s.queuedMessages.filter((m) => m.conversationId === conversationId);
-    // Nothing is sent early while the conversation waits for its host.
-    if (own.length === 0 || own.some((m) => m.waitingForHost)) return;
+    if (own.length === 0 || waitsForHost(own, conversationId)) return;
     const state = setterForState(conversationId);
     if (state !== null && holdsInitialDraft(state)) return;
     // When the first one will be held for startup, the rest stay queued behind it.
@@ -2379,7 +2375,8 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
     // so an undrained message from another conversation can sit at index 0; a
     // head-only guard would let it block this conversation's messages forever.
     const head = s.queuedMessages.find((m) => m.conversationId === s.conversationId);
-    if (head === undefined || head.requiresRetry || head.waitingForHost) return;
+    if (head === undefined || head.requiresRetry) return;
+    if (waitsForHost(s.queuedMessages, s.conversationId)) return;
     // Remove it BEFORE the POST so a re-entrant flush can't double-send.
     target.write({ queuedMessages: s.queuedMessages.filter((m) => m.queueId !== head.queueId) });
     void s.send(head.text, head.agentId ?? s.boundAgentId, head.files, queuedSendOptions(head));
@@ -2444,7 +2441,8 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
       const cooldownUntil = backgroundFlushCooldownUntil.get(conversationId);
       if (cooldownUntil !== undefined && cooldownUntil > now) continue;
       const head = get().queuedMessages.find((m) => m.conversationId === conversationId);
-      if (head === undefined || head.requiresRetry || head.waitingForHost) continue;
+      if (head === undefined || head.requiresRetry) continue;
+      if (waitsForHost(get().queuedMessages, conversationId)) continue;
       const compactAgentId = head.agentId ?? local?.boundAgentId;
       if (head.command === "compact" && !compactAgentId) continue;
 
@@ -3860,6 +3858,11 @@ export function rejectBusyCompact(conversationId: string | null): boolean {
   if (state?.status !== "streaming" && state?.sessionStatus !== "running") return false;
   toast.error("Compact is disabled while a chat is in progress", { richColors: true });
   return true;
+}
+
+/** Whether a conversation has a message waiting for its offline host; none of its queue sends early. */
+function waitsForHost(queuedMessages: QueuedMessage[], conversationId: string | null): boolean {
+  return queuedMessages.some((m) => m.conversationId === conversationId && m.waitingForHost);
 }
 
 /**

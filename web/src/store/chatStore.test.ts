@@ -3230,6 +3230,9 @@ describe("chatStore — send (first-send ordering)", () => {
         .getState()
         .enqueueMessage("hi", undefined, undefined, undefined, { waitingForHost: true });
 
+      // "earlier" waits too: refused while offline, it would be re-held behind "hi".
+      useChatStore.getState().maybeFlushQueuedHead();
+
       expect(posts).toEqual([]);
       expect(useChatStore.getState().queuedMessages.map((m) => m.text)).toEqual(["earlier", "hi"]);
     },
@@ -3260,6 +3263,7 @@ describe("chatStore — send (first-send ordering)", () => {
       useChatStore.getState().steerMessage(queueId);
     }
     useChatStore.getState().steerAllQueuedMessages("conv_existing");
+    useChatStore.getState().maybeFlushQueuedHead();
 
     expect(sendSpy).not.toHaveBeenCalled();
     expect(useChatStore.getState().queuedMessages.map((m) => m.text)).toEqual([
@@ -19163,6 +19167,28 @@ describe("chatStore — background cross-session flush", () => {
     // One POST to conv_bg (FIFO head only); its head left the queue, tail stays.
     expect(eventPosts()).toEqual([{ id: "conv_bg", text: "bg-first" }]);
     expect(useChatStore.getState().queuedMessages.map((m) => m.text)).toEqual(["bg-second"]);
+  });
+
+  it("does not flush a non-active conversation while one of its messages waits for the host", async () => {
+    seedConversationsCache([conv("conv_active", "running"), conv("conv_bg", "idle")]);
+    useChatStore.setState({
+      conversationId: "conv_active",
+      queuedMessages: [
+        { queueId: "q_1", text: "before", conversationId: "conv_bg" },
+        { queueId: "q_2", text: "held", conversationId: "conv_bg", waitingForHost: true },
+        { queueId: "q_3", text: "after", conversationId: "conv_bg" },
+      ],
+    });
+
+    useChatStore.getState().flushBackgroundQueues();
+    await tick();
+
+    expect(eventPosts()).toEqual([]);
+    expect(useChatStore.getState().queuedMessages.map((m) => m.text)).toEqual([
+      "before",
+      "held",
+      "after",
+    ]);
   });
 
   it("does not flush a non-active conversation whose first message is still held", async () => {

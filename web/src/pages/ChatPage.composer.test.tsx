@@ -4885,6 +4885,16 @@ describe("Composer reply quotes", () => {
     expect(hasSessionDraft("conv_test")).toBe(false);
   });
 
+  it("inserts into an unreachable composer whose send reconnects Arca", () => {
+    const ref = createRef<ComponentRef<typeof Composer>>();
+    render(
+      <Composer {...composerProps({ unreachable: true, sendReconnectsArca: true })} ref={ref} />,
+    );
+    act(() => ref.current?.appendReplyQuote("Quoted while offline"));
+    expect(screen.getByTestId("composer-reply-quote")).toHaveTextContent("Quoted while offline");
+    expect(hasSessionDraft("conv_test")).toBe(true);
+  });
+
   it("removes a quote without stealing focus or reinserting it on rerender", () => {
     const ref = createRef<ComponentRef<typeof Composer>>();
     const props = composerProps();
