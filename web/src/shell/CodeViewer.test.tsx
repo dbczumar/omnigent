@@ -1235,3 +1235,48 @@ describe("large Markdown source fallback", () => {
     expect(screen.queryByText(/too large to load fully/)).not.toBeInTheDocument();
   });
 });
+
+describe("CodeViewer refresh failures", () => {
+  function renderQuery(fileQuery: ReturnType<typeof useFileContent>) {
+    return render(
+      <CodeViewer
+        markdownSourceFallback={false}
+        conversationId="conv_1"
+        path="notes.md"
+        fileQuery={fileQuery}
+        comments={[]}
+        activeSelection={null}
+        onSetActiveSelection={() => {}}
+        panelOpen
+        searchOpen={false}
+        setSearchOpen={() => {}}
+        searchInputRef={noopRef}
+        viewMode="source"
+      />,
+    );
+  }
+
+  it("keeps the loaded file on screen when a refresh fails", () => {
+    const { container } = renderQuery({
+      ...makeFileQuery("still here"),
+      isError: true,
+      isRefetchError: true,
+      isSuccess: false,
+      error: new Error("502 Bad Gateway"),
+    } as unknown as ReturnType<typeof useFileContent>);
+    expect(container.textContent).toContain("still here");
+    expect(container.textContent).not.toContain("Error loading file");
+  });
+
+  it("shows the error when the file never loaded", () => {
+    const { container } = renderQuery({
+      data: undefined,
+      isLoading: false,
+      isError: true,
+      isLoadingError: true,
+      isSuccess: false,
+      error: new Error("404 Not Found"),
+    } as unknown as ReturnType<typeof useFileContent>);
+    expect(container.textContent).toContain("Error loading file: 404 Not Found");
+  });
+});

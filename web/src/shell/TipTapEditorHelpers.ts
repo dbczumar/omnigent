@@ -1,6 +1,10 @@
-// Map raw-file comment offsets to and from ProseMirror positions.
+// Map raw-file comment offsets to and from ProseMirror positions, and apply
+// externally changed Markdown to a live editor.
 
+import type { Editor } from "@tiptap/core";
 import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
+import { EditorState, TextSelection } from "@tiptap/pm/state";
+import { Mapping, StepMap } from "@tiptap/pm/transform";
 import type { MarkdownManager } from "@tiptap/markdown";
 import { exactIndex, markdownSourceMap, type SourceMap } from "./markdownSourceMap";
 import type { Comment } from "@/hooks/useComments";
@@ -268,4 +272,41 @@ export function remapMarkdownComment(
   return best !== comment && mappedRange(doc, map, best.start_index, best.end_index, anchor)
     ? best
     : comment;
+}
+
+/**
+ * Replace the editor's document with Markdown another writer saved.
+ *
+ * The document is exactly what `setContent` produces. The selection maps through
+ * the one range that changed, so a caret outside it stays on its text. Undo
+ * history is cleared, as Monaco's `setValue` does: an older step could otherwise
+ * revert the other writer's edit, and auto-save would persist that.
+ *
+ * :param editor: A TipTap editor with the Markdown extension.
+ * :param markdown: The file's new content, e.g. ``"# Title\n\nBody\n"``.
+ */
+export function applyExternalMarkdown(editor: Editor, markdown: string): void {
+  const { doc: previous, selection } = editor.state;
+  editor.commands.setContent(markdown, { emitUpdate: false, contentType: "markdown" });
+  const { doc, plugins } = editor.state;
+  const changed = changedRangeMapping(previous, doc);
+  const $anchor = doc.resolve(changed.map(selection.anchor));
+  const $head = doc.resolve(changed.map(selection.head));
+  editor.view.updateState(
+    EditorState.create({ doc, plugins, selection: TextSelection.between($anchor, $head) }),
+  );
+}
+
+/** Map positions from `previous` to `next` around the single range where they differ. */
+function changedRangeMapping(previous: ProseMirrorNode, next: ProseMirrorNode): Mapping {
+  const start = previous.content.findDiffStart(next.content);
+  if (start === null) return new Mapping();
+  let { a: endA, b: endB } = previous.content.findDiffEnd(next.content)!;
+  // Repeated content can make the backward scan pass `start`; widen both ends.
+  const overlap = start - Math.min(endA, endB);
+  if (overlap > 0) {
+    endA += overlap;
+    endB += overlap;
+  }
+  return new Mapping([new StepMap([start, endA - start, endB - start])]);
 }

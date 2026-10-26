@@ -292,7 +292,7 @@ function MonacoCodeEditorInner({
   // instance (the child <Editor> unmounts first).
   const isEditorDirty = useCallback(() => latestContentRef.current !== baselineRef.current, []);
 
-  // All save orchestration — write mutation, mid-turn conflict check, teardown
+  // All save orchestration — write mutation, pre-write conflict check, teardown
   // guard, and debounce/flush wiring — lives in the shared hook, identical to
   // the markdown editor. This surface only supplies its own content access.
   const { autoSave, saveDisabled, writeFile } = useEditorAutoSave({

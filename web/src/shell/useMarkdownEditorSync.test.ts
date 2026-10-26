@@ -251,6 +251,30 @@ describe("reconcileServerContent", () => {
     expect(result.current.hasExternalUpdate).toBe(true);
   });
 
+  it("blocks the write when a refresh raised the conflict during the check", () => {
+    const { result, rerender } = renderSync({ content: "v1" });
+    act(() => {
+      result.current.setDirty(true);
+    });
+    // A refresh lands the other writer's text while the save's GET is in flight.
+    rerender({ content: "theirs", path: "/file.md", isSettled: true });
+    expect(result.current.hasExternalUpdate).toBe(true);
+    let conflict = false;
+    act(() => {
+      conflict = result.current.reconcileServerContent("theirs");
+    });
+    expect(conflict).toBe(true);
+
+    // Keep mine resolves it; the next check lets the user's save through.
+    act(() => {
+      result.current.dismissExternalUpdate();
+    });
+    act(() => {
+      conflict = result.current.reconcileServerContent("theirs");
+    });
+    expect(conflict).toBe(false);
+  });
+
   it("adopts new content without conflict when the editor is clean", () => {
     const setContentFn = vi.fn();
     const setContentRef = { current: setContentFn };

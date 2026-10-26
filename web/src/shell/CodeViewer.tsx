@@ -890,7 +890,8 @@ export function CodeViewer({
       </div>
     );
   }
-  if (fileQuery.isError) {
+  // A failed refresh keeps the loaded content (and any unsaved edits) on screen.
+  if (fileQuery.isLoadingError) {
     return (
       <div className="p-8 text-destructive text-ui">
         Error loading file:{" "}

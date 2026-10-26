@@ -1,5 +1,5 @@
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, render, waitFor } from "@testing-library/react";
+import { focusManager, QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { act, cleanup, render, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ReactNode } from "react";
 import type * as HostModule from "@/lib/host";
@@ -28,12 +28,16 @@ import { isAndroidShell, isIOSShell } from "@/lib/nativeBridge";
 import { useChatStore } from "@/store/chatStore";
 import {
   downloadWorkspaceFile,
+  FILE_CONTENT_POLL_MAX_BYTES,
+  FILE_CONTENT_POLL_MS,
   fetchWorkspaceFileBlob,
+  fileContentPollInterval,
   fileContentToBlob,
   triggerBrowserDownload,
   useFileContent,
 } from "./useFileContent";
 import type { FileContentResponse } from "./useFileContent";
+import { useWriteFileContent } from "./useWriteFileContent";
 
 const onlineMock = vi.mocked(useSessionRunnerOnline);
 const hostOnlineMock = vi.mocked(useSessionHostOnline);
@@ -470,16 +474,16 @@ describe("useFileContent gating", () => {
 // client).  Using the Wrap helper instead would create a new QueryClient on
 // every rerender call, racing with the invalidation under test.
 
-describe("useFileContent trailing invalidation", () => {
-  // Returns a wrapper component that always uses the given QueryClient.
-  // Call once per test and reuse the returned reference for both render()
-  // and rerender() so the QueryClient is stable across all renders.
-  function stableWrap(qc: QueryClient) {
-    return function StableWrap({ children }: { children: ReactNode }) {
-      return <QueryClientProvider client={qc}>{children}</QueryClientProvider>;
-    };
-  }
+// Returns a wrapper component that always uses the given QueryClient.
+// Call once per test and reuse the returned reference for both render()
+// and rerender() so the QueryClient is stable across all renders.
+function stableWrap(qc: QueryClient) {
+  return function StableWrap({ children }: { children: ReactNode }) {
+    return <QueryClientProvider client={qc}>{children}</QueryClientProvider>;
+  };
+}
 
+describe("useFileContent trailing invalidation", () => {
   it("refetches once when session transitions from running to idle", async () => {
     const qc = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: 0 } } });
     const StableWrap = stableWrap(qc);
@@ -618,5 +622,198 @@ describe("useFileContent trailing invalidation", () => {
     await flushMicrotasks();
 
     expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// useFileContent refresh while on screen
+// ---------------------------------------------------------------------------
+
+function textFile(content: string, bytes = content.length): FileContentResponse {
+  return {
+    object: "session.environment.filesystem.file_content",
+    path: "notes.md",
+    content_type: "text/markdown",
+    encoding: "utf-8",
+    content,
+    bytes,
+  };
+}
+
+describe("fileContentPollInterval", () => {
+  it.each([
+    ["a small text file", textFile("hi"), FILE_CONTENT_POLL_MS],
+    [
+      "a text file at the size limit",
+      textFile("", FILE_CONTENT_POLL_MAX_BYTES),
+      FILE_CONTENT_POLL_MS,
+    ],
+    ["a larger or truncated text file", textFile("", FILE_CONTENT_POLL_MAX_BYTES + 1), false],
+    ["a binary preview", { ...textFile("YWJj"), encoding: "base64" as const }, false],
+    ["a file that has not loaded", undefined, false],
+  ])("%s", (_name, data, expected) => {
+    expect(fileContentPollInterval(data)).toBe(expected);
+  });
+});
+
+describe("useFileContent on-screen refresh", () => {
+  // Fake timers drive both React Query's poll interval and its notify scheduler.
+  beforeEach(() => {
+    vi.useFakeTimers();
+    onlineMock.mockReturnValue(true);
+    stubChatStore({ conversationId: "conv_poll", sessionStatus: "idle" });
+  });
+  afterEach(() => {
+    focusManager.setFocused(undefined);
+    vi.useRealTimers();
+  });
+
+  function ScreenProbe({ visible }: { visible: boolean }) {
+    useFileContent("conv_poll", "notes.md", { visible });
+    return null;
+  }
+
+  it("re-reads an idle session's file only while it is on screen", async () => {
+    const StableWrap = stableWrap(
+      new QueryClient({ defaultOptions: { queries: { retry: false } } }),
+    );
+    const view = (visible: boolean) => (
+      <StableWrap>
+        <ScreenProbe visible={visible} />
+      </StableWrap>
+    );
+    const { rerender } = render(view(true));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(FILE_CONTENT_POLL_MS);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    rerender(view(false));
+    await vi.advanceTimersByTimeAsync(FILE_CONTENT_POLL_MS * 3);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    // Shown again: catch up at once, then keep polling.
+    rerender(view(true));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    await vi.advanceTimersByTimeAsync(FILE_CONTENT_POLL_MS);
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+  });
+
+  it("pauses in a hidden browser tab and catches up when the tab returns", async () => {
+    render(
+      <Wrap>
+        <ScreenProbe visible />
+      </Wrap>,
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    act(() => focusManager.setFocused(false));
+    await vi.advanceTimersByTimeAsync(FILE_CONTENT_POLL_MS * 3);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    act(() => focusManager.setFocused(true));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// useFileContent reads never overlap this tab's own write
+// ---------------------------------------------------------------------------
+
+describe("useFileContent and this tab's writes", () => {
+  const KEY = ["file-content", "conv_w", "notes.md"];
+  let serverContent: string;
+  let finishWrite: () => void;
+  let answerRead: (content: string) => void;
+  let holdReads: boolean;
+
+  // A one-file server: a write lands when finishWrite() runs; held reads answer
+  // whenever the test chooses.
+  beforeEach(() => {
+    onlineMock.mockReturnValue(true);
+    stubChatStore();
+    serverContent = "before";
+    holdReads = false;
+    fetchMock.mockImplementation((_url: string, init?: RequestInit) => {
+      if (init?.method === "PUT") {
+        const { content } = JSON.parse(init.body as string) as { content: string };
+        return new Promise((resolve) => {
+          finishWrite = () => {
+            serverContent = content;
+            resolve(jsonResponse({}));
+          };
+        });
+      }
+      if (!holdReads) return Promise.resolve(jsonResponse(textFile(serverContent)));
+      return new Promise((resolve) => {
+        answerRead = (content) => resolve(jsonResponse(textFile(content)));
+      });
+    });
+  });
+
+  const calls = (method: "GET" | "PUT") =>
+    fetchMock.mock.calls.filter(([, init]) => (init?.method ?? "GET") === method).length;
+
+  function renderFile() {
+    const qc = new QueryClient({
+      defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+    });
+    const hook = renderHook(
+      () => ({
+        read: useFileContent("conv_w", "notes.md"),
+        write: useWriteFileContent("conv_w"),
+      }),
+      { wrapper: stableWrap(qc) },
+    );
+    return { qc, ...hook };
+  }
+
+  it("waits for the write before re-reading the file", async () => {
+    const { qc, result } = renderFile();
+    await waitFor(() => expect(result.current.read.data?.content).toBe("before"));
+    let saving!: Promise<void>;
+    act(() => {
+      saving = result.current.write.mutateAsync({ path: "notes.md", content: "saved" });
+    });
+    await waitFor(() => expect(calls("PUT")).toBe(1));
+
+    void qc.invalidateQueries({ queryKey: KEY });
+    await flushMicrotasks();
+    expect(calls("GET")).toBe(1);
+
+    await act(async () => {
+      finishWrite();
+      await saving;
+    });
+    await waitFor(() => expect(calls("GET")).toBeGreaterThan(1));
+    await waitFor(() => expect(result.current.read.data?.content).toBe("saved"));
+  });
+
+  it("drops a read that was in flight when the write started", async () => {
+    const { qc, result } = renderFile();
+    await waitFor(() => expect(result.current.read.data?.content).toBe("before"));
+    holdReads = true;
+    void qc.invalidateQueries({ queryKey: KEY });
+    await waitFor(() => expect(calls("GET")).toBe(2));
+    let saving!: Promise<void>;
+    act(() => {
+      saving = result.current.write.mutateAsync({ path: "notes.md", content: "saved" });
+    });
+    await waitFor(() => expect(calls("PUT")).toBe(1));
+
+    // The server answers that read after applying the write.
+    answerRead("saved");
+    await flushMicrotasks();
+    expect(qc.getQueryData<FileContentResponse>(KEY)?.content).toBe("before");
+
+    holdReads = false;
+    await act(async () => {
+      finishWrite();
+      await saving;
+    });
+    expect(qc.getQueryData<FileContentResponse>(KEY)?.content).toBe("saved");
   });
 });

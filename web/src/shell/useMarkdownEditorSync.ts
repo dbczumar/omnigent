@@ -43,13 +43,14 @@ interface Result {
   markSaved: (content: string) => void;
   /**
    * Reconcile server content fetched outside the query (the pre-write
-   * conflict check, since the query isn't refetched mid-turn). When it
-   * differs from the last-known server state — and isn't our own save — it's
-   * an external edit: on a dirty editor, stash it and raise hasExternalUpdate.
+   * conflict check). When it differs from the last-known server state — and
+   * isn't our own save — it's an external edit: on a dirty editor, stash it
+   * and raise hasExternalUpdate.
    *
    * :param serverContent: The freshly fetched raw file content.
-   * :returns: True when a conflict was raised (caller must skip its write);
-   *     False when already known and the write may proceed.
+   * :returns: True when a conflict is pending, raised now or by a refresh
+   *     during the caller's GET (caller must skip its write); False when the
+   *     content is known and the write may proceed.
    */
   reconcileServerContent: (serverContent: string) => boolean;
 }
@@ -187,9 +188,11 @@ export function useMarkdownEditorSync({
   // outside the query (the pre-write conflict check). See the Result doc.
   const reconcileServerContent = useCallback(
     (serverContent: string): boolean => {
-      // Already known (last-seen server state or our own save) — nothing to do.
+      // Already known (last-seen server state or our own save). A refresh may
+      // have raised a conflict while the caller's GET was in flight; it still
+      // blocks the write until the user picks Keep mine or Load latest.
       if (serverContent === prevContentRef.current || serverContent === lastSavedRef.current) {
-        return false;
+        return pendingContentRef.current !== null;
       }
       // Adopt as the latest known server state — this also lets a later "Keep
       // mine" overwrite through, while a *newer* external edit re-raises.

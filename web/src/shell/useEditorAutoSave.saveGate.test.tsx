@@ -10,12 +10,6 @@ vi.mock("@/hooks/RunnerHealthProvider", () => ({
   useSessionRunnerOnline: vi.fn(),
   useSessionHostOnline: vi.fn(),
 }));
-// The hook only reads conversationId/sessionStatus to gate the pre-write
-// conflict check, which these tests never reach.
-vi.mock("@/store/chatStore", () => ({
-  useChatStore: (selector: (s: unknown) => unknown) =>
-    selector({ conversationId: null, sessionStatus: "idle" }),
-}));
 
 import { useEditorAutoSave } from "./useEditorAutoSave";
 import * as writeHook from "@/hooks/useWriteFileContent";
