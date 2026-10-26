@@ -940,13 +940,16 @@ export function ChatPage() {
     conversationsData !== undefined,
   );
   const reconnectHostId = activeSession?.hostId ?? activeConv?.host_id ?? null;
-  const { reconnect, dialogOpen, setDialogOpen, localReconnect, arcaReconnect } =
+  const { reconnect, reconnectsArca, dialogOpen, setDialogOpen, localReconnect, arcaReconnect } =
     useSessionReconnect({
       sessionId: urlConvId ?? null,
       hostId: reconnectHostId,
       hostName: hostRows?.find((row) => row.host_id === reconnectHostId)?.name,
       isOwner: isOwnerLevel(permissionLevel),
     });
+  // A message to an offline Arca host reconnects it from the desktop and waits
+  // in the queue until the host is back.
+  const sendReconnectsArca = isUnreachable && liveness.kind === "host_offline" && reconnectsArca;
 
   const onSend = useCallback(
     (text: string, files?: File[], replyDraft?: StoredReplyDraft) => {
@@ -966,6 +969,10 @@ export function ChatPage() {
       // Recover the unreachable host before dispatching another turn.
       if (urlConvId && isUnreachable) {
         void reconnect();
+        // Posting now could record a failed turn, so the message waits for the host.
+        if (sendReconnectsArca) {
+          useChatStore.getState().enqueueMessage(text, files, replyDraft, { waitingForHost: true });
+        }
         return;
       }
       // Queue instead of POSTing now (see shouldQueueSend). enqueueMessage flushes
@@ -1011,6 +1018,7 @@ export function ChatPage() {
       isUnboundFork,
       canResumeOnLocalHost,
       isUnreachable,
+      sendReconnectsArca,
       reconnect,
       navigate,
     ],
@@ -1196,6 +1204,7 @@ export function ChatPage() {
       onSendSlashCommand={onSendSlashCommand}
       onStop={onStop}
       onShowReconnectHelp={onShowReconnectHelp}
+      sendReconnectsArca={sendReconnectsArca}
       agents={visibleAgents}
       selectedAgentId={agentId}
       hasMoreHistory={hasMoreHistory}
@@ -1349,6 +1358,8 @@ interface MainAgentSurfaceProps {
   onSendSlashCommand?: (name: string, args: string) => void;
   onStop: () => void;
   onShowReconnectHelp: () => void;
+  /** Sending reconnects the offline Arca host, so the composer stays enabled. */
+  sendReconnectsArca: boolean;
   agents: Agent[] | undefined;
   selectedAgentId: string | null;
   /** Whether older messages exist that haven't been loaded yet. */
@@ -1524,6 +1535,7 @@ const MainAgentSurface = memo(function MainAgentSurfaceImpl({
   onNewSession,
   onStop,
   onShowReconnectHelp,
+  sendReconnectsArca,
   agents,
   selectedAgentId,
   hasMoreHistory,
@@ -1872,8 +1884,10 @@ const MainAgentSurface = memo(function MainAgentSurfaceImpl({
             isNativeWrapper={isNativeWrapper}
             unreachable={
               !sandboxLaunching &&
+              !sendReconnectsArca &&
               (liveness.kind === "host_offline" || liveness.kind === "local_stranded")
             }
+            sendReconnectsArca={sendReconnectsArca}
             onShowReconnectHelp={onShowReconnectHelp}
             costRoutingEligible={costRoutingEligible}
             subagentRoutingEligible={subagentRoutingEligible}
@@ -2021,6 +2035,8 @@ interface ComposerProps {
    * banner below is the only affordance.
    */
   unreachable?: boolean;
+  /** Sending reconnects the session's offline Arca host; the placeholder says so. */
+  sendReconnectsArca?: boolean;
   /**
    * Open the reconnect help dialog. Always wired to the status line's host
    * badge, which turns itself into a clickable reconnect affordance whenever
@@ -2360,6 +2376,7 @@ function ComposerImpl(
     showPollyCodexGoalControl = false,
     isNativeWrapper = false,
     unreachable = false,
+    sendReconnectsArca = false,
     onShowReconnectHelp,
     costRoutingEligible = false,
     subAgentLabel = null,
@@ -3974,13 +3991,15 @@ function ComposerImpl(
                 ? "You have read-only access to this session"
                 : unreachable && sendDisabledReason === null
                   ? "Session offline — reconnect below to continue"
-                  : hasPendingElicitation
-                    ? "Respond to the pending request above to continue"
-                    : disabled && sendDisabledReason === null
-                      ? "Waiting for agents…"
-                      : isStreaming
-                        ? "Send a follow-up (queued) — Esc to stop"
-                        : "Send a message…",
+                  : sendReconnectsArca
+                    ? "Send a message to reconnect Arca…"
+                    : hasPendingElicitation
+                      ? "Respond to the pending request above to continue"
+                      : disabled && sendDisabledReason === null
+                        ? "Waiting for agents…"
+                        : isStreaming
+                          ? "Send a follow-up (queued) — Esc to stop"
+                          : "Send a message…",
           rows: 1,
           disabled:
             ((disabled || unreachable) && sendDisabledReason === null) ||

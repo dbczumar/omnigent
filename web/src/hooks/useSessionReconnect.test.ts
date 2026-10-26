@@ -280,6 +280,34 @@ describe("useSessionReconnect", () => {
     expect(toast.dismiss).toHaveBeenCalledWith("progress");
   });
 
+  it.each([
+    { label: "the remembered Arca host", props: { hostId: "arca-host" }, expected: true },
+    {
+      label: "an Isaac-named Arca host",
+      props: { hostId: "box", hostName: "e2e's arca" },
+      expected: true,
+    },
+    {
+      label: "another remote host",
+      props: { hostId: "devbox", hostName: "arca-devbox" },
+      expected: false,
+    },
+    {
+      label: "a non-owner",
+      props: { hostId: "arca-host", isOwner: false },
+      expected: false,
+    },
+    { label: "the browser", props: { hostId: "arca-host" }, desktop: false, expected: false },
+  ])(
+    "reports whether reconnecting runs the desktop's Arca connect for $label",
+    ({ props, desktop = true, expected }) => {
+      writeArcaHostId("arca-host");
+      vi.mocked(isElectronShell).mockReturnValue(desktop);
+      const { result } = renderHook(() => useSessionReconnect({ ...localSession, ...props }));
+      expect(result.current.reconnectsArca).toBe(expected);
+    },
+  );
+
   it("does not treat another remote host as Arca", async () => {
     const { result } = renderHook(() =>
       useSessionReconnect({ ...localSession, hostId: "devbox", hostName: "arca-devbox" }),

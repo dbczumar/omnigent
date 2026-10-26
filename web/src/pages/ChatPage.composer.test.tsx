@@ -4530,6 +4530,12 @@ describe("Composer placeholder", () => {
     expect(textarea().disabled).toBe(true);
     expect(textarea().placeholder).toMatch(/reconnect below/i);
   });
+
+  it("says sending reconnects an offline Arca host", () => {
+    render(<Composer {...composerProps({ sendReconnectsArca: true })} />);
+    expect(textarea().disabled).toBe(false);
+    expect(textarea().placeholder).toBe("Send a message to reconnect Arca…");
+  });
 });
 
 // A pending elicitation parks the agent's turn server-side on the verdict

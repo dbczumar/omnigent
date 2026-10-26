@@ -151,6 +151,8 @@ export function useSessionReconnect({
 
   return {
     reconnect,
+    /** Whether `reconnect` runs the desktop's Arca connect for this session's host. */
+    reconnectsArca: hostId !== null && isOwner && isElectronShell() && isSessionArcaHost(),
     dialogOpen,
     setDialogOpen,
     localReconnect: canReconnectThisMachine

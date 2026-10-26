@@ -3199,6 +3199,42 @@ describe("chatStore — send (first-send ordering)", () => {
     expect(useChatStore.getState().queuedMessages).toEqual([]);
   });
 
+  it("queues a message for an offline host without posting it until released", async () => {
+    useChatStore.setState({
+      conversationId: "conv_existing",
+      boundAgentId: "agent_xyz",
+      abortController: new AbortController(),
+      status: "idle",
+      sessionStatus: "idle",
+      blocks: [],
+      pendingUserMessages: [],
+      queuedMessages: [],
+    });
+    const posts: string[] = [];
+    fetchMock.mockImplementation((input, init) => {
+      if (String(input).endsWith("/v1/sessions/conv_existing/events")) {
+        posts.push(String(init?.body));
+        return mockResponse({ queued: true, item_id: "item_1" });
+      }
+      return defaultFetchHandler(input, init);
+    });
+
+    useChatStore.getState().enqueueMessage("hi", undefined, undefined, { waitingForHost: true });
+    useChatStore.getState().maybeFlushQueuedHead();
+
+    expect(posts).toEqual([]);
+    expect(useChatStore.getState().queuedMessages).toMatchObject([
+      { text: "hi", conversationId: "conv_existing", waitingForHost: true },
+    ]);
+    expect(useChatStore.getState().blocks).toEqual([]);
+
+    useChatStore.getState().releaseHostHeldMessages("conv_existing");
+    useChatStore.getState().maybeFlushQueuedHead();
+    await vi.waitFor(() => expect(posts).toHaveLength(1));
+    expect(JSON.parse(posts[0])).toMatchObject({ type: "message" });
+    expect(useChatStore.getState().queuedMessages).toEqual([]);
+  });
+
   it("surfaces the server's runner-unavailable cause verbatim when it names one", async () => {
     // Preserve the server's phase-specific detail in the error block.
     const causefulDetail =

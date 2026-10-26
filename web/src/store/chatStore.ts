@@ -1213,8 +1213,15 @@ export interface ChatActions {
    * Queue a message client-side instead of POSTing it now, for a send made
    * while the agent is busy. The head is flushed automatically (FIFO, one per
    * turn) when the session next goes idle — see the `session_status` handler.
+   * `waitingForHost` holds it until `releaseHostHeldMessages`, for a send made
+   * while the session's host is offline.
    */
-  enqueueMessage: (text: string, files?: File[], replyDraft?: StoredReplyDraft) => void;
+  enqueueMessage: (
+    text: string,
+    files?: File[],
+    replyDraft?: StoredReplyDraft,
+    opts?: { waitingForHost?: boolean },
+  ) => void;
   /** Let a conversation's messages held for an offline host flush again. */
   releaseHostHeldMessages: (conversationId: string) => void;
   /** Remove a queued message by id (the strip's per-row delete). */
@@ -2149,10 +2156,16 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
   abortController: null,
   historyGeneration: 0,
 
-  enqueueMessage: (text, files, replyDraft) => {
+  enqueueMessage: (text, files, replyDraft, opts) => {
     const { conversationId, boundAgentId, sessionHarness, startupPending } = get();
     if (conversationId === null) return;
-    if (startupPending && boundAgentId && !isCompactControl(sessionHarness, text, files)) {
+    const waitingForHost = opts?.waitingForHost === true;
+    if (
+      !waitingForHost &&
+      startupPending &&
+      boundAgentId &&
+      !isCompactControl(sessionHarness, text, files)
+    ) {
       void get().send(text, boundAgentId, files, {
         replyDraft,
         pinnedConversationId: conversationId,
@@ -2180,6 +2193,7 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
           ...(boundAgentId !== null ? { agentId: boundAgentId } : {}),
           ...(files && files.length > 0 ? { files } : {}),
           ...(replyDraft ? { replyDraft } : {}),
+          ...(waitingForHost ? { waitingForHost } : {}),
         },
       ],
     }));
