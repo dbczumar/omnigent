@@ -628,6 +628,19 @@ class SessionResourceRegistry:
             self._active_session_turns.discard(session_id)
         self._last_session_status[session_id] = status
 
+    def _record_tui_at_prompt(self, session_id: str) -> None:
+        """
+        Record a booted TUI resting at its prompt for exit classification.
+
+        Skipped while a turn is active, checked under the same lock as the write
+        so a message the runner accepts meanwhile keeps its turn.
+
+        :param session_id: Session/conversation identifier, e.g. ``"conv_abc"``.
+        """
+        with self._lock:
+            if session_id not in self._active_session_turns:
+                self._record_status_memo_locked(session_id, "idle", record_activity=False)
+
     def _take_session_status_memo(self, session_id: str) -> str | None:
         """Pop and return the session's recorded PTY status (or ``None``)."""
         with self._lock:
@@ -1652,8 +1665,7 @@ class SessionResourceRegistry:
             nonlocal boot_settled
             boot_settled = True
             # Waiting at its prompt, so an exit from here is a clean shutdown.
-            if not self.session_turn_is_active(session_id):
-                self._set_session_status_memo(session_id, "idle", record_activity=False)
+            self._record_tui_at_prompt(session_id)
 
         def _request_handback() -> None:
             nonlocal handback_requested

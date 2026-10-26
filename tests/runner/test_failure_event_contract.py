@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import json
 from collections.abc import AsyncIterator
@@ -149,33 +150,39 @@ async def test_connection_error_preserves_a_valid_queued_failure() -> None:
 
 
 @pytest.mark.asyncio
-async def test_stream_setup_that_raises_still_ends_the_turn() -> None:
-    """A turn whose direct-stream setup raises reads as failed, not running forever."""
+@pytest.mark.parametrize(
+    "setup_error",
+    [ValueError("synthetic harness setup failure"), asyncio.CancelledError()],
+    ids=["raises", "cancelled"],
+)
+async def test_stream_setup_that_raises_still_ends_the_turn(setup_error: BaseException) -> None:
+    """A direct-stream turn whose setup raises or is cancelled reads as failed, not running."""
 
     class BrokenProcessManager(_FakeProcessManager):
         async def get_client(
             self, conversation_id: str, harness: str, env: Any = None
         ) -> _ScriptedHarnessClient:
-            raise ValueError("synthetic harness setup failure")
+            raise setup_error
 
     app = create_runner_app(
         process_manager=BrokenProcessManager(_ScriptedHarnessClient([])),  # type: ignore[arg-type]
         server_client=NullServerClient(),  # type: ignore[arg-type]
     )
     async with _runner_client(app) as client:
-        response = await client.post(
-            f"/v1/sessions/{_SESSION_ID}/events?stream=true",
-            json={
-                "type": "message",
-                "role": "user",
-                "model": "test-agent",
-                "content": [{"type": "input_text", "text": "hello"}],
-                "harness": "openai-agents",
-            },
-        )
+        # A cancelled setup passes its cancellation on to the request.
+        with contextlib.suppress(asyncio.CancelledError):
+            await client.post(
+                f"/v1/sessions/{_SESSION_ID}/events?stream=true",
+                json={
+                    "type": "message",
+                    "role": "user",
+                    "model": "test-agent",
+                    "content": [{"type": "input_text", "text": "hello"}],
+                    "harness": "openai-agents",
+                },
+            )
         queued = _drain_session_event_queue(app.state.session_event_queues.get(_SESSION_ID))
 
-    assert response.is_error
     statuses = [event["status"] for event in queued if event["type"] == "session.status"]
     assert statuses == ["running", "failed"]
 

@@ -6652,8 +6652,9 @@ def create_runner_app(
                         response = await _stream_message_to_harness(message_body, conversation_id)
                     except (Exception, asyncio.CancelledError) as exc:
                         # End the turn as _run_turn_bg does, so it can't stay running.
+                        detail = str(exc) or type(exc).__name__
                         _on_proxy_stream_end(
-                            conversation_id, error={"message": f"turn setup failed: {exc}"}
+                            conversation_id, error={"message": f"turn setup failed: {detail}"}
                         )
                         raise
                     if not isinstance(response, StreamingResponse):

@@ -422,4 +422,4 @@ async def test_delivery_that_leaves_a_message_queued_lets_claudes_idle_through(
             if event["type"] == "session.status"
         ]
 
-    assert statuses[-1] == "idle"
+    assert statuses == ["running", "idle"]

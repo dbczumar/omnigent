@@ -3947,6 +3947,8 @@ describe("chatStore — first message during native model startup", () => {
     expect(useChatStore.getState().pendingUserMessages[0]?.initialDraft).toBeDefined();
     // Claude reporting ready doesn't end a turn whose message is still held here.
     expect(useChatStore.getState().status).toBe("streaming");
+    handleSessionEvent({ type: "session_status", conversationId: sessionId, status: "waiting" });
+    expect(useChatStore.getState().status).toBe("streaming");
     reportModel();
     await settle();
 
@@ -4774,6 +4776,39 @@ describe("chatStore — sending during a model switch", () => {
       },
     ]);
     expect(useChatStore.getState().pendingUserMessages[0]?.initialDraft).toBeUndefined();
+  });
+
+  it("still ends a running turn while a message sent during it waits for the switch", async () => {
+    const confirmModel = await beginModelSwitch();
+    handleSessionEvent(
+      {
+        type: "session_status",
+        conversationId: sessionId,
+        status: "running",
+        responseId: "resp_running",
+      },
+      sessionId,
+    );
+    const sending = useChatStore.getState().send("after this turn", "agent_xyz");
+    await tick();
+    expect(useChatStore.getState().pendingUserMessages.at(-1)?.initialDraft).toBeDefined();
+
+    handleSessionEvent(
+      {
+        type: "session_status",
+        conversationId: sessionId,
+        status: "idle",
+        responseId: "resp_running",
+      },
+      sessionId,
+    );
+    expect(useChatStore.getState().activeResponse).toMatchObject({
+      responseId: "resp_running",
+      state: "completed",
+    });
+
+    await confirmModel();
+    await sending;
   });
 
   it("restores a stopped draft and sends only its correction after the model switch", async () => {
