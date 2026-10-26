@@ -4827,8 +4827,7 @@ describe("chatStore — sending during a model switch", () => {
         responseId: "resp_running",
         state: "completed",
       });
-      // The held message's send is still open, and nothing may drop it.
-      expect(afterTurn.status).toBe("streaming");
+      // Nothing may drop the held message.
       expect(
         afterTurn.pendingUserMessages.map((p) => (p.content[0] as { text: string }).text),
       ).toEqual(pendingAfterTurn);
@@ -4843,6 +4842,44 @@ describe("chatStore — sending during a model switch", () => {
       ]);
     },
   );
+
+  it("leaves nothing streaming when a held send fails after the running turn ended", async () => {
+    const confirmModel = await beginModelSwitch();
+    const switchHandler = fetchMock.getMockImplementation()!;
+    fetchMock.mockImplementation((input, init) => {
+      if (String(input).endsWith(`/v1/sessions/${sessionId}/resources/files`)) {
+        return mockResponse({ detail: "attachment refused" }, { ok: false, status: 415 });
+      }
+      return switchHandler(input, init);
+    });
+    handleSessionEvent(
+      {
+        type: "session_status",
+        conversationId: sessionId,
+        status: "running",
+        responseId: "resp_running",
+      },
+      sessionId,
+    );
+    const notes = new File([new Uint8Array(4)], "notes.txt", { type: "text/plain" });
+    const sending = useChatStore.getState().send("held", "agent_xyz", [notes]);
+    await tick();
+    handleSessionEvent(
+      {
+        type: "session_status",
+        conversationId: sessionId,
+        status: "idle",
+        responseId: "resp_running",
+      },
+      sessionId,
+    );
+
+    await confirmModel();
+    await sending;
+    // The upload failed before anything was sent; no turn is left to end the send.
+    expect(useChatStore.getState()).toMatchObject({ status: "idle", pendingUserMessages: [] });
+    expect(eventBodies()).toEqual([]);
+  });
 
   it("restores a stopped draft and sends only its correction after the model switch", async () => {
     const confirmModel = await beginModelSwitch();

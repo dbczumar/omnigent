@@ -8132,15 +8132,17 @@ export function handleSessionEvent(event: StreamEvent, streamConversationId?: st
         // "Working…" spinner and sidebar dot keep reflecting the background work.
 
         // A message still held here hasn't started a turn, so idle/waiting can't end
-        // one; a turn already streaming still ends, but the held send stays open.
-        const holdsDraft = event.status !== "failed" && holdsInitialDraft(s);
-        const holdingDraft = holdsDraft && s.activeResponse?.state !== "streaming";
+        // one; a turn already streaming still ends.
+        const holdingDraft =
+          event.status !== "failed" &&
+          holdsInitialDraft(s) &&
+          s.activeResponse?.state !== "streaming";
         if (
           (event.status === "idle" || event.status === "failed" || event.status === "waiting") &&
           !holdingDraft
         ) {
           if (event.responseId !== undefined && s.activeResponse?.responseId === event.responseId) {
-            patch.status = holdsDraft ? "streaming" : "idle";
+            patch.status = "idle";
             if (s.activeResponse.state === "streaming") settledResponseId = event.responseId;
             if (s.activeResponse.state !== "cancelled") {
               patch.activeResponse = {
@@ -8160,7 +8162,7 @@ export function handleSessionEvent(event: StreamEvent, streamConversationId?: st
             // the snapshot). Every terminal edge that reaches this point is
             // now a real turn end: control signals (policy deny, compaction)
             // no longer publish status. A `cancelled` turn is preserved as-is.
-            patch.status = holdsDraft ? "streaming" : "idle";
+            patch.status = "idle";
             if (s.activeResponse?.state === "streaming") {
               settledResponseId = s.activeResponse.responseId;
               patch.activeResponse = {
