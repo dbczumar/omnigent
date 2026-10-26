@@ -4961,6 +4961,67 @@ async def test_required_terminal_exit_during_shutdown_does_not_fail_session(
 
 
 @pytest.mark.asyncio
+async def test_required_terminal_quit_before_prompt_does_not_fail_session(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A person quitting Claude while it starts is not a crash.
+
+    The runner removes the terminal resource and releases the harness, with no
+    ERROR log and no ``session.status: failed`` card.
+    """
+    import logging
+
+    from omnigent.runner.app import _session_event_queues_ref
+    from omnigent.runner.resource_registry import (
+        TerminalExitEvent,
+        TerminalLifecycle,
+    )
+
+    conv_id = uuid.uuid4().hex
+    pm = _FakeProcessManager(_ScriptedHarnessClient([]))
+    pm._sessions.add(conv_id)
+    app = create_runner_app(
+        process_manager=pm,  # type: ignore[arg-type]
+        server_client=NullServerClient(),  # type: ignore[arg-type]
+    )
+    publish_exit = app.state.session_resource_registry._terminal_exit_publisher
+    assert callable(publish_exit)
+
+    try:
+        with caplog.at_level(logging.INFO, logger="omnigent.runner.app"):
+            publish_exit(
+                TerminalExitEvent(
+                    session_id=conv_id,
+                    terminal_id="terminal_claude_main",
+                    terminal_name="claude",
+                    session_key="main",
+                    lifecycle=TerminalLifecycle.REQUIRED,
+                    quit_before_prompt=True,
+                )
+            )
+            queued_events: list[dict[str, Any]] = []
+            for _ in range(1000):
+                queued_events.extend(
+                    _drain_session_event_queue(_session_event_queues_ref.get(conv_id))
+                )
+                if pm.released:
+                    break
+                await asyncio.sleep(0)
+    finally:
+        _session_event_queues_ref.pop(conv_id, None)
+
+    assert {
+        "type": "session.resource.deleted",
+        "resource_id": "terminal_claude_main",
+        "resource_type": "terminal",
+        "session_id": conv_id,
+    } in queued_events
+    assert [event for event in queued_events if event.get("type") == "session.status"] == []
+    assert [record for record in caplog.records if record.levelno >= logging.ERROR] == []
+    assert pm.released == [conv_id]
+
+
+@pytest.mark.asyncio
 async def test_non_claude_terminal_with_resume_banner_still_fails() -> None:
     """A non-claude terminal exiting with the resume-banner text is still a failure.
 

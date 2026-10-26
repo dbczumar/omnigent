@@ -16,6 +16,7 @@ import contextlib
 import logging
 import os
 import re
+import signal
 import tempfile
 import threading
 import time
@@ -183,6 +184,10 @@ class TerminalExitEvent:
         ``idle`` at exit. ``True`` marks a clean shutdown after the turn
         finished; ``False`` (the default — last seen ``running``, or never
         observed) keeps a mid-turn crash or boot failure a failure.
+    :param quit_before_prompt: Whether a person quit the TUI before it reached
+        its prompt: it exited 0, or a Ctrl-C ended it (``SIGINT``, or exit
+        status 130). Like an idle exit, a clean shutdown. Only Claude's startup
+        is tracked.
     :param terminal_instance_id: Identity of the observed terminal instance.
     :param lifecycle_context: Content-free evidence captured before exit cleanup.
     """
@@ -198,6 +203,7 @@ class TerminalExitEvent:
     last_output: str | None = None
     exit_status: int | None = None
     session_was_idle: bool = False
+    quit_before_prompt: bool = False
     terminal_instance_id: str | None = None
     lifecycle_context: dict[str, str] = field(default_factory=dict)
 
@@ -1789,6 +1795,8 @@ class SessionResourceRegistry:
             # that stale value can't keep owning the session's status.
             if status_poller is not None:
                 status_poller.retire()
+            # Read on the watcher thread, which settles boot.
+            booted = boot_settled
 
             def _schedule() -> None:
                 task = asyncio.create_task(
@@ -1798,6 +1806,7 @@ class SessionResourceRegistry:
                         session_key=session_key,
                         lifecycle=lifecycle,
                         instance=instance,
+                        booted=booted,
                     )
                 )
                 self._terminal_exit_tasks.add(task)
@@ -1924,8 +1933,13 @@ class SessionResourceRegistry:
         session_key: str,
         lifecycle: TerminalLifecycle,
         instance: TerminalInstance | None = None,
+        booted: bool = True,
     ) -> None:
-        """Clean up and publish lifecycle events for an unexpected terminal exit."""
+        """
+        Clean up and publish lifecycle events for an unexpected terminal exit.
+
+        :param booted: Whether the TUI had reached its prompt, as its watcher saw it.
+        """
         terminal_id = terminal_resource_id(terminal_name, session_key)
         with self._lock:
             observed = self._terminal_lifecycles.pop((session_id, terminal_id), None)
@@ -1951,6 +1965,7 @@ class SessionResourceRegistry:
             lifecycle=lifecycle,
             instance=instance,
             resource_role=observed_role,
+            booted=booted,
         )
 
     async def _finalize_terminal_exit(
@@ -1963,8 +1978,13 @@ class SessionResourceRegistry:
         instance: TerminalInstance | None,
         resource_role: str | None,
         before_observation: bool = False,
+        booted: bool = True,
     ) -> None:
-        """Preserve exit evidence even when a pane dies before observation starts."""
+        """
+        Preserve exit evidence even when a pane dies before observation starts.
+
+        :param booted: Whether the TUI had reached its prompt, as its watcher saw it.
+        """
         terminal_id = terminal_resource_id(terminal_name, session_key)
         if instance is not None:
             with contextlib.suppress(Exception):
@@ -1979,6 +1999,13 @@ class SessionResourceRegistry:
         ).lower()
         lifecycle_context["session_activity_epoch"] = str(self.session_activity_epoch(session_id))
         command, args_count, cwd, last_output, exit_status = _terminal_exit_diagnostics(instance)
+        # A person quitting a starting TUI: it exits 0, or a Ctrl-C ends it, by
+        # SIGINT or by the 128 + SIGINT status of a program that handles it.
+        quit_before_prompt = not booted and (
+            exit_status in (0, 128 + signal.SIGINT)
+            or (instance is not None and instance.last_exit_signal() == signal.SIGINT.name)
+        )
+        lifecycle_context["quit_before_prompt"] = str(quit_before_prompt).lower()
 
         superseded_by: TerminalInstance | None = None
         if self._terminal_registry is not None:
@@ -2077,6 +2104,7 @@ class SessionResourceRegistry:
                     last_output=last_output,
                     exit_status=exit_status,
                     session_was_idle=session_was_idle,
+                    quit_before_prompt=quit_before_prompt,
                     terminal_instance_id=instance.diagnostic_id if instance is not None else None,
                     lifecycle_context=lifecycle_context,
                 )

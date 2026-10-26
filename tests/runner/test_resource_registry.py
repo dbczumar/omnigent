@@ -1269,18 +1269,37 @@ async def test_pi_pane_drives_status_while_pi_starts(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("finish_boot", "session_was_idle"),
-    [(False, False), (True, True)],
-    ids=["dies-mid-boot", "exits-at-its-prompt"],
+    ("finish_boot", "pane_dead_fields", "session_was_idle", "quit_before_prompt"),
+    [
+        (False, "1|1|", False, False),
+        (False, "1||term", False, False),
+        (False, "1|0|", False, True),
+        (False, "1||int", False, True),
+        (False, "1|130|", False, True),
+        (True, "1|0|", True, False),
+    ],
+    ids=[
+        "fails-mid-boot",
+        "killed-mid-boot",
+        "exits-0-mid-boot",
+        "ctrl-c-mid-boot",
+        "handled-ctrl-c-mid-boot",
+        "exits-at-its-prompt",
+    ],
 )
 async def test_required_terminal_exit_reads_idle_only_once_the_tui_booted(
-    tmp_path: Path, finish_boot: bool, session_was_idle: bool
+    tmp_path: Path,
+    finish_boot: bool,
+    pane_dead_fields: str,
+    session_was_idle: bool,
+    quit_before_prompt: bool,
 ) -> None:
-    """A TUI that dies before reaching its prompt failed to start.
+    """A TUI that dies before reaching its prompt failed to start, unless a person quit it.
 
     A boot can rest mid-way (a sign-in screen, a slow MCP server), and that
-    pause is not the session going idle: an exit then must surface as a failure.
-    One that exits after settling at its prompt is a clean shutdown.
+    pause is not the session going idle: an exit then must surface as a failure,
+    unless it exited 0 or a Ctrl-C ended it (SIGINT, or exit status 130). One
+    that exits after settling at its prompt is a clean shutdown.
     """
     callbacks, _statuses, _pollers, registry = await _observe_native_with_fake_poller(
         tmp_path, "conv_boot_exit"
@@ -1308,10 +1327,14 @@ async def test_required_terminal_exit_reads_idle_only_once_the_tui_booted(
     on_idle()
     if finish_boot:
         finish_native_tui_boot(instance, on_tick, on_idle)
+    # tmux's dead-pane row: dead|exit status|signal name.
+    instance._exit_status_is_pending(pane_dead_fields)
     on_exit()
     await asyncio.wait_for(exit_published.wait(), timeout=1.0)
 
-    assert [event.session_was_idle for event in exits] == [session_was_idle]
+    assert [(event.session_was_idle, event.quit_before_prompt) for event in exits] == [
+        (session_was_idle, quit_before_prompt)
+    ]
 
 
 @pytest.mark.asyncio
