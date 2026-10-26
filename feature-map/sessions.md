@@ -290,7 +290,8 @@ is still offline and points to **Switch host** in case Arca came back as a
 different host. In a sandbox session (for example an Arclet) whose host is
 asleep, **Reconnect host** in the composer's host menu has the server wake the
 sandbox and start the agent without sending a message, in the browser too; a
-toast says when it's back online or why the wake failed.
+toast says when it's back online or why the wake failed. Reloading during the
+wake keeps its progress (for example "Provisioning sandbox…") in the chat.
 
 **Message recovery:** send the first prompt while a runner is starting, or send
 another message after its runner restarts. Also open a sub-agent's conversation
