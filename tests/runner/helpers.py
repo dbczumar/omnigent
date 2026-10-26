@@ -125,8 +125,8 @@ def finish_native_tui_boot(
     """
     Walk a watched native TUI through boot: its prompt renders, then its pane goes quiet.
 
-    The runner publishes no pane-derived session status while the TUI boots, so
-    a test of the status a booted TUI's pane drives starts here.
+    Claude's pane drives no session status until it has booted, so a test of the
+    status a booted Claude's pane drives starts here.
 
     :param instance: The watched terminal; its probe sees *ready_pane* for one
         tick, and its own captured pane afterwards.

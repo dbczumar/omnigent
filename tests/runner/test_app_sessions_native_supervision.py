@@ -2622,7 +2622,7 @@ async def test_events_interrupt_on_native_session_injects_escape_without_marker(
     ],
 )
 @pytest.mark.asyncio
-async def test_message_turn_lifecycle_status_suppressed_for_terminal_backed_harnesses(
+async def test_message_turn_lifecycle_edges_for_terminal_backed_harnesses(
     harness: str,
     expected_statuses: list[str],
 ) -> None:

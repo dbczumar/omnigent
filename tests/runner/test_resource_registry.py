@@ -1155,12 +1155,10 @@ async def test_pty_edges_drive_status_when_poller_inactive(tmp_path: Path) -> No
 
 @pytest.mark.asyncio
 async def test_pane_publishes_no_status_while_the_tui_boots(tmp_path: Path) -> None:
-    """A booting TUI's repaints are not a turn, so they publish no status.
+    """Claude's startup repaints are not a turn, so they publish no status.
 
-    Claude paints its banner and composer before it is asked anything. As
-    ``running`` then ``idle``, those repaints read as a turn that already
-    finished, and the desktop app announced it before the first prompt was even
-    typed in. The pane drives status once the TUI is quiet at its prompt.
+    Published as ``running`` then ``idle``, they would read as a turn that
+    already finished. The pane drives status once Claude is quiet at its prompt.
     """
     callbacks, statuses, _pollers, registry = await _observe_native_with_fake_poller(
         tmp_path, "conv_boot"
@@ -1471,6 +1469,37 @@ async def test_pane_shows_claude_working_on_a_message_delivered_while_it_rested(
     on_idle()
     await asyncio.sleep(0)
     assert statuses == ["running", "idle"]
+
+
+@pytest.mark.asyncio
+async def test_idle_on_its_way_to_the_loop_cannot_overtake_an_accepted_turn(
+    tmp_path: Path,
+) -> None:
+    """A pane idle the loop hasn't sent yet can't land after an accepted turn's running.
+
+    The watcher thread commits an edge, then hands it to the loop to send. A
+    message the runner accepts in between has already published running.
+    """
+    callbacks, statuses, _pollers, registry = await _observe_native_with_fake_poller(
+        tmp_path, "conv_overtake"
+    )
+    instance = registry.terminal_registry.get("conv_overtake", "claude", "main")
+    assert instance is not None
+    on_tick, on_activity, on_idle = (
+        callbacks["on_tick"],
+        callbacks["on_activity"],
+        callbacks["on_idle"],
+    )
+    assert callable(on_tick) and callable(on_activity) and callable(on_idle)
+    finish_native_tui_boot(instance, on_tick, on_idle)
+    on_activity()
+    await asyncio.sleep(0)
+    assert statuses == ["running"]
+
+    on_idle()
+    registry.note_runner_turn_accepted("conv_overtake")
+    await asyncio.sleep(0)
+    assert statuses == ["running", "running"]
 
 
 @pytest.mark.asyncio
