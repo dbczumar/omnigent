@@ -2199,8 +2199,7 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
     }));
     // A message queued while the agent is idle (a race where the send routed
     // to the queue but the turn had already ended) would otherwise wait for an
-    // idle edge that never comes — flush now. With the host offline nothing
-    // may flush, including messages queued before this one.
+    // idle edge that never comes — flush now, unless it waits for the host.
     if (!waitingForHost) get().maybeFlushQueuedHead();
   },
 

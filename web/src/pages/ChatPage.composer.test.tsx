@@ -1203,12 +1203,39 @@ describe("Composer slash-command submit routing", () => {
     expect(onSend).not.toHaveBeenCalled();
     expect(onShowReconnectHelp).toHaveBeenCalledOnce();
     expect(textarea().value).toBe("/deslop fix the bug");
-    expect(screen.getByText("Send this skill again once Arca is back online.")).toBeTruthy();
+    expect(screen.getByText("Send this command again once Arca is back online.")).toBeTruthy();
 
     // Arca is back: the same command now runs.
     rerender(<Composer {...composerProps(handlers)} />);
     fireEvent.keyDown(textarea(), { key: "Enter" });
     expect(onSendSlashCommand).toHaveBeenCalledExactlyOnceWith("deslop", "fix the bug");
+  });
+
+  it("keeps /clear in the composer while an offline Arca reconnects, then runs it", () => {
+    const realClearContext = useChatStore.getState().clearContext;
+    const clearContext = vi.fn().mockResolvedValue(undefined);
+    useChatStore.setState({ sessionHarness: "claude-native", clearContext });
+    try {
+      const onShowReconnectHelp = vi.fn();
+      const { rerender } = render(
+        <Composer
+          {...composerProps({ onShowReconnectHelp, unreachable: true, sendReconnectsArca: true })}
+        />,
+      );
+      fireEvent.change(textarea(), { target: { value: "/clear" } });
+      fireEvent.keyDown(textarea(), { key: "Enter" });
+
+      expect(clearContext).not.toHaveBeenCalled();
+      expect(onShowReconnectHelp).toHaveBeenCalledOnce();
+      // The menu completes the command, so it stays ready to send.
+      expect(textarea().value.trim()).toBe("/clear");
+
+      rerender(<Composer {...composerProps({ onShowReconnectHelp })} />);
+      fireEvent.keyDown(textarea(), { key: "Enter" });
+      expect(clearContext).toHaveBeenCalledOnce();
+    } finally {
+      useChatStore.setState({ clearContext: realClearContext });
+    }
   });
 
   it("routes a skill whose name contains spaces, with and without args", () => {
@@ -6000,8 +6027,6 @@ describe("Composer — queued-message flush gating", () => {
   // drain the queue while the session is unreachable — flushing would POST
   // into a void, bypassing onSend's reconnect dialog. It must drain once
   // reachable again.
-  // The Arca case is a failed session (its runner exited when Arca stopped), which
-  // the flush otherwise allows.
   it.each([
     [false, "idle"],
     [true, "failed"],

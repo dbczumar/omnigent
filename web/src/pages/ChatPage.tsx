@@ -2496,6 +2496,9 @@ function ComposerImpl(
   const hasPendingElicitation = useChatStore((s) =>
     hasPendingOwnElicitation(s.blocks, s.conversationId),
   );
+  const readyPlaceholder = sendReconnectsArca
+    ? "Send a message to reconnect Arca…"
+    : "Send a message…";
 
   const codexPlanMode = useChatStore((s) => s.codexPlanMode);
   // Harness/agent identity shown in the status tray below the card, separate
@@ -3309,6 +3312,12 @@ function ComposerImpl(
     dirtyRef.current = true;
   };
 
+  // Commands can't wait in the queue for the host, so they stay here while Arca reconnects.
+  const holdCommandForArca = () => {
+    onShowReconnectHelp?.();
+    setCommandError("Send this command again once Arca is back online.");
+  };
+
   // Skills insert at the caret; Enter/click executes standalone no-argument built-ins.
   const applyMenuSelection = (cmd: string) => {
     if (cmd === "/mcp" && !slashCompletion.inline) {
@@ -3318,6 +3327,9 @@ function ComposerImpl(
     }
     if (slashCompletion.inline || slashCommandsWithArgs.has(cmd)) {
       completeMenuSelection(cmd);
+    } else if (sendReconnectsArca) {
+      completeMenuSelection(cmd);
+      holdCommandForArca();
     } else {
       // Execute immediately — no argument needed.
       // /compact clears its draft only after the busy guard accepts it.
@@ -3608,16 +3620,14 @@ function ComposerImpl(
       files.length === 0 &&
       mentionedItems.length === 0
     ) {
+      if (sendReconnectsArca) {
+        holdCommandForArca();
+        return;
+      }
       const parts = trimmed.split(/\s+/);
       const cmd = parts[0].toLowerCase();
       const arg = parts[1] ?? "";
       const sendSkill = (match: { command: string; args: string }) => {
-        // A skill can't wait in the queue for the host, so it stays here while Arca reconnects.
-        if (sendReconnectsArca) {
-          onShowReconnectHelp?.();
-          setCommandError("Send this skill again once Arca is back online.");
-          return;
-        }
         appendEntry(trimmed);
         onSendSlashCommand?.(match.command.slice(1), match.args);
         dirtyRef.current = true;
@@ -4005,9 +4015,7 @@ function ComposerImpl(
                       ? "Waiting for agents…"
                       : isStreaming
                         ? "Send a follow-up (queued) — Esc to stop"
-                        : sendReconnectsArca
-                          ? "Send a message to reconnect Arca…"
-                          : "Send a message…",
+                        : readyPlaceholder,
           rows: 1,
           // Only typing reopens for an Arca reconnect; every other unreachable gate stays.
           disabled:
