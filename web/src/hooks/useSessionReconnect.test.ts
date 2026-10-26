@@ -5,7 +5,13 @@ import { toast } from "sonner";
 import { fetchHosts } from "@/hooks/useHosts";
 import type { Host } from "@/hooks/useHosts";
 import { readArcaHostId, writeArcaHostId } from "@/lib/arcaHost";
-import { connectArcaHost, controlHost, getHostIdentity, isElectronShell } from "@/lib/nativeBridge";
+import {
+  connectArcaHost,
+  controlHost,
+  getHostIdentity,
+  isElectronShell,
+  supportsArcaConnect,
+} from "@/lib/nativeBridge";
 import type { ArcaConnectResult, HostActionResult, HostIdentity } from "@/lib/nativeBridge";
 import { useSessionReconnect } from "./useSessionReconnect";
 
@@ -15,6 +21,7 @@ vi.mock("@/lib/nativeBridge", () => ({
   controlHost: vi.fn(),
   getHostIdentity: vi.fn(),
   isElectronShell: vi.fn(),
+  supportsArcaConnect: vi.fn(),
 }));
 vi.mock("sonner", () => ({
   toast: { loading: vi.fn(() => "progress"), success: vi.fn(), dismiss: vi.fn() },
@@ -37,6 +44,7 @@ function deferred<T>() {
 beforeEach(() => {
   vi.clearAllMocks();
   vi.mocked(isElectronShell).mockReturnValue(true);
+  vi.mocked(supportsArcaConnect).mockReturnValue(true);
   vi.mocked(getHostIdentity).mockResolvedValue({ cliInstalled: true, hostId: "this-mac" });
   vi.mocked(controlHost).mockResolvedValue({ ok: true });
   vi.mocked(connectArcaHost).mockResolvedValue({ ok: true });
@@ -298,11 +306,18 @@ describe("useSessionReconnect", () => {
       expected: false,
     },
     { label: "the browser", props: { hostId: "arca-host" }, desktop: false, expected: false },
+    {
+      label: "a desktop without the Arca connect",
+      props: { hostId: "arca-host" },
+      arcaConnect: false,
+      expected: false,
+    },
   ])(
     "reports whether reconnecting runs the desktop's Arca connect for $label",
-    ({ props, desktop = true, expected }) => {
+    ({ props, desktop = true, arcaConnect = true, expected }) => {
       writeArcaHostId("arca-host");
       vi.mocked(isElectronShell).mockReturnValue(desktop);
+      vi.mocked(supportsArcaConnect).mockReturnValue(desktop && arcaConnect);
       const { result } = renderHook(() => useSessionReconnect({ ...localSession, ...props }));
       expect(result.current.reconnectsArca).toBe(expected);
     },

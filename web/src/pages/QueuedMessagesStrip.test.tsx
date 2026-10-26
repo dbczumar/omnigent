@@ -268,22 +268,29 @@ describe("QueuedMessagesStrip", () => {
     expect(onSteer).toHaveBeenCalledWith("q_2");
   });
 
-  it("disables send-now on a message waiting for its host", () => {
+  it("disables send-now on every row while a message waits for its host", () => {
     const onSteer = vi.fn();
     render(
       <TooltipProvider>
         <QueuedMessagesStrip
-          messages={[{ ...msg("q_1", "held"), waitingForHost: true }, msg("q_2", "ready")]}
+          messages={[
+            msg("q_1", "before"),
+            { ...msg("q_2", "held"), waitingForHost: true },
+            msg("q_3", "after"),
+          ]}
           onDelete={vi.fn()}
           onEdit={vi.fn()}
           onSteer={onSteer}
         />
       </TooltipProvider>,
     );
-    const [held, ready] = screen.getAllByRole("button", { name: "Send queued message now" });
+    const [before, held, after] = screen.getAllByRole("button", {
+      name: "Send queued message now",
+    });
+    expect(before).toBeDisabled();
     expect(held).toBeDisabled();
-    expect(ready).toBeEnabled();
-    fireEvent.click(held!);
+    expect(after).toBeDisabled();
+    fireEvent.click(before!);
     expect(onSteer).not.toHaveBeenCalled();
   });
 

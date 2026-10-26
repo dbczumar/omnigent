@@ -3622,10 +3622,6 @@ function ComposerImpl(
       files.length === 0 &&
       mentionedItems.length === 0
     ) {
-      if (sendReconnectsArca) {
-        holdCommandForArca();
-        return;
-      }
       const parts = trimmed.split(/\s+/);
       const cmd = parts[0].toLowerCase();
       const arg = parts[1] ?? "";
@@ -3636,10 +3632,16 @@ function ComposerImpl(
         setValue("");
         setCommandError(null);
       };
+      // Commands that run here or as a `slash_command` event can't wait in the queue for
+      // the host; plain slash text below still goes through `onSend`, which queues it.
+      const runCommand = (run: () => void) => {
+        if (sendReconnectsArca) holdCommandForArca();
+        else run();
+      };
       // A multi-word catalog skill outranks a built-in that matches only its
       // first word: "/Help Desk summarize" invokes the skill, not /help.
       if (skill !== null && skill.command !== parts[0]) {
-        sendSkill(skill);
+        runCommand(() => sendSkill(skill));
         return;
       }
       // Bare "/model" when the session has a switchable model (claude-native):
@@ -3655,10 +3657,12 @@ function ComposerImpl(
       // a model-less modal. ("/model <name>" still routes to setModel there.)
       const canOpenModelPicker = codexModelOptions.length > 0;
       if (cmd === "/model" && !arg && showModels && canOpenModelPicker) {
-        dirtyRef.current = true;
-        setValue("");
-        setCommandError(null);
-        setPickerOpenNonce((n) => n + 1);
+        runCommand(() => {
+          dirtyRef.current = true;
+          setValue("");
+          setCommandError(null);
+          setPickerOpenNonce((n) => n + 1);
+        });
         return;
       }
       // /btw is a built-in for menu/autocomplete purposes only — it is NOT
@@ -3671,21 +3675,26 @@ function ComposerImpl(
         cmd in BUILTIN_SLASH_COMMANDS &&
         cmd in slashCommands
       ) {
-        executeSlashCommand(cmd, cmd === "/compact" ? trimmed.slice(parts[0].length).trim() : arg);
+        runCommand(() =>
+          executeSlashCommand(
+            cmd,
+            cmd === "/compact" ? trimmed.slice(parts[0].length).trim() : arg,
+          ),
+        );
         return;
       }
       // /side opens a side chat. Codex forks in-process (falls through to the
       // plaintext path so its runner forks); every other harness forks
       // server-side here into an empty side chat, carrying the typed question.
       if (cmd === "/side" && !usesNativeSideChatFork(sessionHarness)) {
-        openGenericSideChat(trimmed.slice(cmd.length).trim());
+        runCommand(() => openGenericSideChat(trimmed.slice(cmd.length).trim()));
         return;
       }
       // Known skill on an in-process session: send a `slash_command` event so
       // the server resolves it. Native-terminal sessions have no
       // `onSendSlashCommand`; their vendor TUI loads the skill from plaintext.
       if (skill !== null) {
-        sendSkill(skill);
+        runCommand(() => sendSkill(skill));
         return;
       }
     }
@@ -3762,7 +3771,8 @@ function ComposerImpl(
     if (conversationId !== null && !hasPendingElicitation && shouldSteerAllFromKeyboard) {
       e.preventDefault();
       if (!mentionListingPending) submit();
-      steerAllQueuedMessages(conversationId);
+      // While unreachable the queue waits for the host, so nothing is steered.
+      if (!unreachable) steerAllQueuedMessages(conversationId);
       return;
     }
     // "@"-mention menu navigation (shared useMentionBrowser) — mutually
@@ -4019,7 +4029,7 @@ function ComposerImpl(
                         ? "Send a follow-up (queued) — Esc to stop"
                         : readyPlaceholder,
           rows: 1,
-          // Only typing reopens for an Arca reconnect; every other unreachable gate stays.
+          // An Arca send waits in the queue for the host, so typing reopens; other gates stay.
           disabled:
             ((disabled || (unreachable && !sendReconnectsArca)) && sendDisabledReason === null) ||
             isReadOnly ||
@@ -4040,7 +4050,12 @@ function ComposerImpl(
                 quotes={draft.quotes}
                 activeTextId={activeTextId}
                 keyboard={{ submitWithModEnter, preventsKeyboardSubmit }}
-                disabled={disabled || isReadOnly || unreachable || composerLockedByBtw}
+                disabled={
+                  disabled ||
+                  isReadOnly ||
+                  (unreachable && !sendReconnectsArca) ||
+                  composerLockedByBtw
+                }
                 onGrowth={onViewportShrinkPinScroll}
                 onRemove={(id) => {
                   removeQuote(id);

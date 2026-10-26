@@ -1211,6 +1211,50 @@ describe("Composer slash-command submit routing", () => {
     expect(onSendSlashCommand).toHaveBeenCalledExactlyOnceWith("deslop", "fix the bug");
   });
 
+  it.each([
+    ["a skill in a native session", "/deslop fix the bug"],
+    ["unknown slash text", "/foo bar"],
+  ])("sends %s as a message while an offline Arca reconnects", (_kind, text) => {
+    const onSend = vi.fn();
+    const onShowReconnectHelp = vi.fn();
+    render(
+      <Composer
+        {...composerProps({
+          onSend,
+          onShowReconnectHelp,
+          unreachable: true,
+          sendReconnectsArca: true,
+        })}
+      />,
+    );
+    fireEvent.change(textarea(), { target: { value: text } });
+    fireEvent.keyDown(textarea(), { key: "Enter" });
+
+    // ChatPage's onSend queues it for the host, like any other message.
+    expect(onSend).toHaveBeenCalledExactlyOnceWith(text, undefined);
+    expect(onShowReconnectHelp).not.toHaveBeenCalled();
+    expect(screen.queryByText("Send this command again once Arca is back online.")).toBeNull();
+  });
+
+  it("doesn't steer the queue with Mod+Enter while an offline Arca reconnects", () => {
+    const realSteerAll = useChatStore.getState().steerAllQueuedMessages;
+    const steerAll = vi.fn();
+    useChatStore.setState({ steerAllQueuedMessages: steerAll });
+    try {
+      const onSend = vi.fn();
+      render(
+        <Composer {...composerProps({ onSend, unreachable: true, sendReconnectsArca: true })} />,
+      );
+      fireEvent.change(textarea(), { target: { value: "hi" } });
+      fireEvent.keyDown(textarea(), { key: "Enter", metaKey: true });
+
+      expect(onSend).toHaveBeenCalledExactlyOnceWith("hi", undefined);
+      expect(steerAll).not.toHaveBeenCalled();
+    } finally {
+      useChatStore.setState({ steerAllQueuedMessages: realSteerAll });
+    }
+  });
+
   it("keeps /clear in the composer while an offline Arca reconnects, then runs it", () => {
     const realClearContext = useChatStore.getState().clearContext;
     const clearContext = vi.fn().mockResolvedValue(undefined);

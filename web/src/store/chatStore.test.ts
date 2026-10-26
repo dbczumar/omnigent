@@ -3235,7 +3235,7 @@ describe("chatStore — send (first-send ordering)", () => {
     },
   );
 
-  it("never sends a message held for an offline host early, alone or in bulk", () => {
+  it("sends nothing early while a conversation has a message waiting for its host", () => {
     const sendSpy = vi.fn().mockResolvedValue(undefined);
     useChatStore.setState({
       conversationId: "conv_existing",
@@ -3255,14 +3255,18 @@ describe("chatStore — send (first-send ordering)", () => {
       ],
     });
 
-    useChatStore.getState().steerMessage("q_held");
-    expect(sendSpy).not.toHaveBeenCalled();
-
-    // Bulk steering stops at the held message, so nothing jumps ahead of it.
+    // "before" too: refused while offline, it would be re-held behind "held".
+    for (const queueId of ["q_before", "q_held", "q_after"]) {
+      useChatStore.getState().steerMessage(queueId);
+    }
     useChatStore.getState().steerAllQueuedMessages("conv_existing");
-    expect(sendSpy).toHaveBeenCalledOnce();
-    expect(sendSpy.mock.calls[0]![0]).toBe("before");
-    expect(useChatStore.getState().queuedMessages.map((m) => m.text)).toEqual(["held", "after"]);
+
+    expect(sendSpy).not.toHaveBeenCalled();
+    expect(useChatStore.getState().queuedMessages.map((m) => m.text)).toEqual([
+      "before",
+      "held",
+      "after",
+    ]);
   });
 
   it("queues a message for an offline host without posting it until released", async () => {

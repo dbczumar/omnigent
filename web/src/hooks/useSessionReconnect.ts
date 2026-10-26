@@ -3,7 +3,13 @@ import { toast } from "sonner";
 
 import { fetchHosts } from "@/hooks/useHosts";
 import { isArcaHost, readArcaHostId, writeArcaHostId } from "@/lib/arcaHost";
-import { connectArcaHost, controlHost, getHostIdentity, isElectronShell } from "@/lib/nativeBridge";
+import {
+  connectArcaHost,
+  controlHost,
+  getHostIdentity,
+  isElectronShell,
+  supportsArcaConnect,
+} from "@/lib/nativeBridge";
 
 /** Reconnect this desktop's host directly; use the dialog for fallback and retry. */
 export function useSessionReconnect({
@@ -29,7 +35,7 @@ export function useSessionReconnect({
     [hostId, hostName],
   );
   const runsArcaConnect = useCallback(
-    () => !!hostId && isOwner && isElectronShell() && isSessionArcaHost(),
+    () => !!hostId && isOwner && supportsArcaConnect() && isSessionArcaHost(),
     [hostId, isOwner, isSessionArcaHost],
   );
 
