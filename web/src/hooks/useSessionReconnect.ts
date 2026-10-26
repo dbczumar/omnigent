@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
+import { fetchHosts } from "@/hooks/useHosts";
 import { isArcaHost, readArcaHostId, writeArcaHostId } from "@/lib/arcaHost";
 import { connectArcaHost, controlHost, getHostIdentity, isElectronShell } from "@/lib/nativeBridge";
 
@@ -68,9 +69,16 @@ export function useSessionReconnect({
         return;
       }
       if (result.identity) writeArcaHostId(result.identity.hostId);
-      // The connect starts whichever Arca the user has now, and a session can
-      // still be bound to an older Arca host that the name match recognized.
-      if (result.identity && result.identity.hostId !== hostId) {
+      // The connect starts whichever Arca the user has now, and only returns once
+      // the server lists it online, so a still-offline session host is another host.
+      const hosts = await fetchHosts(false).catch(() => null);
+      if (inFlight.current !== operation) return;
+      if (hosts === null) {
+        setError("Couldn't check whether this session's host is back online. Try again.");
+        setDialogOpen(true);
+        return;
+      }
+      if (!hosts.some((host) => host.host_id === hostId && host.status === "online")) {
         setError(
           "Arca is online as a different host, so this session's host is still offline. Use Switch host to move the session.",
         );
