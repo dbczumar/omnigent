@@ -4962,24 +4962,29 @@ async def test_required_terminal_exit_during_shutdown_does_not_fail_session(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("last_output", "failure_title"),
+    ("last_output", "turn_left_running", "expected_statuses"),
     [
-        ("Traceback (most recent call last):\nKeyboardInterrupt", None),
+        ("Traceback (most recent call last):\nKeyboardInterrupt", False, []),
+        ("Traceback (most recent call last):\nKeyboardInterrupt", True, [("idle", None)]),
         # A launcher that exits 0 after Claude fails.
         (
             "Claude Code exited with code 1\nError output:\nerror: unknown option '--no-such'",
-            "Agent CLI rejected its launch arguments",
+            False,
+            [("failed", "Agent CLI rejected its launch arguments")],
         ),
     ],
-    ids=["person-quits", "launcher-hides-a-crash"],
+    ids=["person-quits", "person-quits-a-running-turn", "launcher-hides-a-crash"],
 )
 async def test_required_terminal_quit_before_prompt_does_not_fail_session(
-    caplog: pytest.LogCaptureFixture, last_output: str, failure_title: str | None
+    caplog: pytest.LogCaptureFixture,
+    last_output: str,
+    turn_left_running: bool,
+    expected_statuses: list[tuple[str, str | None]],
 ) -> None:
     """A person quitting Claude while it starts is not a crash.
 
-    The runner removes the terminal resource and releases the harness, with no
-    ERROR log and no failed card, unless the screen shows a recognized failure.
+    The runner removes the terminal resource and releases the harness with no ERROR
+    log, ending a turn left running, unless the screen shows a recognized failure.
     """
     import logging
 
@@ -5011,6 +5016,7 @@ async def test_required_terminal_quit_before_prompt_does_not_fail_session(
                     exit_status=0,
                     last_output=last_output,
                     quit_before_prompt=True,
+                    turn_left_running=turn_left_running,
                 )
             )
             queued_events: list[dict[str, Any]] = []
@@ -5034,9 +5040,9 @@ async def test_required_terminal_quit_before_prompt_does_not_fail_session(
         (event["status"], event.get("error", {}).get("title"))
         for event in queued_events
         if event.get("type") == "session.status"
-    ] == ([] if failure_title is None else [("failed", failure_title)])
+    ] == expected_statuses
     errors = [record for record in caplog.records if record.levelno >= logging.ERROR]
-    assert bool(errors) is (failure_title is not None)
+    assert bool(errors) is any(status == "failed" for status, _title in expected_statuses)
     assert pm.released == [conv_id]
 
 

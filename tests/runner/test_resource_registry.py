@@ -1338,6 +1338,49 @@ async def test_required_terminal_exit_reads_idle_only_once_the_tui_booted(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("delivery", "turn_left_running"),
+    [("none", False), ("open", False), ("ended", True)],
+    ids=["no-message", "delivery-open", "delivery-ended"],
+)
+async def test_quit_mid_startup_reports_a_turn_no_delivery_will_end(
+    tmp_path: Path, delivery: str, turn_left_running: bool
+) -> None:
+    """A quit while Claude starts says whether a turn shown as running needs ending.
+
+    An open delivery fails on its own once the terminal is gone; a delivered
+    message Claude was working on has nothing else to end it.
+    """
+    callbacks, _statuses, _pollers, registry = await _observe_native_with_fake_poller(
+        tmp_path, "conv_quit_turn"
+    )
+    instance = registry.terminal_registry.get("conv_quit_turn", "claude", "main")
+    assert instance is not None
+    exits: list[TerminalExitEvent] = []
+    exit_published = asyncio.Event()
+
+    def _publish_exit(event: TerminalExitEvent) -> None:
+        exits.append(event)
+        exit_published.set()
+
+    registry.set_terminal_exit_publisher(_publish_exit)
+    on_exit = callbacks["on_exit"]
+    assert callable(on_exit)
+    if delivery != "none":
+        registry.note_runner_turn_accepted("conv_quit_turn")
+    if delivery == "ended":
+        registry.note_runner_turn_ended("conv_quit_turn", "idle")
+    # tmux's dead-pane row for a Ctrl-C: dead|exit status|signal name.
+    instance._exit_status_is_pending("1||int")
+    on_exit()
+    await asyncio.wait_for(exit_published.wait(), timeout=1.0)
+
+    assert [(event.quit_before_prompt, event.turn_left_running) for event in exits] == [
+        (True, turn_left_running)
+    ]
+
+
+@pytest.mark.asyncio
 async def test_message_accepted_during_boot_reads_as_working_until_claude_finishes(
     tmp_path: Path,
 ) -> None:
@@ -1386,13 +1429,18 @@ async def test_message_accepted_during_boot_reads_as_working_until_claude_finish
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("next_message_fails_first", "expected_statuses"),
-    [(False, ["running", "idle"]), (True, ["running"])],
-    ids=["delivery-ends", "next-message-fails-first"],
+    ("claude_status", "next_message_fails_first", "expected_statuses"),
+    [
+        ("idle", False, ["running", "idle"]),
+        ("idle", True, ["running"]),
+        ("busy", True, ["running"]),
+    ],
+    ids=["delivery-ends", "next-message-fails-first", "busy-when-next-message-fails"],
 )
 async def test_prompt_claude_never_takes_up_reads_idle_after_delivery(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    claude_status: str,
     next_message_fails_first: bool,
     expected_statuses: list[str],
 ) -> None:
@@ -1411,7 +1459,7 @@ async def test_prompt_claude_never_takes_up_reads_idle_after_delivery(
                 "pid": 123,
                 "sessionId": "claude-refused",
                 "kind": "interactive",
-                "status": "idle",
+                "status": claude_status,
                 "statusUpdatedAt": 1000,
             }
         ),
@@ -1433,17 +1481,21 @@ async def test_prompt_claude_never_takes_up_reads_idle_after_delivery(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("next_message_fails_first", "expected_statuses"),
-    [(False, ["running", "idle"]), (True, ["running"])],
-    ids=["delivery-ends", "next-message-fails-first"],
+    ("tui_booted", "next_message_fails_first", "expected_statuses"),
+    [
+        (True, False, ["running", "idle"]),
+        (True, True, ["running"]),
+        (False, False, ["running", "idle"]),
+    ],
+    ids=["delivery-ends", "next-message-fails-first", "interrupted-during-startup"],
 )
 async def test_quiet_pane_reads_idle_once_delivery_ends(
-    tmp_path: Path, next_message_fails_first: bool, expected_statuses: list[str]
+    tmp_path: Path, tui_booted: bool, next_message_fails_first: bool, expected_statuses: list[str]
 ) -> None:
     """With only the pane to go on, a quiet spell during delivery shows after it.
 
     That idle edge was held and doesn't recur on its own, so the end of delivery
-    reports it, unless a message accepted since has already failed.
+    reports it, even mid-startup, unless a message accepted since has failed.
     """
     callbacks, statuses, _pollers, registry = await _observe_native_with_fake_poller(
         tmp_path, "conv_pane_delivery"
@@ -1456,7 +1508,8 @@ async def test_quiet_pane_reads_idle_once_delivery_ends(
         callbacks["on_idle"],
     )
     assert callable(on_tick) and callable(on_activity) and callable(on_idle)
-    finish_native_tui_boot(instance, on_tick, on_idle)
+    if tui_booted:
+        finish_native_tui_boot(instance, on_tick, on_idle)
 
     registry.note_runner_turn_accepted("conv_pane_delivery")
     on_activity()

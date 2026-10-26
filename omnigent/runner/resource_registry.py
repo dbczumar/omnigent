@@ -188,6 +188,8 @@ class TerminalExitEvent:
         before it reached its prompt: it exited 0, or a Ctrl-C ended it
         (``SIGINT``, or exit status 130). A clean shutdown unless its last
         output shows a recognized failure. Only Claude's startup is tracked.
+    :param turn_left_running: Whether a turn was active with no runner delivery
+        left to end it, e.g. a delivered message Claude was working on.
     :param terminal_instance_id: Identity of the observed terminal instance.
     :param lifecycle_context: Content-free evidence captured before exit cleanup.
     """
@@ -204,6 +206,7 @@ class TerminalExitEvent:
     exit_status: int | None = None
     session_was_idle: bool = False
     quit_before_prompt: bool = False
+    turn_left_running: bool = False
     terminal_instance_id: str | None = None
     lifecycle_context: dict[str, str] = field(default_factory=dict)
 
@@ -522,14 +525,11 @@ class SessionResourceRegistry:
         # Per-session pollers need re-arming after reconnects or forwarded
         # idle statuses because they keep their own edge/mtime baselines.
         self._status_pollers: dict[str, SessionStatusPoller | ClaudeProgramStatusPoller] = {}
-        # Sessions whose runner turn is still handing a message to the terminal;
-        # the terminal's idle edges wait until that delivery ends.
+        # Sessions still delivering a runner message; their terminal idle edges wait.
         self._open_runner_turns: set[str] = set()
-        # Messages the runner has accepted per session. An idle from before the
-        # latest one is stale, as is a hand-back for an earlier delivery.
+        # Messages the runner has accepted per session, to spot stale idle edges.
         self._accepted_runner_turns: dict[str, int] = {}
-        # Per-session callbacks that republish what the terminal is doing now, for
-        # the delivery whose accepted-turn count they're given.
+        # Per-session callbacks that re-read the terminal's status for a delivery.
         self._status_reasserters: dict[str, Callable[[int], None]] = {}
         # Optional callback invoked on the event loop when a watched terminal
         # disappears unexpectedly. The callback receives the terminal's
@@ -712,11 +712,11 @@ class SessionResourceRegistry:
         """
         with self._lock:
             accepted_turn = self._accepted_runner_turns.get(session_id, 0)
-            # A message still being delivered hasn't been answered yet, and one
-            # accepted since a delivery ended owns status instead of that delivery.
-            if status == "idle" and (
-                session_id in self._open_runner_turns or handback_turn not in (None, accepted_turn)
-            ):
+            # A message accepted since a delivery ended owns status instead of it.
+            if handback_turn not in (None, accepted_turn):
+                return None
+            # A message still being delivered hasn't been answered yet.
+            if status == "idle" and session_id in self._open_runner_turns:
                 return None
             if explicit_activity:
                 self._record_status_memo_locked(session_id, status, record_activity=True)
@@ -783,6 +783,18 @@ class SessionResourceRegistry:
         """Whether an explicitly observed turn is unfinished, excluding pane repaints."""
         with self._lock:
             return session_id in self._active_session_turns
+
+    def _turn_left_running(self, session_id: str) -> bool:
+        """
+        Whether a turn is active with no runner delivery left to end it.
+
+        :param session_id: Session/conversation identifier, e.g. ``"conv_abc"``.
+        """
+        with self._lock:
+            return (
+                session_id in self._active_session_turns
+                and session_id not in self._open_runner_turns
+            )
 
     def _idle_superseded(self, session_id: str, committed_turn: int) -> bool:
         """
@@ -1725,7 +1737,8 @@ class SessionResourceRegistry:
             if status_poller is not None and status_poller.active:
                 poller_handback_turn = accepted_turn
                 status_poller.resync()
-            elif pane_quiet and not _pane_status_is_boot_output():
+            # The runner's turn is over, so a quiet pane is idle even mid-startup.
+            elif pane_quiet:
                 _publish_status("idle", handback_turn=accepted_turn)
 
         def _advance_handback() -> None:
@@ -2071,10 +2084,11 @@ class SessionResourceRegistry:
                     superseded_by = current
 
         # A replaced launch must not consume its successor's status memo.
+        consume_memo = superseded_by is None and not before_observation
+        # Read beside the memo, with no await between, so both describe one moment.
+        turn_left_running = consume_memo and self._turn_left_running(session_id)
         session_status_before_exit = (
-            self._take_session_status_memo(session_id)
-            if superseded_by is None and not before_observation
-            else None
+            self._take_session_status_memo(session_id) if consume_memo else None
         )
         session_was_idle = session_status_before_exit == "idle"
         lifecycle_context["session_status_before_exit"] = session_status_before_exit or "unknown"
@@ -2150,6 +2164,7 @@ class SessionResourceRegistry:
                     exit_status=exit_status,
                     session_was_idle=session_was_idle,
                     quit_before_prompt=quit_before_prompt,
+                    turn_left_running=turn_left_running,
                     terminal_instance_id=instance.diagnostic_id if instance is not None else None,
                     lifecycle_context=lifecycle_context,
                 )
