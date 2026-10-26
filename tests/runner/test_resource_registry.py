@@ -1385,14 +1385,21 @@ async def test_message_accepted_during_boot_reads_as_working_until_claude_finish
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("next_message_fails_first", "expected_statuses"),
+    [(False, ["running", "idle"]), (True, ["running"])],
+    ids=["delivery-ends", "next-message-fails-first"],
+)
 async def test_prompt_claude_never_takes_up_reads_idle_after_delivery(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    next_message_fails_first: bool,
+    expected_statuses: list[str],
 ) -> None:
     """A message Claude never starts on can't leave the session reading as working.
 
-    A refused prompt (e.g. a blocking UserPromptSubmit hook) leaves Claude idle
-    with nothing new to report. The idle it showed before delivery was held, so
-    the end of delivery has it report its status again.
+    A refused prompt leaves Claude idle with nothing new to report, so the end of
+    delivery has it report again, unless a message accepted since has failed.
     """
     session_id = "conv_refused"
     on_tick, statuses, registry, status_file = await _observe_native_with_real_poller(
@@ -1416,18 +1423,27 @@ async def test_prompt_claude_never_takes_up_reads_idle_after_delivery(
     assert statuses == ["running"]
 
     registry.note_runner_turn_ended(session_id, "idle")
+    if next_message_fails_first:
+        registry.note_runner_turn_accepted(session_id)
+        registry.note_runner_turn_ended(session_id, "failed")
     _tick_through_handback(on_tick)
     await asyncio.sleep(0)
-    assert statuses == ["running", "idle"]
+    assert statuses == expected_statuses
 
 
 @pytest.mark.asyncio
-async def test_quiet_pane_reads_idle_once_delivery_ends(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("next_message_fails_first", "expected_statuses"),
+    [(False, ["running", "idle"]), (True, ["running"])],
+    ids=["delivery-ends", "next-message-fails-first"],
+)
+async def test_quiet_pane_reads_idle_once_delivery_ends(
+    tmp_path: Path, next_message_fails_first: bool, expected_statuses: list[str]
+) -> None:
     """With only the pane to go on, a quiet spell during delivery shows after it.
 
-    A quick reply can settle the pane before the runner's delivery turn
-    returns. That idle edge was held and doesn't recur on its own, so the end of
-    delivery reports it.
+    That idle edge was held and doesn't recur on its own, so the end of delivery
+    reports it, unless a message accepted since has already failed.
     """
     callbacks, statuses, _pollers, registry = await _observe_native_with_fake_poller(
         tmp_path, "conv_pane_delivery"
@@ -1449,9 +1465,12 @@ async def test_quiet_pane_reads_idle_once_delivery_ends(tmp_path: Path) -> None:
     assert statuses == ["running"]
 
     registry.note_runner_turn_ended("conv_pane_delivery", "idle")
+    if next_message_fails_first:
+        registry.note_runner_turn_accepted("conv_pane_delivery")
+        registry.note_runner_turn_ended("conv_pane_delivery", "failed")
     _tick_through_handback(on_tick)
     await asyncio.sleep(0)
-    assert statuses == ["running", "idle"]
+    assert statuses == expected_statuses
 
 
 @pytest.mark.asyncio
@@ -1495,13 +1514,14 @@ async def test_pane_shows_claude_working_on_a_message_delivered_while_it_rested(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("accepted_turn_fails", [False, True], ids=["open", "already-failed"])
 async def test_idle_on_its_way_to_the_loop_cannot_overtake_an_accepted_turn(
-    tmp_path: Path,
+    tmp_path: Path, accepted_turn_fails: bool
 ) -> None:
     """A pane idle the loop hasn't sent yet can't land after an accepted turn's running.
 
     The watcher thread commits an edge, then hands it to the loop to send. A
-    message the runner accepts in between has already published running.
+    message the runner accepts in between owns status, even once it has failed.
     """
     callbacks, statuses, _pollers, registry = await _observe_native_with_fake_poller(
         tmp_path, "conv_overtake"
@@ -1521,6 +1541,8 @@ async def test_idle_on_its_way_to_the_loop_cannot_overtake_an_accepted_turn(
 
     on_idle()
     registry.note_runner_turn_accepted("conv_overtake")
+    if accepted_turn_fails:
+        registry.note_runner_turn_ended("conv_overtake", "failed")
     await asyncio.sleep(0)
     assert statuses == ["running", "running"]
 

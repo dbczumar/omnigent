@@ -183,8 +183,12 @@ async def test_stream_setup_that_raises_still_ends_the_turn(setup_error: BaseExc
             )
         queued = _drain_session_event_queue(app.state.session_event_queues.get(_SESSION_ID))
 
-    statuses = [event["status"] for event in queued if event["type"] == "session.status"]
-    assert statuses == ["running", "failed"]
+    status_events = [event for event in queued if event["type"] == "session.status"]
+    assert [event["status"] for event in status_events] == ["running", "failed"]
+    # Viewers get a pointer to the runner log, not the exception's own text.
+    failure_message = status_events[-1]["error"]["message"]
+    assert failure_message.startswith("turn setup failed: Request failed on the runner")
+    assert "synthetic harness setup failure" not in failure_message
 
 
 @pytest.mark.asyncio

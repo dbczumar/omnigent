@@ -525,8 +525,12 @@ class SessionResourceRegistry:
         # Sessions whose runner turn is still handing a message to the terminal;
         # the terminal's idle edges wait until that delivery ends.
         self._open_runner_turns: set[str] = set()
-        # Per-session callbacks that republish what the terminal is doing now.
-        self._status_reasserters: dict[str, Callable[[], None]] = {}
+        # Messages the runner has accepted per session. An idle from before the
+        # latest one is stale, as is a hand-back for an earlier delivery.
+        self._accepted_runner_turns: dict[str, int] = {}
+        # Per-session callbacks that republish what the terminal is doing now, for
+        # the delivery whose accepted-turn count they're given.
+        self._status_reasserters: dict[str, Callable[[int], None]] = {}
         # Optional callback invoked on the event loop when a watched terminal
         # disappears unexpectedly. The callback receives the terminal's
         # lifecycle relationship so the runner can decide whether the owning
@@ -682,8 +686,14 @@ class SessionResourceRegistry:
         return True
 
     def _commit_terminal_status_edge(
-        self, session_id: str, status: str, blocked_on: str | None, *, explicit_activity: bool
-    ) -> bool:
+        self,
+        session_id: str,
+        status: str,
+        blocked_on: str | None,
+        *,
+        explicit_activity: bool,
+        handback_turn: int | None,
+    ) -> int | None:
         """
         Check the delivery hold, record the exit memo and claim one terminal edge.
 
@@ -695,20 +705,27 @@ class SessionResourceRegistry:
         :param blocked_on: Reason the agent is parked, or ``None``.
         :param explicit_activity: Whether Claude itself reported this
             ``running``/``waiting``, so it starts a turn even when deduplicated.
-        :returns: ``True`` when the caller should publish the edge.
+        :param handback_turn: Accepted-turn count of the delivery a hand-back
+            re-asserts status for, e.g. ``3``; ``None`` for the terminal's own edges.
+        :returns: The accepted-turn count the edge was committed under, or ``None``
+            when the caller shouldn't publish it.
         """
         with self._lock:
-            # A message the runner is still delivering hasn't been answered yet.
-            if status == "idle" and session_id in self._open_runner_turns:
-                return False
+            accepted_turn = self._accepted_runner_turns.get(session_id, 0)
+            # A message still being delivered hasn't been answered yet, and one
+            # accepted since a delivery ended owns status instead of that delivery.
+            if status == "idle" and (
+                session_id in self._open_runner_turns or handback_turn not in (None, accepted_turn)
+            ):
+                return None
             if explicit_activity:
                 self._record_status_memo_locked(session_id, status, record_activity=True)
             if not self._claim_status_edge_locked(session_id, status, blocked_on):
-                return False
+                return None
             # Pane repaints can be startup output, not a new agent turn.
             if not explicit_activity:
                 self._record_status_memo_locked(session_id, status, record_activity=False)
-            return True
+            return accepted_turn
 
     def _sync_status_edge(self, session_id: str, status: str) -> None:
         """Adopt an external status and re-arm its file poller after idle."""
@@ -767,10 +784,15 @@ class SessionResourceRegistry:
         with self._lock:
             return session_id in self._active_session_turns
 
-    def _runner_turn_open(self, session_id: str) -> bool:
-        """Whether the runner is still delivering a message to the session's terminal."""
+    def _idle_superseded(self, session_id: str, committed_turn: int) -> bool:
+        """
+        Whether the runner accepted a message after an idle edge was committed.
+
+        :param session_id: Session/conversation identifier, e.g. ``"conv_abc"``.
+        :param committed_turn: Accepted-turn count the idle was committed under, e.g. ``3``.
+        """
         with self._lock:
-            return session_id in self._open_runner_turns
+            return self._accepted_runner_turns.get(session_id, 0) != committed_turn
 
     def note_session_turn_started(self, session_id: str) -> None:
         """Mark a session as having an in-flight turn.
@@ -795,6 +817,9 @@ class SessionResourceRegistry:
         """
         with self._lock:
             self._open_runner_turns.add(session_id)
+            self._accepted_runner_turns[session_id] = (
+                self._accepted_runner_turns.get(session_id, 0) + 1
+            )
             # A turn, whichever runner path started it, so the TUI's output is its own.
             self._record_status_memo_locked(session_id, "running", record_activity=True)
             claimed = self._claim_status_edge_locked(session_id, "running", None)
@@ -816,10 +841,11 @@ class SessionResourceRegistry:
         with self._lock:
             self._open_runner_turns.discard(session_id)
             reassert = self._status_reasserters.get(session_id)
+            accepted_turn = self._accepted_runner_turns.get(session_id, 0)
         if status == "failed":
             self.note_external_session_status(session_id, "failed")
         elif reassert is not None:
-            reassert()
+            reassert(accepted_turn)
 
     def note_external_session_status(self, session_id: str, status: str) -> None:
         """Record a terminal-observed external status for exit classification.
@@ -1589,7 +1615,11 @@ class SessionResourceRegistry:
         last_activity_emit: dict[str, float | None] = {"value": None}
 
         def _publish_status(
-            status: str, blocked_on: str | None = None, *, record_activity: bool = False
+            status: str,
+            blocked_on: str | None = None,
+            *,
+            record_activity: bool = False,
+            handback_turn: int | None = None,
         ) -> None:
             # Publish one running/idle edge: dedup against the last value,
             # memo for exit classification, and hop to the loop (publishers
@@ -1601,9 +1631,14 @@ class SessionResourceRegistry:
             if status_publisher is None:
                 return
             explicit_activity = record_activity and status in {"running", "waiting"}
-            if not self._commit_terminal_status_edge(
-                session_id, status, blocked_on, explicit_activity=explicit_activity
-            ):
+            committed_turn = self._commit_terminal_status_edge(
+                session_id,
+                status,
+                blocked_on,
+                explicit_activity=explicit_activity,
+                handback_turn=handback_turn,
+            )
+            if committed_turn is None:
                 return
             with contextlib.suppress(Exception):
                 reader = getattr(instance, "program_status", None)
@@ -1615,13 +1650,13 @@ class SessionResourceRegistry:
                     if record_activity
                     else "pane_activity",
                 )
-            loop.call_soon_threadsafe(_deliver_status, status, blocked_on)
+            loop.call_soon_threadsafe(_deliver_status, status, blocked_on, committed_turn)
 
-        def _deliver_status(status: str, blocked_on: str | None) -> None:
+        def _deliver_status(status: str, blocked_on: str | None, committed_turn: int) -> None:
             # On the loop: a message accepted after this edge committed already
             # published running, which this idle mustn't overtake.
             if status_publisher is None or (
-                status == "idle" and self._runner_turn_open(session_id)
+                status == "idle" and self._idle_superseded(session_id, committed_turn)
             ):
                 return
             status_publisher(session_id, status, blocked_on)
@@ -1631,6 +1666,10 @@ class SessionResourceRegistry:
             # activity badges and process-death detection.
             return status_poller is not None and status_poller.active
 
+        # Delivery a hand-back re-asserts status for during its tick; the poller
+        # republishes within that tick's poll or not at all.
+        poller_handback_turn: int | None = None
+
         # Claude reports explicit state through OSC when opted in, with its
         # sessions/<pid>.json file as fallback. Other roles retain pane inference.
         status_poller = (
@@ -1638,7 +1677,7 @@ class SessionResourceRegistry:
                 session_id=session_id,
                 instance=instance,
                 on_status=lambda status, blocked_on=None: _publish_status(
-                    status, blocked_on, record_activity=True
+                    status, blocked_on, record_activity=True, handback_turn=poller_handback_turn
                 ),
             )
             if emit_status and resource_role == CLAUDE_NATIVE_TERMINAL_ROLE
@@ -1654,11 +1693,13 @@ class SessionResourceRegistry:
         # roles' pane edges aren't held back for boot.
         boot_settled = resource_role != CLAUDE_NATIVE_TERMINAL_ROLE or input_ready_probe is None
         pane_quiet = False
-        # Set on the loop when message delivery ends; the watcher thread consumes it.
+        # Set on the loop when message delivery ends, to that delivery's accepted-turn
+        # count; the watcher thread consumes it.
         handback_lock = threading.Lock()
-        handback_requested = False
+        handback_requested: int | None = None
         # Ticks left before handing status back, so a capture taken after delivery is diffed.
         handback_ticks_left = 0
+        handback_pending_turn = 0
 
         def _pane_status_is_boot_output() -> bool:
             # Boot repaints aren't a turn; before startup settles, only an active
@@ -1673,37 +1714,40 @@ class SessionResourceRegistry:
             # Waiting at its prompt, so an exit from here is a clean shutdown.
             self._record_tui_at_prompt(session_id)
 
-        def _request_handback() -> None:
+        def _request_handback(accepted_turn: int) -> None:
             nonlocal handback_requested
             with handback_lock:
-                handback_requested = True
+                handback_requested = accepted_turn
 
-        def _hand_status_back() -> None:
+        def _hand_status_back(accepted_turn: int) -> None:
+            nonlocal poller_handback_turn
             # Idle edges held during delivery don't recur on their own.
             if status_poller is not None and status_poller.active:
+                poller_handback_turn = accepted_turn
                 status_poller.resync()
             elif pane_quiet and not _pane_status_is_boot_output():
-                _publish_status("idle")
+                _publish_status("idle", handback_turn=accepted_turn)
 
         def _advance_handback() -> None:
-            nonlocal handback_requested, handback_ticks_left
+            nonlocal handback_requested, handback_ticks_left, handback_pending_turn
             with handback_lock:
                 requested = handback_requested
-                handback_requested = False
-            if requested:
+                handback_requested = None
+            if requested is not None:
                 # This tick's capture may predate delivery; the next one doesn't.
                 handback_ticks_left = 2
+                handback_pending_turn = requested
             elif handback_ticks_left:
                 handback_ticks_left -= 1
                 if not handback_ticks_left:
-                    _hand_status_back()
+                    _hand_status_back(handback_pending_turn)
 
         if emit_status and resource_role == CLAUDE_NATIVE_TERMINAL_ROLE:
             with self._lock:
                 self._status_reasserters[session_id] = _request_handback
 
         def _on_tick() -> None:
-            nonlocal native_input_ready
+            nonlocal native_input_ready, poller_handback_turn
             # Settle on the tick after readiness, so the composer's own repaint isn't counted.
             if native_input_ready and pane_quiet and not boot_settled:
                 _settle_boot()
@@ -1711,6 +1755,7 @@ class SessionResourceRegistry:
             # Claude's own status reports aren't boot output, so they publish during startup.
             if status_poller is not None:
                 status_poller.tick()
+            poller_handback_turn = None
             if resource_role == CLAUDE_NATIVE_TERMINAL_ROLE:
                 try:
                     from omnigent.harnesses.claude_native.bridge import (
@@ -2270,6 +2315,7 @@ class SessionResourceRegistry:
         self._take_session_status_memo(session_id)
         with self._lock:
             self._session_activity_epoch.pop(session_id, None)
+            self._accepted_runner_turns.pop(session_id, None)
             primary = self._primary_envs.pop(session_id, None)
             self._primary_env_specs.pop(session_id, None)
             skills_directory = self._codex_skills_dirs.pop(session_id, None)

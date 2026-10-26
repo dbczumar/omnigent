@@ -1366,6 +1366,7 @@ async def test_is_alive_false_when_pane_dead(
         ("1||15", None, "SIGTERM"),
         # tmux 3.4's own form.
         ("1||int", None, "SIGINT"),
+        ("1||term", None, "SIGTERM"),
         ("1||RTMIN+1", None, "RTMIN+1"),
         ("1||999", None, "999"),
         ("1||", None, None),
