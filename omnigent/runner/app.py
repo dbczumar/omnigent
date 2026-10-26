@@ -1895,11 +1895,9 @@ def create_runner_app(
             _release_required_terminal_session(event.session_id)
             return
 
-        # Quit by a person before its prompt: not a crash, but its turn must still end.
-        # A launcher can exit 0 after Claude fails, so a recognized failure still fails.
-        if event.quit_before_prompt and diagnosis is None:
-            if event.turn_left_running:
-                _publish_event(event.session_id, {"type": "session.status", "status": "idle"})
+        # Quit by a person before its prompt with no turn left running: not a crash. A
+        # launcher can exit 0 after Claude fails, so a recognized failure still fails.
+        if event.quit_before_prompt and not event.turn_left_running and diagnosis is None:
             _release_required_terminal_session(event.session_id)
             return
 

@@ -186,8 +186,9 @@ class TerminalExitEvent:
         observed) keeps a mid-turn crash or boot failure a failure.
     :param quit_before_prompt: Whether the TUI ended like a person quitting
         before it reached its prompt: it exited 0, or a Ctrl-C ended it
-        (``SIGINT``, or exit status 130). A clean shutdown unless its last
-        output shows a recognized failure. Only Claude's startup is tracked.
+        (``SIGINT``, or exit status 130). A clean shutdown unless a turn was
+        left running or its last output shows a recognized failure. Only
+        Claude's startup is tracked.
     :param turn_left_running: Whether a turn was active with no runner delivery
         left to end it, e.g. a delivered message Claude was working on.
     :param terminal_instance_id: Identity of the observed terminal instance.
