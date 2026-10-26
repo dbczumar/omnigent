@@ -1479,6 +1479,57 @@ async def test_prompt_claude_never_takes_up_reads_idle_after_delivery(
     assert statuses == expected_statuses
 
 
+def _write_claude_status(status_file: Path, status: str, updated_at: int) -> None:
+    """Write Claude's ``sessions/<pid>.json`` record with a fresh mtime."""
+    status_file.write_text(
+        json.dumps(
+            {
+                "pid": 123,
+                "sessionId": "claude-late-read",
+                "kind": "interactive",
+                "status": status,
+                "statusUpdatedAt": updated_at,
+            }
+        ),
+        encoding="utf-8",
+    )
+    os.utime(status_file, (updated_at, updated_at))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status_before_handback", "expected_statuses"),
+    [("idle", ["running", "idle"]), ("busy", ["running"])],
+    ids=["prompt-refused", "claude-starts-working"],
+)
+async def test_status_file_read_first_after_delivery_waits_for_the_handback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    status_before_handback: str,
+    expected_statuses: list[str],
+) -> None:
+    """A status file first read after delivery can't end the turn before the hand-back.
+
+    Its idle may predate the message, so only the hand-back's re-read may publish one.
+    """
+    session_id = "conv_late_read"
+    on_tick, statuses, registry, status_file = await _observe_native_with_real_poller(
+        tmp_path, monkeypatch, session_id
+    )
+    _write_claude_status(status_file, "idle", 1000)
+    registry.note_runner_turn_accepted(session_id)
+    registry.note_runner_turn_ended(session_id, "idle")
+    on_tick()
+    await asyncio.sleep(0)
+    assert statuses == ["running"]
+
+    _write_claude_status(status_file, status_before_handback, 2000)
+    on_tick()
+    on_tick()
+    await asyncio.sleep(0)
+    assert statuses == expected_statuses
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("tui_booted", "next_message_fails_first", "expected_statuses"),

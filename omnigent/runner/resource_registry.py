@@ -530,6 +530,8 @@ class SessionResourceRegistry:
         self._open_runner_turns: set[str] = set()
         # Messages the runner has accepted per session, to spot stale idle edges.
         self._accepted_runner_turns: dict[str, int] = {}
+        # Ended deliveries awaiting their hand-back; only that re-read may say idle.
+        self._pending_handbacks: dict[str, int] = {}
         # Per-session callbacks that re-read the terminal's status for a delivery.
         self._status_reasserters: dict[str, Callable[[int], None]] = {}
         # Optional callback invoked on the event loop when a watched terminal
@@ -659,6 +661,7 @@ class SessionResourceRegistry:
             self._published_session_status.pop(session_id, None)
             self._status_pollers.pop(session_id, None)
             self._open_runner_turns.discard(session_id)
+            self._pending_handbacks.pop(session_id, None)
             self._status_reasserters.pop(session_id, None)
             return self._last_session_status.pop(session_id, None)
 
@@ -716,8 +719,12 @@ class SessionResourceRegistry:
             # A message accepted since a delivery ended owns status instead of it.
             if handback_turn not in (None, accepted_turn):
                 return None
-            # A message still being delivered hasn't been answered yet.
-            if status == "idle" and session_id in self._open_runner_turns:
+            # A message still being delivered hasn't been answered yet, and until its
+            # hand-back re-reads status, an idle may predate the message.
+            if status == "idle" and (
+                session_id in self._open_runner_turns
+                or (handback_turn is None and session_id in self._pending_handbacks)
+            ):
                 return None
             if explicit_activity:
                 self._record_status_memo_locked(session_id, status, record_activity=True)
@@ -797,6 +804,17 @@ class SessionResourceRegistry:
                 and session_id not in self._open_runner_turns
             )
 
+    def _finish_handback(self, session_id: str, accepted_turn: int) -> None:
+        """
+        Let the terminal's own idle edges through once a delivery's hand-back has run.
+
+        :param session_id: Session/conversation identifier, e.g. ``"conv_abc"``.
+        :param accepted_turn: Accepted-turn count of that delivery, e.g. ``3``.
+        """
+        with self._lock:
+            if self._pending_handbacks.get(session_id) == accepted_turn:
+                del self._pending_handbacks[session_id]
+
     def _idle_superseded(self, session_id: str, committed_turn: int) -> bool:
         """
         Whether the runner accepted a message after an idle edge was committed.
@@ -830,6 +848,7 @@ class SessionResourceRegistry:
         """
         with self._lock:
             self._open_runner_turns.add(session_id)
+            self._pending_handbacks.pop(session_id, None)
             self._accepted_runner_turns[session_id] = (
                 self._accepted_runner_turns.get(session_id, 0) + 1
             )
@@ -855,6 +874,10 @@ class SessionResourceRegistry:
             self._open_runner_turns.discard(session_id)
             reassert = self._status_reasserters.get(session_id)
             accepted_turn = self._accepted_runner_turns.get(session_id, 0)
+            if status != "failed" and reassert is not None:
+                self._pending_handbacks[session_id] = accepted_turn
+            else:
+                self._pending_handbacks.pop(session_id, None)
         if status == "failed":
             self.note_external_session_status(session_id, "failed")
         elif reassert is not None:
@@ -1742,7 +1765,8 @@ class SessionResourceRegistry:
             elif pane_quiet:
                 _publish_status("idle", handback_turn=accepted_turn)
 
-        def _advance_handback() -> None:
+        def _advance_handback() -> int | None:
+            # Returns the delivery whose hand-back ran this tick, if any.
             nonlocal handback_requested, handback_ticks_left, handback_pending_turn
             with handback_lock:
                 requested = handback_requested
@@ -1755,6 +1779,8 @@ class SessionResourceRegistry:
                 handback_ticks_left -= 1
                 if not handback_ticks_left:
                     _hand_status_back(handback_pending_turn)
+                    return handback_pending_turn
+            return None
 
         if emit_status and resource_role == CLAUDE_NATIVE_TERMINAL_ROLE:
             with self._lock:
@@ -1765,11 +1791,13 @@ class SessionResourceRegistry:
             # Settle on the tick after readiness, so the composer's own repaint isn't counted.
             if native_input_ready and pane_quiet and not boot_settled:
                 _settle_boot()
-            _advance_handback()
+            handed_back_turn = _advance_handback()
             # Claude's own status reports aren't boot output, so they publish during startup.
             if status_poller is not None:
                 status_poller.tick()
             poller_handback_turn = None
+            if handed_back_turn is not None:
+                self._finish_handback(session_id, handed_back_turn)
             if resource_role == CLAUDE_NATIVE_TERMINAL_ROLE:
                 try:
                     from omnigent.harnesses.claude_native.bridge import (
@@ -2289,6 +2317,7 @@ class SessionResourceRegistry:
                 # retired poller to be re-armed on every later reconnect.
                 self._status_pollers.pop(source_session_id, None)
                 self._status_reasserters.pop(source_session_id, None)
+                self._pending_handbacks.pop(source_session_id, None)
             try:
                 await entry.instance.set_conversation_link(
                     self._terminal_registry.conversation_link_for_id(target_session_id)
