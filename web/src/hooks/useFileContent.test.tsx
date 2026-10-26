@@ -735,8 +735,9 @@ describe("useFileContent on-screen refresh", () => {
     await vi.advanceTimersByTimeAsync(0);
     expect(fetchMock).toHaveBeenCalledTimes(1);
 
+    // Hidden for less than staleTime: returning still re-reads at once.
     act(() => focusManager.setFocused(false));
-    await vi.advanceTimersByTimeAsync(FILE_CONTENT_POLL_MS * 3);
+    await vi.advanceTimersByTimeAsync(FILE_CONTENT_POLL_MS * 2);
     expect(fetchMock).toHaveBeenCalledTimes(1);
 
     act(() => focusManager.setFocused(true));
@@ -753,6 +754,7 @@ describe("useFileContent and this tab's writes", () => {
   const KEY = ["file-content", "conv_w", "notes.md"];
   let serverContent: string;
   let finishWrite: () => void;
+  let failWrite: () => void;
   let answerRead: (content: string) => void;
   let holdReads: boolean;
 
@@ -771,6 +773,8 @@ describe("useFileContent and this tab's writes", () => {
             serverContent = content;
             resolve(jsonResponse({}));
           };
+          failWrite = () =>
+            resolve({ ok: false, status: 500, statusText: "Internal Server Error" } as Response);
         });
       }
       if (!holdReads) return Promise.resolve(jsonResponse(textFile(serverContent)));
@@ -816,6 +820,26 @@ describe("useFileContent and this tab's writes", () => {
     });
     await waitFor(() => expect(calls("GET")).toBeGreaterThan(1));
     await waitFor(() => expect(result.current.read.data?.content).toBe("saved"));
+  });
+
+  it("still re-reads after a write that fails", async () => {
+    const { qc, result } = renderFile();
+    await waitFor(() => expect(result.current.read.data?.content).toBe("before"));
+    let saving!: Promise<void>;
+    act(() => {
+      saving = result.current.write.mutateAsync({ path: "notes.md", content: "rejected" });
+    });
+    await waitFor(() => expect(calls("PUT")).toBe(1));
+    void qc.invalidateQueries({ queryKey: KEY });
+    await flushMicrotasks();
+    expect(calls("GET")).toBe(1);
+
+    await act(async () => {
+      failWrite();
+      await saving.catch(() => {});
+    });
+    await waitFor(() => expect(calls("GET")).toBeGreaterThan(1));
+    expect(result.current.read.data?.content).toBe("before");
   });
 
   it("drops a read that was in flight when the write started", async () => {

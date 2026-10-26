@@ -45,12 +45,13 @@ interface Result {
    * Reconcile server content fetched outside the query (the pre-write
    * conflict check). When it differs from the last-known server state — and
    * isn't our own save — it's an external edit: on a dirty editor, stash it
-   * and raise hasExternalUpdate.
+   * and raise hasExternalUpdate. The response may be older than a refresh that
+   * landed during the GET, so it never replaces a pending update and is never
+   * applied to a clean editor; the query delivers those.
    *
    * :param serverContent: The freshly fetched raw file content.
    * :returns: True when a conflict is pending, raised now or by a refresh
-   *     during the caller's GET (caller must skip its write); False when the
-   *     content is known and the write may proceed.
+   *     during the caller's GET (caller must skip its write); False otherwise.
    */
   reconcileServerContent: (serverContent: string) => boolean;
 }
@@ -186,32 +187,25 @@ export function useMarkdownEditorSync({
 
   // Imperative counterpart to the content-change effect, for content fetched
   // outside the query (the pre-write conflict check). See the Result doc.
-  const reconcileServerContent = useCallback(
-    (serverContent: string): boolean => {
-      // Already known (last-seen server state or our own save). A refresh may
-      // have raised a conflict while the caller's GET was in flight; it still
-      // blocks the write until the user picks Keep mine or Load latest.
-      if (serverContent === prevContentRef.current || serverContent === lastSavedRef.current) {
-        return pendingContentRef.current !== null;
-      }
-      // Adopt as the latest known server state — this also lets a later "Keep
-      // mine" overwrite through, while a *newer* external edit re-raises.
-      prevContentRef.current = serverContent;
-      if (isDirtyRef.current) {
-        pendingContentRef.current = serverContent;
-        setHasExternalUpdate(true);
-        return true;
-      }
-      // Clean editor: adopt the content (nothing to conflict with).
-      if (setContentRef?.current) {
-        setContentRef.current(serverContent);
-      } else {
-        setEditorKey((k) => k + 1);
-      }
+  const reconcileServerContent = useCallback((serverContent: string): boolean => {
+    // A refresh during the caller's GET may have raised a newer conflict; it
+    // blocks the write until the user picks Keep mine or Load latest.
+    if (pendingContentRef.current !== null) return true;
+    // Known (last-seen server state or our own save), or nothing to conflict with.
+    if (
+      serverContent === prevContentRef.current ||
+      serverContent === lastSavedRef.current ||
+      !isDirtyRef.current
+    ) {
       return false;
-    },
-    [setContentRef],
-  );
+    }
+    // Adopt as the latest known server state — this also lets a later "Keep
+    // mine" overwrite through, while a *newer* external edit re-raises.
+    prevContentRef.current = serverContent;
+    pendingContentRef.current = serverContent;
+    setHasExternalUpdate(true);
+    return true;
+  }, []);
 
   return {
     editorKey,

@@ -275,7 +275,7 @@ describe("reconcileServerContent", () => {
     expect(conflict).toBe(false);
   });
 
-  it("adopts new content without conflict when the editor is clean", () => {
+  it("leaves a clean editor to the refresh instead of applying the check's response", () => {
     const setContentFn = vi.fn();
     const setContentRef = { current: setContentFn };
     const { result } = renderHook(
@@ -287,9 +287,36 @@ describe("reconcileServerContent", () => {
     act(() => {
       conflict = result.current.reconcileServerContent("v2");
     });
-    // Clean editor → nothing to conflict with → adopt the content in place.
+    // The response may be older than what a refresh shows next; nothing conflicts.
     expect(conflict).toBe(false);
-    expect(setContentFn).toHaveBeenCalledWith("v2");
+    expect(setContentFn).not.toHaveBeenCalled();
+  });
+
+  it("keeps a refresh's newer update when an older check response arrives", () => {
+    const setContentFn = vi.fn();
+    const setContentRef = { current: setContentFn };
+    const { result, rerender } = renderHook(
+      (props: { content: string; path: string; isSettled: boolean }) =>
+        useMarkdownEditorSync({ ...props, onDirtyChange: undefined, setContentRef }),
+      { initialProps: { content: "v1", path: "/file.md", isSettled: true } },
+    );
+    act(() => {
+      result.current.setDirty(true);
+    });
+    // The check read "older"; before it answered, a refresh landed "newer".
+    rerender({ content: "newer", path: "/file.md", isSettled: true });
+    let conflict = false;
+    act(() => {
+      conflict = result.current.reconcileServerContent("older");
+    });
+    expect(conflict).toBe(true);
+
+    // An unchanged refresh changes nothing; Load latest applies the newer text.
+    rerender({ content: "newer", path: "/file.md", isSettled: true });
+    act(() => {
+      result.current.discardAndApplyExternal();
+    });
+    expect(setContentFn).toHaveBeenLastCalledWith("newer");
   });
 
   it("lets a 'Keep mine' overwrite through after acknowledging the conflict", () => {

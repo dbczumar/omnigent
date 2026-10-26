@@ -205,8 +205,8 @@ export function fileContentPollInterval(
  * other processes:
  *   - While `visible`, re-reads at {@link fileContentPollInterval}. Hidden
  *     browser tabs pause.
- *   - Re-reads once when the viewer is shown again, and when the focused
- *     session goes from active (running/waiting) to idle.
+ *   - Re-reads once when the viewer or its browser tab is shown again, and
+ *     when the focused session goes from active (running/waiting) to idle.
  * An unchanged read keeps the cached data, so the editors see no change.
  * Changed content is applied in place by `useMarkdownEditorSync`.
  *
@@ -263,7 +263,8 @@ export function useFileContent(
     refetchInterval: visible
       ? (query) => fileContentPollInterval(query.state.data, query.state.status === "error")
       : false,
-    refetchOnWindowFocus: visible,
+    // Catch up as soon as the browser tab returns, even within staleTime.
+    refetchOnWindowFocus: visible ? "always" : false,
     ...(options.retry === undefined ? {} : { retry: options.retry }),
   });
 }

@@ -365,12 +365,13 @@ describe("MonacoCodeEditor auto-save wiring (integration)", () => {
     await act(async () => {
       vi.advanceTimersByTime(1000);
     });
-    // Undone while the check is in flight; the server meanwhile has newer text.
+    // Undone while the check is in flight; the server meanwhile has newer text,
+    // which the next refresh (not this possibly older response) applies.
     await fireEdit(INITIAL);
     await act(async () => answerCheck(serverFile("const y = 3;\n")));
 
     expect(mutateAsync).not.toHaveBeenCalled();
-    expect(fakeEditor!.getValue()).toBe("const y = 3;\n");
+    expect(fakeEditor!.getValue()).toBe(INITIAL);
   });
 
   it("saves anyway when the conflict check stalls", async () => {

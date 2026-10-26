@@ -130,7 +130,7 @@ export function useEditorAutoSave({
         } finally {
           window.clearTimeout(timer);
         }
-        // Clean again after the GET (undone, or the check adopted newer server
+        // Clean again after the GET (undone, or a refresh applied newer server
         // content): writing the captured value would overwrite what's shown.
         if (mountedRef.current && !isEditorDirty()) {
           setDirty(false);
