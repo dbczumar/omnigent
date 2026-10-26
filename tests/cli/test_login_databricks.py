@@ -1251,6 +1251,7 @@ def test_workspace_url_with_path_probes_nothing(
 
 def test_workspace_url_expands_when_mount_hidden_from_anonymous_probe(
     monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     """A mount invisible to anonymous probes expands via a cached bearer.
 
@@ -1302,6 +1303,9 @@ def test_workspace_url_expands_when_mount_hidden_from_anonymous_probe(
         f"{_WORKSPACE_API_URL}/v1/me",
     ]
     assert [r["authorization"] for r in fake.requests] == [None, None, "Bearer tok-ws"]
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "(Databricks workspace-hosted omnigent)." in captured.err
 
 
 def test_workspace_url_hints_when_mount_dark_and_no_cached_grant(
