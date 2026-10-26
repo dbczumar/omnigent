@@ -2264,6 +2264,8 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
     const target = s.queuedMessages.find((m) => m.queueId === queueId);
     const agentId = target?.agentId ?? s.boundAgentId;
     if (target === undefined || agentId === null) return;
+    // A message held for an offline host waits for `releaseHostHeldMessages`.
+    if (target.waitingForHost) return;
     if (target.command === "compact" && rejectBusyCompact(target.conversationId)) return;
     // Nothing can be steered past a first message still held for startup; it stays queued.
     const targetState = setterForState(target.conversationId);
@@ -2275,7 +2277,10 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
 
   steerAllQueuedMessages: (conversationId) => {
     const s = get();
-    const own = s.queuedMessages.filter((m) => m.conversationId === conversationId);
+    const queued = s.queuedMessages.filter((m) => m.conversationId === conversationId);
+    // Nothing is steered past a message held for an offline host.
+    const heldIndex = queued.findIndex((m) => m.waitingForHost);
+    const own = heldIndex < 0 ? queued : queued.slice(0, heldIndex);
     if (own.length === 0) return;
     const state = setterForState(conversationId);
     if (state !== null && holdsInitialDraft(state)) return;

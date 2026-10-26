@@ -259,7 +259,7 @@ def test_desktop_send_reconnects_offline_arca_then_sends(
     page: Page,
     seeded_session: tuple[str, str],
 ) -> None:
-    """Sending to an offline Arca starts its reconnect and sends the message once it's back."""
+    """Sending to an offline Arca reconnects it, through a failed try, and sends once it's back."""
     host_picker, host_state = _open_offline_arca_chat(
         page, seeded_session, remembered=True, host_name="arca-devbox"
     )
@@ -283,6 +283,16 @@ def test_desktop_send_reconnects_offline_arca_then_sends(
     # A send into the offline host could record a failed turn, so nothing posts yet.
     assert posts == []
 
+    # A failed reconnect keeps the message waiting; the dialog's retry brings Arca back.
+    page.evaluate("window.__finishArcaReconnect({ ok: false, error: 'Arca did not start.' })")
+    dialog = page.get_by_test_id("reconnect-session-dialog")
+    expect(dialog).to_be_visible()
+    expect(page.get_by_text("Waiting for host", exact=True)).to_be_visible()
+    page.wait_for_timeout(1200)
+    dialog.get_by_role("button", name="Reconnect Arca", exact=True).click()
+    assert page.evaluate("window.__connectArcaCalls") == 2
+    assert posts == []
+
     host_state["online"] = True
     with page.expect_request(
         lambda request: request.method == "POST" and urlparse(request.url).path == events_path,
@@ -290,6 +300,8 @@ def test_desktop_send_reconnects_offline_arca_then_sends(
     ) as sent:
         page.evaluate("window.__finishArcaReconnect({ ok: true })")
     assert "hello after the reconnect" in (sent.value.post_data or "")
+    expect(dialog).not_to_be_visible()
     expect(host_picker).to_have_attribute("aria-label", re.compile(r"arca-devbox, online$"))
     expect(page.get_by_text("Waiting for host", exact=True)).not_to_be_visible()
     page.wait_for_timeout(1500)
+    assert len(posts) == 1

@@ -268,6 +268,25 @@ describe("QueuedMessagesStrip", () => {
     expect(onSteer).toHaveBeenCalledWith("q_2");
   });
 
+  it("disables send-now on a message waiting for its host", () => {
+    const onSteer = vi.fn();
+    render(
+      <TooltipProvider>
+        <QueuedMessagesStrip
+          messages={[{ ...msg("q_1", "held"), waitingForHost: true }, msg("q_2", "ready")]}
+          onDelete={vi.fn()}
+          onEdit={vi.fn()}
+          onSteer={onSteer}
+        />
+      </TooltipProvider>,
+    );
+    const [held, ready] = screen.getAllByRole("button", { name: "Send queued message now" });
+    expect(held).toBeDisabled();
+    expect(ready).toBeEnabled();
+    fireEvent.click(held!);
+    expect(onSteer).not.toHaveBeenCalled();
+  });
+
   it("marks failed messages and offers an explicit retry", () => {
     const onSteer = vi.fn();
     render(

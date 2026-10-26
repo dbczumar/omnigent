@@ -226,6 +226,7 @@ function QueuedRow({
                   message.requiresRetry ? "Retry queued message" : "Send queued message now"
                 }
                 className={ACTION_BUTTON_CLASS}
+                disabled={message.waitingForHost === true}
                 onClick={() => onSteer(message.queueId)}
               >
                 <ArrowUpIcon className="size-4 max-md:size-4" aria-hidden="true" />
