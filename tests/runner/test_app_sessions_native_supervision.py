@@ -2600,10 +2600,11 @@ async def test_events_interrupt_on_native_session_injects_escape_without_marker(
 @pytest.mark.parametrize(
     ("harness", "expected_statuses"),
     [
-        # claude-native's working status is owned by the PTY-activity
-        # watcher, so the runner injection task must not publish its
-        # own running/idle edges.
-        ("claude-native", []),
+        # claude-native's terminal owns its working status, but can't report a
+        # message the runner hasn't typed in yet (it may still be booting), so
+        # the runner shows the turn from acceptance. Its idle edge is not
+        # published: delivery ends before Claude's turn does.
+        ("claude-native", ["running"]),
         # codex-native may use the runner's running edge so the thread
         # shows work as soon as Omnigent accepts the turn, but must not use the
         # runner's idle edge because the injection task completes before
@@ -2629,11 +2630,11 @@ async def test_message_turn_lifecycle_status_suppressed_for_terminal_backed_harn
     Runner lifecycle status is edge-specific for terminal-backed harnesses.
 
     First-principles invariant: the thread's "Working…" indicator should
-    represent the user-visible model turn. For claude-native, the runner
-    turn is only a pane-injection task, so its ``running`` and ``idle`` edges
-    are both suppressed. For codex-native, the runner's ``running`` edge is a
-    useful immediate signal that Omnigent accepted the turn, but its ``idle`` edge
-    is invalid because the injection task finishes before Codex is done.
+    represent the user-visible model turn. The runner's ``running`` edge is a
+    useful immediate signal that Omnigent accepted the turn, for codex-native
+    and for claude-native, whose TUI can still be booting. Their ``idle``
+    edges are invalid because the injection task finishes before the native
+    turn is done.
 
     Drives the real ``POST /events`` message path and waits for the
     background injection turn to finish, so both the synchronous ``running``

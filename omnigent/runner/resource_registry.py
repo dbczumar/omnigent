@@ -514,6 +514,11 @@ class SessionResourceRegistry:
         # Per-session pollers need re-arming after reconnects or forwarded
         # idle statuses because they keep their own edge/mtime baselines.
         self._status_pollers: dict[str, SessionStatusPoller | ClaudeProgramStatusPoller] = {}
+        # Sessions whose runner turn is still handing a message to the terminal;
+        # the terminal's idle edges wait until that delivery ends.
+        self._open_runner_turns: set[str] = set()
+        # Per-session callbacks that republish what the terminal is doing now.
+        self._status_reasserters: dict[str, Callable[[], None]] = {}
         # Optional callback invoked on the event loop when a watched terminal
         # disappears unexpectedly. The callback receives the terminal's
         # lifecycle relationship so the runner can decide whether the owning
@@ -615,6 +620,8 @@ class SessionResourceRegistry:
             self._active_session_turns.discard(session_id)
             self._published_session_status.pop(session_id, None)
             self._status_pollers.pop(session_id, None)
+            self._open_runner_turns.discard(session_id)
+            self._status_reasserters.pop(session_id, None)
             return self._last_session_status.pop(session_id, None)
 
     def _claim_status_edge(self, session_id: str, status: str, blocked_on: str | None) -> bool:
@@ -692,6 +699,11 @@ class SessionResourceRegistry:
         with self._lock:
             return session_id in self._active_session_turns
 
+    def _runner_turn_open(self, session_id: str) -> bool:
+        """Whether the runner is still delivering a message to the session's terminal."""
+        with self._lock:
+            return session_id in self._open_runner_turns
+
     def note_session_turn_started(self, session_id: str) -> None:
         """Mark a session as having an in-flight turn.
 
@@ -704,6 +716,42 @@ class SessionResourceRegistry:
         """
         self._set_session_status_memo(session_id, "running")
         self._note_terminal_status(session_id, "running", "runner_turn_start")
+
+    def note_runner_turn_accepted(self, session_id: str) -> None:
+        """Show a terminal-backed session working from the moment the runner takes a message.
+
+        The terminal only sees the message once the runner types it in, which can
+        wait for the TUI to boot. Until that delivery ends the terminal's idle edges
+        are held: a TUI booting or resting at its prompt hasn't finished a turn it
+        was never given. Called on the event loop.
+
+        :param session_id: Session/conversation identifier, e.g. ``"conv_abc"``.
+        """
+        with self._lock:
+            self._open_runner_turns.add(session_id)
+            self._published_session_status[session_id] = ("running", None)
+        if self._session_status_publisher is not None:
+            self._session_status_publisher(session_id, "running", None)
+        self._note_terminal_status(session_id, "running", "runner_turn_accepted")
+
+    def note_runner_turn_ended(self, session_id: str, status: str) -> None:
+        """Hand a terminal-backed session's status back to its terminal after delivery.
+
+        Called on the event loop when the runner's delivery turn ends.
+
+        :param session_id: Session/conversation identifier, e.g. ``"conv_abc"``.
+        :param status: How the delivery turn ended, e.g. ``"idle"`` or
+            ``"failed"``. A failure becomes the published edge; otherwise the
+            terminal reports what it is doing now, e.g. idle if the prompt was
+            refused and no turn ever started.
+        """
+        with self._lock:
+            self._open_runner_turns.discard(session_id)
+            reassert = self._status_reasserters.get(session_id)
+        if status == "failed":
+            self.note_external_session_status(session_id, "failed")
+        elif reassert is not None:
+            reassert()
 
     def note_external_session_status(self, session_id: str, status: str) -> None:
         """Record a terminal-observed external status for exit classification.
@@ -1439,7 +1487,9 @@ class SessionResourceRegistry:
         session's status. They also wait out the TUI's boot: until its
         ``input_ready_probe`` passes and the pane then goes quiet, pane
         edges publish nothing unless the runner has started a turn, so a
-        booting TUI never reads as a turn that ran and finished.
+        booting TUI never reads as a turn that ran and finished. Idle edges
+        also wait while the runner is still delivering a message (see
+        :meth:`note_runner_turn_accepted`).
 
         :param session_id: Session/conversation identifier.
         :param terminal_name: Terminal name from the agent spec.
@@ -1484,6 +1534,9 @@ class SessionResourceRegistry:
             # forwarder's hook-derived edge resyncs it (see
             # :meth:`note_external_session_status`).
             if status_publisher is None:
+                return
+            # A message the runner is still delivering hasn't been answered yet.
+            if status == "idle" and self._runner_turn_open(session_id):
                 return
             explicit_activity = record_activity and status in {"running", "waiting"}
             if explicit_activity:
@@ -1547,6 +1600,18 @@ class SessionResourceRegistry:
             # Waiting at its prompt, so an exit from here is a clean shutdown.
             if not self.session_turn_is_active(session_id):
                 self._set_session_status_memo(session_id, "idle", record_activity=False)
+
+        def _reassert_status() -> None:
+            # Delivery ended: report what the terminal is doing now. The idle edges
+            # held during delivery don't recur on their own.
+            if status_poller is not None and status_poller.active:
+                status_poller.resync()
+            elif pane_quiet and not _pane_status_is_boot_output():
+                _publish_status("idle")
+
+        if emit_status:
+            with self._lock:
+                self._status_reasserters[session_id] = _reassert_status
 
         def _on_tick() -> None:
             nonlocal native_input_ready
@@ -2045,10 +2110,14 @@ class SessionResourceRegistry:
                             self._session_activity_epoch.get(target_session_id, 0) + 1
                         )
                 self._active_session_turns.discard(source_session_id)
+                if source_session_id in self._open_runner_turns:
+                    self._open_runner_turns.discard(source_session_id)
+                    self._open_runner_turns.add(target_session_id)
                 # The watcher restart below rebuilds the poller under the
                 # target, so drop the source's entry rather than leaving a
                 # retired poller to be re-armed on every later reconnect.
                 self._status_pollers.pop(source_session_id, None)
+                self._status_reasserters.pop(source_session_id, None)
             try:
                 await entry.instance.set_conversation_link(
                     self._terminal_registry.conversation_link_for_id(target_session_id)

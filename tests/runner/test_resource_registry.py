@@ -1324,6 +1324,121 @@ async def test_required_terminal_exit_reads_idle_only_once_the_tui_booted(
 
 
 @pytest.mark.asyncio
+async def test_message_accepted_during_boot_reads_as_working_until_claude_finishes(
+    tmp_path: Path,
+) -> None:
+    """From acceptance until Claude's turn ends, the session reads as working.
+
+    The first message can reach the runner while Claude is still booting, so
+    nothing on the terminal reflects it yet. Claude then reports idle at its
+    prompt before the runner has typed the message in; publishing that would
+    show the session done before it started.
+    """
+    callbacks, statuses, pollers, registry = await _observe_native_with_fake_poller(
+        tmp_path, "conv_accepted"
+    )
+    instance = registry.terminal_registry.get("conv_accepted", "claude", "main")
+    assert instance is not None
+    on_tick, on_activity, on_idle = (
+        callbacks["on_tick"],
+        callbacks["on_activity"],
+        callbacks["on_idle"],
+    )
+    assert callable(on_tick) and callable(on_activity) and callable(on_idle)
+    poller = pollers[0]
+
+    registry.note_runner_turn_accepted("conv_accepted")
+    on_tick()
+    on_activity()
+    on_idle()
+    finish_native_tui_boot(instance, on_tick, on_idle)
+    poller.active = True
+    poller.emit("idle")
+    await asyncio.sleep(0)
+    assert statuses == ["running"]
+
+    # Typed in: Claude starts on it, and delivery hands status back.
+    poller.emit("running")
+    registry.note_runner_turn_ended("conv_accepted", "idle")
+    await asyncio.sleep(0)
+    assert statuses == ["running"]
+    assert poller.resyncs == 1
+
+    poller.emit("idle")
+    await asyncio.sleep(0)
+    assert statuses == ["running", "idle"]
+
+
+@pytest.mark.asyncio
+async def test_prompt_claude_never_takes_up_reads_idle_after_delivery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A message Claude never starts on can't leave the session reading as working.
+
+    A refused prompt (e.g. a blocking UserPromptSubmit hook) leaves Claude idle
+    with nothing new to report. The idle it showed before delivery was held, so
+    the end of delivery has it report its status again.
+    """
+    session_id = "conv_refused"
+    on_tick, statuses, registry, status_file = await _observe_native_with_real_poller(
+        tmp_path, monkeypatch, session_id
+    )
+    status_file.write_text(
+        json.dumps(
+            {
+                "pid": 123,
+                "sessionId": "claude-refused",
+                "kind": "interactive",
+                "status": "idle",
+                "statusUpdatedAt": 1000,
+            }
+        ),
+        encoding="utf-8",
+    )
+    registry.note_runner_turn_accepted(session_id)
+    on_tick()
+    await asyncio.sleep(0)
+    assert statuses == ["running"]
+
+    registry.note_runner_turn_ended(session_id, "idle")
+    on_tick()
+    await asyncio.sleep(0)
+    assert statuses == ["running", "idle"]
+
+
+@pytest.mark.asyncio
+async def test_quiet_pane_reads_idle_once_delivery_ends(tmp_path: Path) -> None:
+    """With only the pane to go on, a quiet spell during delivery shows after it.
+
+    A quick reply can settle the pane before the runner's delivery turn
+    returns. That idle edge was held and doesn't recur on its own, so the end of
+    delivery reports it.
+    """
+    callbacks, statuses, _pollers, registry = await _observe_native_with_fake_poller(
+        tmp_path, "conv_pane_delivery"
+    )
+    instance = registry.terminal_registry.get("conv_pane_delivery", "claude", "main")
+    assert instance is not None
+    on_tick, on_activity, on_idle = (
+        callbacks["on_tick"],
+        callbacks["on_activity"],
+        callbacks["on_idle"],
+    )
+    assert callable(on_tick) and callable(on_activity) and callable(on_idle)
+    finish_native_tui_boot(instance, on_tick, on_idle)
+
+    registry.note_runner_turn_accepted("conv_pane_delivery")
+    on_activity()
+    on_idle()
+    await asyncio.sleep(0)
+    assert statuses == ["running"]
+
+    registry.note_runner_turn_ended("conv_pane_delivery", "idle")
+    await asyncio.sleep(0)
+    assert statuses == ["running", "idle"]
+
+
+@pytest.mark.asyncio
 async def test_required_terminal_exit_while_idle_is_clean_shutdown(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:

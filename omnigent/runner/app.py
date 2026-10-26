@@ -3588,12 +3588,13 @@ def create_runner_app(
         source_error: Mapping[str, object] | None = None,
         response_id: str | None = None,
     ) -> None:
+        requested_status = status
         if status == "waiting" and not (
             _server_version is not None and _version_supports_waiting_status(_server_version)
         ):
             status = "running"
         harness = _session_harness_name(conv_id)
-        if status != "failed" and harness in {
+        if harness in {
             "claude-native",
             "pi-native",
             "cursor-native",
@@ -3603,7 +3604,15 @@ def create_runner_app(
             "kimi-native",
             "hermes-native",
         }:
-            return
+            # The terminal reports these sessions' status, but only once the runner
+            # has typed the message in. Show the turn from acceptance, then hand
+            # status back to the terminal when delivery ends.
+            if requested_status == "running":
+                resource_registry.note_runner_turn_accepted(conv_id)
+                return
+            resource_registry.note_runner_turn_ended(conv_id, requested_status)
+            if requested_status != "failed":
+                return
         if status == "idle" and harness in {"codex-native", "antigravity-native"}:
             return
         event: _JsonObject = {"type": "session.status", "status": status}
