@@ -8130,7 +8130,13 @@ export function handleSessionEvent(event: StreamEvent, streamConversationId?: st
         // here rather than via a bare PTY `idle`. `sessionStatus` stays
         // `waiting` (set above) and `backgroundTaskCount` is untouched, so the
         // "Working…" spinner and sidebar dot keep reflecting the background work.
-        if (event.status === "idle" || event.status === "failed" || event.status === "waiting") {
+        // A first message still held here for startup hasn't started a turn, so
+        // an idle (e.g. Claude reporting it's ready) can't end one.
+        const holdingFirstMessage = event.status !== "failed" && holdsInitialDraft(s);
+        if (
+          (event.status === "idle" || event.status === "failed" || event.status === "waiting") &&
+          !holdingFirstMessage
+        ) {
           if (event.responseId !== undefined && s.activeResponse?.responseId === event.responseId) {
             patch.status = "idle";
             if (s.activeResponse.state === "streaming") settledResponseId = event.responseId;

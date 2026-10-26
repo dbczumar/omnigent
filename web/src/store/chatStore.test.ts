@@ -3945,6 +3945,8 @@ describe("chatStore — first message during native model startup", () => {
 
     handleSessionEvent({ type: "session_status", conversationId: sessionId, status: "idle" });
     expect(useChatStore.getState().pendingUserMessages[0]?.initialDraft).toBeDefined();
+    // Claude reporting ready doesn't end a turn whose message is still held here.
+    expect(useChatStore.getState().status).toBe("streaming");
     reportModel();
     await settle();
 
