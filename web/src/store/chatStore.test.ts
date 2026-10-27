@@ -3199,7 +3199,7 @@ describe("chatStore — send (first-send ordering)", () => {
     expect(useChatStore.getState().queuedMessages).toEqual([]);
   });
 
-  // startupPending would otherwise send a new message right away.
+  // waitingForHost must also bypass enqueueMessage's startupPending direct send.
   it.each([false, true])(
     "doesn't post anything when queueing a message for an offline host (startupPending: %s)",
     (startupPending) => {

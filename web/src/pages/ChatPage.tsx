@@ -973,7 +973,7 @@ export function ChatPage() {
         if (sendReconnectsArca) {
           useChatStore
             .getState()
-            .enqueueMessage(text, files, replyDraft, undefined, { waitingForHost: true });
+            .enqueueMessage(text, files, replyDraft, urlConvId, { waitingForHost: true });
         }
         return;
       }
