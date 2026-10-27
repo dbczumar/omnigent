@@ -5,7 +5,13 @@ import { toast } from "sonner";
 import { fetchHosts } from "@/hooks/useHosts";
 import type { Host } from "@/hooks/useHosts";
 import { readArcaHostId, writeArcaHostId } from "@/lib/arcaHost";
-import { connectArcaHost, controlHost, getHostIdentity, isElectronShell } from "@/lib/nativeBridge";
+import {
+  connectArcaHost,
+  controlHost,
+  getHostIdentity,
+  isElectronShell,
+  supportsArcaConnect,
+} from "@/lib/nativeBridge";
 import type { ArcaConnectResult, HostActionResult, HostIdentity } from "@/lib/nativeBridge";
 import { retrySession } from "@/lib/sessionsApi";
 import type { PostEventResponse } from "@/lib/sessionsApi";
@@ -17,6 +23,7 @@ vi.mock("@/lib/nativeBridge", () => ({
   controlHost: vi.fn(),
   getHostIdentity: vi.fn(),
   isElectronShell: vi.fn(),
+  supportsArcaConnect: vi.fn(),
 }));
 vi.mock("@/lib/sessionsApi", () => ({ retrySession: vi.fn() }));
 vi.mock("sonner", () => ({
@@ -46,6 +53,7 @@ function deferred<T>() {
 beforeEach(() => {
   vi.clearAllMocks();
   vi.mocked(isElectronShell).mockReturnValue(true);
+  vi.mocked(supportsArcaConnect).mockReturnValue(true);
   vi.mocked(getHostIdentity).mockResolvedValue({ cliInstalled: true, hostId: "this-mac" });
   vi.mocked(controlHost).mockResolvedValue({ ok: true });
   vi.mocked(connectArcaHost).mockResolvedValue({ ok: true });
@@ -288,6 +296,41 @@ describe("useSessionReconnect", () => {
     expect(toast.success).not.toHaveBeenCalled();
     expect(toast.dismiss).toHaveBeenCalledWith("progress");
   });
+
+  it.each([
+    { label: "the remembered Arca host", props: { hostId: "arca-host" }, expected: true },
+    {
+      label: "an Isaac-named Arca host",
+      props: { hostId: "box", hostName: "e2e's arca" },
+      expected: true,
+    },
+    {
+      label: "another remote host",
+      props: { hostId: "devbox", hostName: "arca-devbox" },
+      expected: false,
+    },
+    {
+      label: "a non-owner",
+      props: { hostId: "arca-host", isOwner: false },
+      expected: false,
+    },
+    { label: "the browser", props: { hostId: "arca-host" }, desktop: false, expected: false },
+    {
+      label: "a desktop without the Arca connect",
+      props: { hostId: "arca-host" },
+      arcaConnect: false,
+      expected: false,
+    },
+  ])(
+    "reports whether reconnecting runs the desktop's Arca connect for $label",
+    ({ props, desktop = true, arcaConnect = true, expected }) => {
+      writeArcaHostId("arca-host");
+      vi.mocked(isElectronShell).mockReturnValue(desktop);
+      vi.mocked(supportsArcaConnect).mockReturnValue(desktop && arcaConnect);
+      const { result } = renderHook(() => useSessionReconnect({ ...localSession, ...props }));
+      expect(result.current.reconnectsArca).toBe(expected);
+    },
+  );
 
   it("does not treat another remote host as Arca", async () => {
     const { result } = renderHook(() =>

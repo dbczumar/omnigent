@@ -3,7 +3,13 @@ import { toast } from "sonner";
 
 import { fetchHosts } from "@/hooks/useHosts";
 import { isArcaHost, readArcaHostId, writeArcaHostId } from "@/lib/arcaHost";
-import { connectArcaHost, controlHost, getHostIdentity, isElectronShell } from "@/lib/nativeBridge";
+import {
+  connectArcaHost,
+  controlHost,
+  getHostIdentity,
+  isElectronShell,
+  supportsArcaConnect,
+} from "@/lib/nativeBridge";
 import { retrySession } from "@/lib/sessionsApi";
 
 /**
@@ -34,6 +40,10 @@ export function useSessionReconnect({
       hostId !== null && isArcaHost({ host_id: hostId, name: hostName ?? "" }, readArcaHostId()),
     [hostId, hostName],
   );
+  const runsArcaConnect = useCallback(
+    () => !!hostId && isOwner && supportsArcaConnect() && isSessionArcaHost(),
+    [hostId, isOwner, isSessionArcaHost],
+  );
 
   useEffect(() => {
     setDialogOpen(false);
@@ -51,7 +61,7 @@ export function useSessionReconnect({
 
   const reconnectArca = useCallback(async () => {
     if (inFlight.current) return;
-    if (!hostId || !isOwner || !isElectronShell() || !isSessionArcaHost()) {
+    if (!runsArcaConnect()) {
       setCanReconnectArca(false);
       setDialogOpen(true);
       return;
@@ -100,7 +110,7 @@ export function useSessionReconnect({
         setReconnecting(false);
       }
     }
-  }, [hostId, isOwner, isSessionArcaHost]);
+  }, [hostId, runsArcaConnect]);
 
   // The server resumes the sandbox and starts the agent, as it does for a
   // message, so this works in the browser and for anyone who can send one.
@@ -187,6 +197,8 @@ export function useSessionReconnect({
 
   return {
     reconnect,
+    /** Whether `reconnect` runs the desktop's Arca connect for this session's host. */
+    reconnectsArca: runsArcaConnect(),
     dialogOpen,
     setDialogOpen,
     localReconnect: canReconnectThisMachine
