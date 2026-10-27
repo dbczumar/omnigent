@@ -33,7 +33,7 @@ function renderAutoSave() {
       setDirty: () => {},
       hasExternalUpdate: false,
       markSaved: () => {},
-      reconcileServerContent: () => false,
+      beginServerCheck: () => () => "write",
       dismissExternalUpdate: () => {},
       baselineRef,
       getContent: () => EDITED,

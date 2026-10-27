@@ -2206,10 +2206,17 @@ describe("FileViewer content refresh", () => {
       isRefetchError: true,
       error: new Error("404 Not Found"),
     } as ReturnType<typeof useFileContent>);
-    renderViewer({ open: true, path: "notes.md" });
+    const { rerender } = renderViewer({ open: true, path: "notes.md" });
     expect(screen.getByRole("status")).toHaveTextContent(
       "Couldn't refresh this file (404 Not Found). Showing the last loaded version.",
     );
+
+    // A later successful refresh clears the notice.
+    vi.mocked(useFileContent).mockReturnValue({
+      data: { content: "back", path: "notes.md", encoding: "utf-8" },
+    } as ReturnType<typeof useFileContent>);
+    rerender(viewerTree({ open: true, path: "notes.md" }));
+    expect(screen.queryByText(/Couldn't refresh this file/)).toBeNull();
   });
 });
 

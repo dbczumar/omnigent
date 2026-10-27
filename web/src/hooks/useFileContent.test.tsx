@@ -722,8 +722,13 @@ describe("useFileContent on-screen refresh", () => {
 
     await vi.advanceTimersByTimeAsync(FILE_CONTENT_POLL_MS * 3);
     expect(fetchMock).toHaveBeenCalledTimes(2);
+    // Recovery: once a re-check succeeds, polling returns to the normal interval.
+    fetchMock.mockResolvedValue(jsonResponse(textFile("back")));
     await vi.advanceTimersByTimeAsync(FILE_CONTENT_FAILING_POLL_MS);
-    expect(fetchMock).toHaveBeenCalledTimes(3);
+    const afterRecovery = fetchMock.mock.calls.length;
+    expect(afterRecovery).toBeGreaterThan(2);
+    await vi.advanceTimersByTimeAsync(FILE_CONTENT_POLL_MS);
+    expect(fetchMock).toHaveBeenCalledTimes(afterRecovery + 1);
   });
 
   it("pauses in a hidden browser tab and catches up when the tab returns", async () => {

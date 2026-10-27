@@ -374,6 +374,35 @@ describe("MonacoCodeEditor auto-save wiring (integration)", () => {
     expect(fakeEditor!.getValue()).toBe(INITIAL);
   });
 
+  it("starts the save over when a refresh lands during the conflict check", async () => {
+    let answerCheck!: (file: FileContentResponse) => void;
+    vi.mocked(fetchFileContent).mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          answerCheck = resolve;
+        }),
+    );
+    const { rerender } = await renderMounted(makeEditor());
+    await fireEdit(EDITED);
+    await act(async () => {
+      vi.advanceTimersByTime(1000);
+    });
+    // Undone, a refresh applies newer text in place, then the user types again.
+    await fireEdit(INITIAL);
+    await act(async () => rerender(makeEditor("const y = 3;\n")));
+    expect(fakeEditor!.getValue()).toBe("const y = 3;\n");
+    await fireEdit("const y = 3;\n// mine\n");
+    vi.mocked(fetchFileContent).mockResolvedValue(serverFile("const y = 3;\n"));
+    // The check answers with content from before the refresh.
+    await act(async () => answerCheck(serverFile(INITIAL)));
+
+    expect(mutateAsync).toHaveBeenCalledExactlyOnceWith({
+      path: PATH,
+      content: "const y = 3;\n// mine\n",
+    });
+    expect(screen.queryByText(/modified externally/)).toBeNull();
+  });
+
   it("saves anyway when the conflict check stalls", async () => {
     vi.mocked(fetchFileContent).mockImplementationOnce(
       (_conversationId, _path, signal) =>

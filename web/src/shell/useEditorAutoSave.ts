@@ -12,6 +12,7 @@ import { useWriteFileContent } from "@/hooks/useWriteFileContent";
 import { fetchFileContent } from "@/hooks/useFileContent";
 import { useWorkspaceServeable } from "@/hooks/useWorkspaceChangedFiles";
 import { useAutoSave } from "./useAutoSave";
+import type { FinishServerCheck } from "./useMarkdownEditorSync";
 
 // Debounce between the last edit and an auto-save — long enough to coalesce a
 // burst of typing, short enough to keep the dirty window brief. Shared so both
@@ -34,7 +35,7 @@ interface UseEditorAutoSaveOptions {
   /** True while an unresolved external-edit conflict suppresses auto-save. */
   hasExternalUpdate: boolean;
   markSaved: (content: string) => void;
-  reconcileServerContent: (serverContent: string) => boolean;
+  beginServerCheck: () => FinishServerCheck;
   dismissExternalUpdate: () => void;
   // ── Editor-specific content access ──
   /**
@@ -74,7 +75,7 @@ export function useEditorAutoSave({
   setDirty,
   hasExternalUpdate,
   markSaved,
-  reconcileServerContent,
+  beginServerCheck,
   dismissExternalUpdate,
   baselineRef,
   getContent,
@@ -101,6 +102,8 @@ export function useEditorAutoSave({
     };
   }, []);
 
+  // handleSave restarts itself when its conflict check went stale.
+  const handleSaveRef = useRef<(value: string) => Promise<void>>(async () => {});
   const handleSave = useCallback(
     async (value: string) => {
       if (value === baselineRef.current) {
@@ -112,29 +115,32 @@ export function useEditorAutoSave({
         // GET the live file first: if another writer changed it since the last
         // refresh, raise the conflict instead of clobbering their edit. A write
         // landing between this GET and the PUT can still be lost (last writer wins).
+        const finishCheck = beginServerCheck();
         const checkTimeout = new AbortController();
         const timer = window.setTimeout(() => checkTimeout.abort(), CONFLICT_CHECK_TIMEOUT_MS);
+        let serverContent: string | null = null;
         try {
           const fresh = await fetchFileContent(conversationId, path, checkTimeout.signal);
-          // Torn down during the GET → don't touch the outer sync hook (it now
-          // tracks a different file); fall through and let the write land.
-          if (
-            mountedRef.current &&
-            fresh.encoding === "utf-8" &&
-            reconcileServerContent(fresh.content)
-          ) {
-            return;
-          }
+          if (fresh.encoding === "utf-8") serverContent = fresh.content;
         } catch {
           // Best-effort: a failed or timed-out conflict-check GET must not block saving.
         } finally {
           window.clearTimeout(timer);
         }
-        // Clean again after the GET (undone, or a refresh applied newer server
-        // content): writing the captured value would overwrite what's shown.
-        if (mountedRef.current && !isEditorDirty()) {
-          setDirty(false);
-          return;
+        // Torn down during the GET → don't touch the outer sync hook (it now
+        // tracks a different file); fall through and let the write land.
+        if (mountedRef.current) {
+          const outcome = finishCheck(serverContent);
+          if (outcome === "conflict") return;
+          // A refresh landed during the GET, so its response and `value` may be
+          // older than what's shown: start over from the current buffer.
+          if (outcome === "stale") return handleSaveRef.current(getContent());
+          // Clean again after the GET (undone, or a refresh applied newer server
+          // content): writing the captured value would overwrite what's shown.
+          if (!isEditorDirty()) {
+            setDirty(false);
+            return;
+          }
         }
         await writeFileRef.current.mutateAsync({ path, content: value });
         // The write lands regardless, but if this editor was torn down mid-write
@@ -161,11 +167,13 @@ export function useEditorAutoSave({
       setDirty,
       dismissExternalUpdate,
       markSaved,
-      reconcileServerContent,
+      beginServerCheck,
       baselineRef,
+      getContent,
       isEditorDirty,
     ],
   );
+  handleSaveRef.current = handleSave;
 
   // Auto-save is suppressed when read-only, the workspace is unreachable, or an
   // external-edit conflict is unresolved (user must pick Keep mine / Load latest

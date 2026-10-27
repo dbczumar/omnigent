@@ -29,7 +29,7 @@ import { isWorkspaceRelativeSrc, resolveWorkspacePath } from "./TipTapWorkspaceI
 import { ToolbarPlugin } from "./MarkdownEditorToolbar";
 import { TableHandles } from "./TableBubbleMenu";
 import { TruncatedBanner } from "./TruncatedBanner";
-import { useMarkdownEditorSync } from "./useMarkdownEditorSync";
+import { type FinishServerCheck, useMarkdownEditorSync } from "./useMarkdownEditorSync";
 import { useScrollRestore } from "./useScrollRestore";
 import { useEditorAutoSave } from "./useEditorAutoSave";
 import { MarkdownCommentPlugin } from "./MarkdownCommentPlugin";
@@ -126,7 +126,7 @@ export function MarkdownRichTextViewer({
     discardAndApplyExternal,
     dismissExternalUpdate,
     markSaved,
-    reconcileServerContent,
+    beginServerCheck,
   } = useMarkdownEditorSync({
     content,
     path,
@@ -159,7 +159,7 @@ export function MarkdownRichTextViewer({
       discardAndApplyExternal={discardAndApplyExternal}
       dismissExternalUpdate={dismissExternalUpdate}
       markSaved={markSaved}
-      reconcileServerContent={reconcileServerContent}
+      beginServerCheck={beginServerCheck}
       comments={comments}
       activeSelection={activeSelection}
       onSetActiveSelection={onSetActiveSelection}
@@ -192,7 +192,7 @@ interface InnerProps {
   discardAndApplyExternal: () => void;
   dismissExternalUpdate: () => void;
   markSaved: (content: string) => void;
-  reconcileServerContent: (serverContent: string) => boolean;
+  beginServerCheck: () => FinishServerCheck;
   comments: Comment[];
   activeSelection: ActiveSelection | null;
   onSetActiveSelection: (sel: ActiveSelection | null) => void;
@@ -218,7 +218,7 @@ function MarkdownRichTextViewerInner({
   discardAndApplyExternal,
   dismissExternalUpdate,
   markSaved,
-  reconcileServerContent,
+  beginServerCheck,
   comments,
   activeSelection,
   onSetActiveSelection,
@@ -332,7 +332,7 @@ function MarkdownRichTextViewerInner({
     setDirty,
     hasExternalUpdate,
     markSaved: markDocumentSaved,
-    reconcileServerContent,
+    beginServerCheck,
     dismissExternalUpdate,
     baselineRef,
     getContent,
