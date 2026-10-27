@@ -708,6 +708,30 @@ describe("useFileContent on-screen refresh", () => {
     expect(fetchMock).toHaveBeenCalledTimes(4);
   });
 
+  it.each([
+    ["a large text file", textFile("", FILE_CONTENT_POLL_MAX_BYTES + 1)],
+    ["a binary preview", { ...textFile("YWJj"), encoding: "base64" as const }],
+  ])("does not poll %s, but re-reads it when shown again", async (_name, file) => {
+    fetchMock.mockResolvedValue(jsonResponse(file));
+    const StableWrap = stableWrap(
+      new QueryClient({ defaultOptions: { queries: { retry: false } } }),
+    );
+    const view = (visible: boolean) => (
+      <StableWrap>
+        <ScreenProbe visible={visible} />
+      </StableWrap>
+    );
+    const { rerender } = render(view(true));
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(FILE_CONTENT_POLL_MS * 3);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    rerender(view(false));
+    rerender(view(true));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
   it("re-checks less often while refreshes fail, e.g. after the file is deleted", async () => {
     render(
       <Wrap>

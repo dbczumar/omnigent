@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Editor } from "@tiptap/core";
+import { NodeSelection } from "@tiptap/pm/state";
 import { createMarkdownDocumentExtensions } from "./markdownDocumentExtensions";
 import { installMarkdownParserPatch } from "./tiptapMarkdownPatches";
 import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
@@ -404,6 +405,30 @@ describe("applyExternalMarkdown", () => {
     applyExternalMarkdown(ed, after);
     expect(ed.state.doc.toJSON()).toEqual(replacedDocument(after));
     expect(ed.state.selection.from).toBe(positionAfter(ed.state.doc, "Anchor"));
+  });
+
+  it("tells selection listeners where the caret ended up", () => {
+    const ed = openEditor("First paragraph.\n\nSecond paragraph.\n");
+    ed.commands.setTextSelection(positionAfter(ed.state.doc, "Second"));
+    const seen: number[] = [];
+    ed.on("selectionUpdate", ({ editor: updated }) => seen.push(updated.state.selection.from));
+
+    applyExternalMarkdown(ed, "# Added title\n\nFirst paragraph.\n\nSecond paragraph.\n");
+    expect(seen.at(-1)).toBe(positionAfter(ed.state.doc, "Second"));
+  });
+
+  it("keeps a selected node selected when another writer edits elsewhere", () => {
+    const ed = openEditor("Above.\n\n---\n\nBelow.\n");
+    let rule = -1;
+    ed.state.doc.descendants((node, pos) => {
+      if (node.type.name === "horizontalRule") rule = pos;
+    });
+    ed.commands.setNodeSelection(rule);
+
+    applyExternalMarkdown(ed, "Above, edited.\n\n---\n\nBelow.\n");
+    const { selection } = ed.state;
+    expect(selection).toBeInstanceOf(NodeSelection);
+    expect((selection as NodeSelection).node.type.name).toBe("horizontalRule");
   });
 
   it("clears undo history so undo cannot revert another writer's edit", () => {

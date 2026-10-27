@@ -3,7 +3,7 @@
 
 import type { Editor } from "@tiptap/core";
 import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
-import { EditorState, TextSelection } from "@tiptap/pm/state";
+import { EditorState } from "@tiptap/pm/state";
 import { Mapping, StepMap } from "@tiptap/pm/transform";
 import type { MarkdownManager } from "@tiptap/markdown";
 import { exactIndex, markdownSourceMap, type SourceMap } from "./markdownSourceMap";
@@ -277,10 +277,11 @@ export function remapMarkdownComment(
 /**
  * Replace the editor's document with Markdown another writer saved.
  *
- * The document is exactly what `setContent` produces. The selection maps through
- * the one range that changed, so a caret outside it stays on its text. Undo
- * history is cleared, as Monaco's `setValue` does: an older step could otherwise
- * revert the other writer's edit, and auto-save would persist that.
+ * The document is exactly what `setContent` produces. The selection keeps its
+ * type and maps through the one range that changed, so a caret outside it stays
+ * on its text. Undo history is cleared, as Monaco's `setValue` does: an older
+ * step could otherwise revert the other writer's edit, and auto-save would
+ * persist that.
  *
  * :param editor: A TipTap editor with the Markdown extension.
  * :param markdown: The file's new content, e.g. ``"# Title\n\nBody\n"``.
@@ -289,11 +290,12 @@ export function applyExternalMarkdown(editor: Editor, markdown: string): void {
   const { doc: previous, selection } = editor.state;
   editor.commands.setContent(markdown, { emitUpdate: false, contentType: "markdown" });
   const { doc, plugins } = editor.state;
-  const changed = changedRangeMapping(previous, doc);
-  const $anchor = doc.resolve(changed.map(selection.anchor));
-  const $head = doc.resolve(changed.map(selection.head));
-  editor.view.updateState(
-    EditorState.create({ doc, plugins, selection: TextSelection.between($anchor, $head) }),
+  editor.view.updateState(EditorState.create({ doc, plugins }));
+  // Restore the selection with a dispatch so the toolbar and bubbles see it.
+  editor.view.dispatch(
+    editor.state.tr
+      .setSelection(selection.map(doc, changedRangeMapping(previous, doc)))
+      .setMeta("addToHistory", false),
   );
 }
 
