@@ -842,6 +842,29 @@ describe("useFileContent and this tab's writes", () => {
     expect(result.current.read.data?.content).toBe("before");
   });
 
+  it("never sends a read that was cancelled while waiting for the write", async () => {
+    const { qc, result } = renderFile();
+    await waitFor(() => expect(result.current.read.data?.content).toBe("before"));
+    let saving!: Promise<void>;
+    act(() => {
+      saving = result.current.write.mutateAsync({ path: "notes.md", content: "saved" });
+    });
+    await waitFor(() => expect(calls("PUT")).toBe(1));
+    void qc.refetchQueries({ queryKey: KEY });
+    await flushMicrotasks();
+    await qc.cancelQueries({ queryKey: KEY });
+
+    holdReads = true;
+    await act(async () => {
+      finishWrite();
+      await saving;
+    });
+    // Only the save's own follow-up read goes out; the cancelled one never did.
+    await waitFor(() => expect(calls("GET")).toBe(2));
+    await flushMicrotasks();
+    expect(calls("GET")).toBe(2);
+  });
+
   it("drops a read that was in flight when the write started", async () => {
     const { qc, result } = renderFile();
     await waitFor(() => expect(result.current.read.data?.content).toBe("before"));
@@ -854,7 +877,11 @@ describe("useFileContent and this tab's writes", () => {
     });
     await waitFor(() => expect(calls("PUT")).toBe(1));
 
-    // The server answers that read after applying the write.
+    // The request is aborted, and an answer sent anyway is ignored.
+    const [, heldReadInit] = fetchMock.mock.calls
+      .filter(([, init]) => init?.method !== "PUT")
+      .at(-1)!;
+    expect((heldReadInit as RequestInit).signal?.aborted).toBe(true);
     answerRead("saved");
     await flushMicrotasks();
     expect(qc.getQueryData<FileContentResponse>(KEY)?.content).toBe("before");

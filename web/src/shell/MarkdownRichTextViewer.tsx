@@ -414,15 +414,9 @@ function MarkdownRichTextViewerInner({
     };
   }, [editor, autoSave]);
 
-  // Register an in-place content setter so the outer sync hook can update
-  // the editor without triggering a full remount (preserves scroll/cursor).
-  // The update emits no onUpdate, so we recapture baseline manually,
-  // preventing the editor from being incorrectly flagged as dirty.
-  //
-  // Scroll is saved and restored via requestAnimationFrame: ProseMirror's
-  // selectionToDOM re-establishes the cursor in the new DOM, which can cause
-  // the browser to scroll the selection into view after the replace —
-  // undoing the user's scroll position.
+  // In-place setter for the sync hook; skipping a remount keeps scroll and caret.
+  // It emits no onUpdate, so re-baseline here, and restore scroll next frame
+  // because selectionToDOM can scroll the caret into view.
   useEffect(() => {
     if (!editor) return;
     setContentRef.current = (newContent: string) => {

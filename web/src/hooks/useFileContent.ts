@@ -254,9 +254,11 @@ export function useFileContent(
 
   return useQuery({
     queryKey: ["file-content", serverId, path],
-    queryFn: async () => {
+    queryFn: async ({ signal }) => {
       await fileWritesSettled(serverId!, path!);
-      return fetchFileContent(serverId!, path!);
+      // Cancelled while waiting (a newer write started): don't send the read.
+      signal.throwIfAborted();
+      return fetchFileContent(serverId!, path!, signal);
     },
     enabled: !!serverId && !!path && serveable !== false,
     staleTime: 5_000,

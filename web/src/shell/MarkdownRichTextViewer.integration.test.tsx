@@ -436,13 +436,9 @@ describe("MarkdownRichTextViewer auto-save wiring (integration)", () => {
   });
 
   it("marks the editor clean after a save even if getMarkdown() drifts (no stuck 'Unsaved')", async () => {
-    // Regression guard: TipTap's markdown round-trip is NOT byte-stable, so
-    // re-deriving dirtiness from a live getMarkdown()-vs-baseline string
-    // compare after a save left the editor stuck on "Unsaved" and looping
-    // autosave. The post-save check compares document snapshots instead.
-    // Simulate the drift: the write persists X, but the editor's getMarkdown
-    // afterward is X + whitespace (≠ X) — with no user edit. A successful save
-    // must still end clean.
+    // TipTap's Markdown round-trip isn't byte-stable: the write persists X, then
+    // getMarkdown() returns X plus whitespace with no user edit. The post-save
+    // check compares document snapshots, so a successful save still ends clean.
     const saved: string[] = [];
     vi.mocked(writeHook.useWriteFileContent).mockReturnValue({
       isPending: false,

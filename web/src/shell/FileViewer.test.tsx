@@ -2186,6 +2186,8 @@ describe("FileViewer video files", () => {
 });
 
 describe("FileViewer content refresh", () => {
+  afterEach(() => vi.mocked(useFileContent).mockReset());
+
   it.each([
     { name: "open in the active viewport", open: true, visible: true },
     { name: "closed", open: false, visible: false },
